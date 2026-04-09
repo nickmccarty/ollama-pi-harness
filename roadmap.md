@@ -264,6 +264,69 @@ Install TinyTroupe: `pip install git+https://github.com/microsoft/TinyTroupe.git
 
 ---
 
+## Stage 5 - Retrieval Infrastructure
+
+*Objective: replace brittle lexical retrieval and hard-truncated context with semantic search, chunked document retrieval, and a search result cache. Motivating forcing function: the autoresearch loop runs the same eval tasks repeatedly — DDGS rate limits and latency are already a bottleneck.*
+
+### 5a: Search result cache — highest near-term value
+
+**Problem:** autoresearch runs T_A and T_B on every experiment iteration, making near-identical DDGS queries each time. ~30s of search latency per eval pair, plus rate-limit risk at scale.
+
+**Approach:** cache by normalized query fingerprint → result set. SQLite-based (TTL column, no new services) keeps the zero-external-dependency principle. Redis is the alternative if pub/sub or cross-process invalidation becomes necessary.
+
+**Key parameters:**
+- TTL: 24h — search results go stale but not in hours
+- Cache location: `search_cache.db` (gitignored)
+- Fingerprint: lowercase + stripped query string
+
+**Where to wire in:** `web_search_raw()` in `agent.py` — transparent to the rest of the pipeline.
+
+### 5b: Embedding model + semantic memory retrieval
+
+**Problem:** `memory.py` uses FTS5 BM25 keyword search. Semantic overlap without lexical overlap is missed — "token pruning" and "context compression" describe the same technique and won't co-retrieve.
+
+**Approach:** add an embedding vector column to `memory.db`. At write time, embed the observation narrative + facts. At read time, run both FTS5 and cosine similarity, merge with reciprocal rank fusion (RRF). Keeps SQLite as the store — `sqlite-vec` or `numpy` for similarity.
+
+**Model:** `nomic-embed-text` via Ollama (~270MB, fast, runs locally). Consistent with the no-external-API-keys constraint.
+
+**Shared infrastructure:** the same embedding model feeds both memory retrieval (5b) and chunked URL retrieval (5c). Build once, use twice.
+
+### 5c: Chunked URL content retrieval
+
+**Problem:** MarkItDown URL enrichment currently hard-truncates at `URL_ENRICH_MAX_CHARS = 8000` (first 8k chars). Important content at the end of pages is silently dropped.
+
+**Approach:** chunk each fetched page into ~512-token overlapping segments, embed each chunk, retrieve the top-K chunks most semantically similar to the task string. Replaces "first 8k chars" with "most relevant 8k chars".
+
+**Chunking strategy:**
+- Chunk size: ~512 tokens (~2k chars) with 20% overlap
+- Retrieval: top-3 chunks per URL, concatenated
+- Fallback: if embedding model unavailable, revert to head truncation
+
+**Dependency on 5b:** uses the same `nomic-embed-text` model and embedding infrastructure. Implement 5b first.
+
+### 5d: CLIP multimodal embeddings
+
+**Problem:** vision pipeline (`vision.py`) describes images with `llama3.2-vision` and injects the text description. Images cannot be retrieved by semantic similarity to past observations — every image requires a fresh description call.
+
+**Approach:** embed image inputs with CLIP at preprocessing time. Store image embeddings alongside text observations in `memory.db`. At retrieval time, cross-modal search: task string → text embedding → find relevant past observations that include images.
+
+**Use case:** an agent that has previously analyzed a screenshot of a dashboard can retrieve that observation when given a similar-looking dashboard, without re-running vision.
+
+**Dependency on 5b:** shared embedding infrastructure; CLIP adds a separate image tower.
+
+**When to build:** after 5a–5c are stable and vision use cases have multiplied beyond the current single-image-preprocessing pattern.
+
+### Priority order
+
+| Step | Dependency | Trigger |
+|------|-----------|---------|
+| 5a: Search cache | None | Autoresearch loop hitting DDGS repeatedly |
+| 5b: Embedding model + semantic memory | None | Memory recall misses on semantic overlap |
+| 5c: Chunked URL retrieval | 5b (embedding model) | MarkItDown truncation losing relevant content |
+| 5d: CLIP | 5b (shared infra) | Vision use cases multiply; image retrieval needed |
+
+---
+
 ## Stage 4 - Multimodal Agent Swarm
 
 *Objective: a coordinated swarm of agents handling complex, long-horizon tasks across text, images, code, and structured data.*
