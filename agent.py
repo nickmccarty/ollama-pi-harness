@@ -28,6 +28,13 @@ from security import check_python_code, check_file_path, scan_for_injection, str
 from memory import MemoryStore
 from planner import make_plan, Plan
 
+try:
+    from markitdown import MarkItDown
+    _md_converter = MarkItDown(enable_plugins=False)
+    MARKITDOWN_AVAILABLE = True
+except ImportError:
+    MARKITDOWN_AVAILABLE = False
+
 MODEL = "pi-qwen-32b"
 
 # ---------------------------------------------------------------------------
@@ -54,6 +61,9 @@ PYTHON_TOOL_ROUNDS = 3       # max rounds in the run_python tool loop
 PYTHON_TIMEOUT = 10          # seconds before code execution is killed
 
 TEXT_EXTENSIONS = {".txt", ".py", ".json", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".xml", ".html"}
+RICH_EXTENSIONS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".epub", ".htm"}
+URL_ENRICH_COUNT = 2        # how many search-result URLs to fetch full content for (0 = disabled)
+URL_ENRICH_MAX_CHARS = 8000 # cap per URL to avoid context bloat
 
 PYTHON_TOOLS = [
     {
@@ -91,14 +101,15 @@ def format_results(results: list[dict]) -> str:
 
 
 def detect_text_files(task: str, exclude_path: str = None) -> list[str]:
-    """Find readable text file paths referenced in the task (non-image, non-output)."""
+    """Find readable file paths referenced in the task (non-image, non-output).
+    Returns both plain-text and rich-document paths; caller uses extension to route."""
     pattern = r'(~[\w/\\.\-]+|[A-Za-z]:[\w/\\.\-]+|/[\w/.\-]+)'
     candidates = re.findall(pattern, task)
     found = []
     for c in candidates:
         expanded = os.path.expanduser(c)
         _, ext = os.path.splitext(expanded)
-        if ext.lower() not in TEXT_EXTENSIONS:
+        if ext.lower() not in TEXT_EXTENSIONS and ext.lower() not in RICH_EXTENSIONS:
             continue
         if exclude_path and os.path.abspath(expanded) == os.path.abspath(os.path.expanduser(exclude_path)):
             continue
@@ -108,26 +119,39 @@ def detect_text_files(task: str, exclude_path: str = None) -> list[str]:
 
 
 def read_file_context(paths: list[str]) -> str:
-    """Read text files and return concatenated content blocks."""
+    """Read files and return concatenated content blocks.
+    Rich documents (PDF, DOCX, XLSX, etc.) are converted to markdown via MarkItDown.
+    Plain text files are read directly."""
     blocks = []
     for p in paths:
         ok, reason = check_file_path(p)
         if not ok:
             print(f"  [security] read_file blocked: {reason}")
             continue
-        try:
-            with open(p, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-            # Also scan file contents for injection before injecting into prompt
-            clean, matches = scan_for_injection(content, source=os.path.basename(p))
-            if not clean:
-                print(f"  [security] injection pattern in {os.path.basename(p)} ({len(matches)} match(es)) — stripping")
-                content, removed = strip_injection_candidates(content)  # noqa: F821
-                print(f"  [security] removed {removed} line(s) from file")
-            blocks.append(f"--- {os.path.basename(p)} ---\n{content}")
-            print(f"  [read_file] {p} ({len(content)} chars)")
-        except Exception as e:
-            print(f"  [read_file error] {p}: {e}")
+        _, ext = os.path.splitext(p)
+        if ext.lower() in RICH_EXTENSIONS and MARKITDOWN_AVAILABLE:
+            try:
+                result = _md_converter.convert(p)
+                content = result.text_content or ""
+                print(f"  [markitdown] {os.path.basename(p)} → {len(content)} chars")
+            except Exception as e:
+                print(f"  [markitdown error] {os.path.basename(p)}: {e} — skipping")
+                continue
+        else:
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                print(f"  [read_file] {p} ({len(content)} chars)")
+            except Exception as e:
+                print(f"  [read_file error] {p}: {e}")
+                continue
+        # Injection scan applies to all sources
+        clean, matches = scan_for_injection(content, source=os.path.basename(p))
+        if not clean:
+            print(f"  [security] injection pattern in {os.path.basename(p)} ({len(matches)} match(es)) — stripping")
+            content, removed = strip_injection_candidates(content)
+            print(f"  [security] removed {removed} line(s) from file")
+        blocks.append(f"--- {os.path.basename(p)} ---\n{content}")
     return "\n\n".join(blocks)
 
 
@@ -195,6 +219,43 @@ def run_tool_loop(task: str, research_context: str, trace: RunTrace, producer_mo
                 messages.append({"role": "tool", "content": result, "name": "run_python"})
 
     return "\n\n".join(execution_log)
+
+
+def fetch_url_content(url: str) -> str:
+    """Fetch a URL and convert its HTML to markdown via MarkItDown. Returns empty string on failure."""
+    if not MARKITDOWN_AVAILABLE:
+        return ""
+    try:
+        result = _md_converter.convert(url)
+        text = (result.text_content or "").strip()
+        if len(text) > URL_ENRICH_MAX_CHARS:
+            text = text[:URL_ENRICH_MAX_CHARS] + "\n[truncated]"
+        return text
+    except Exception:
+        return ""
+
+
+def enrich_with_page_content(results: list[dict], count: int) -> str:
+    """Fetch full page content for the top `count` search results. Returns a context block."""
+    if not MARKITDOWN_AVAILABLE or count == 0:
+        return ""
+    blocks = []
+    fetched = 0
+    for r in results:
+        if fetched >= count:
+            break
+        url = r.get("href", "")
+        if not url.startswith("http"):
+            continue
+        print(f"  [markitdown] fetching {url[:60]}...")
+        content = fetch_url_content(url)
+        if content:
+            blocks.append(f"**Full page: {r.get('title', url)}**\n{url}\n\n{content}")
+            fetched += 1
+            print(f"    → {len(content)} chars")
+        else:
+            print(f"    → failed or empty")
+    return "\n\n---\n\n".join(blocks)
 
 
 def merge_results(sets: list[list[dict]]) -> list[dict]:
@@ -283,6 +344,14 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
         trace.log_tool_call("web_search", fallback_query, len(format_results(results_fallback)))
         trace.log_search_quality(total_chars)
         print(f"  [research] after fallback: {len(merged)} results, {total_chars} chars")
+
+    # URL enrichment — fetch full page content for top results via MarkItDown
+    if URL_ENRICH_COUNT > 0 and MARKITDOWN_AVAILABLE:
+        print(f"  [markitdown] enriching top {URL_ENRICH_COUNT} URL(s)...")
+        page_content = enrich_with_page_content(merged, URL_ENRICH_COUNT)
+        if page_content:
+            merged_text = merged_text + "\n\n## Full page content\n\n" + page_content
+            print(f"  [markitdown] added {len(page_content)} chars of page content")
 
     # Injection scan — strip suspicious lines from search results before synthesis
     clean, injection_matches = scan_for_injection(merged_text, source="web_search")
