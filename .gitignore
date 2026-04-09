@@ -52,3 +52,4 @@ llama.cpp/
 
 # Knowledge graph outputs (generated artifacts)
 graphs/*.html
+graphs/*.png

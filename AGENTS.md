@@ -9,7 +9,8 @@ conda activate ollama-pi
 ```
 
 Key dependencies: `ollama`, `ddgs`, `markitdown`, `jinja2`, `chromadb`,
-`sentence-transformers`, `torch` (cu118), `graphviz`, `requests`, `Pillow`.
+`sentence-transformers`, `torch` (cu118), `graphviz`, `requests`, `Pillow`,
+`playwright` (+ `playwright install chromium` for KG screenshots).
 
 ## Directory layout
 
@@ -41,7 +42,7 @@ harness-engineering/
 | `memory.py` | Observation store — SQLite + ChromaDB semantic retrieval + `assess_novelty()` |
 | `autoresearch.py` | Autonomous synthesis instruction improvement loop |
 | `search_cache.py` | SQLite TTL cache for DDGS queries |
-| `kg_gen.py` | Knowledge graph generator — Ollama → D3.js HTML via Jinja2 |
+| `kg_gen.py` | Knowledge graph generator — Ollama → D3.js HTML via Jinja2; `--screenshot` flag captures PNG via Playwright |
 | `kg_template.html.j2` | D3.js force-directed graph template |
 | `eval_suite.py` | Regression harness — `--score --tasks T_D,T_E` for autoresearch |
 | `wiki_tools.py` | Python-deterministic wiki maintenance (index / log / lint) |

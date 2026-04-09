@@ -215,6 +215,39 @@ def refine_kg(article: str, graph_data: dict, critique: str, model: str, num_nod
     return data
 
 
+def screenshot_kg(html_path: Path, output_path: Path = None) -> Path:
+    """
+    Render the KG HTML in a headless Chromium browser via Playwright and save a PNG screenshot.
+
+    Waits for the D3 force simulation and zoom-to-fit transition to complete
+    (signalled by `data-kg-ready` on <body>) before capturing.
+
+    Requires:
+        pip install playwright
+        playwright install chromium
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError(
+            "playwright not installed — run: pip install playwright && playwright install chromium"
+        )
+
+    if output_path is None:
+        output_path = html_path.with_suffix(".png")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1600, "height": 900})
+        page.goto(html_path.resolve().as_uri())
+        # Wait for simulation + zoom-to-fit transition to finish (up to 30s)
+        page.wait_for_selector("[data-kg-ready]", timeout=30_000)
+        page.screenshot(path=str(output_path))
+        browser.close()
+
+    return output_path
+
+
 def render_html(graph_data: dict, output_path: Path, title: str, model: str, article_snippet: str) -> Path:
     """Render the knowledge graph to a self-contained HTML file via Jinja2."""
     template_path = Path(__file__).parent / TEMPLATE_FILE
@@ -262,6 +295,8 @@ def main():
                         help="Graph title shown in the UI")
     parser.add_argument("--no-open", action="store_true",
                         help="Don't auto-open in browser after rendering")
+    parser.add_argument("--screenshot", "-s", action="store_true",
+                        help="Take a PNG screenshot via Playwright headless Chromium")
     args = parser.parse_args()
 
     # Load article text
@@ -305,6 +340,15 @@ def main():
     size_kb = output_path.stat().st_size // 1024
     print(f"\n[done] {output_path.resolve()}")
     print(f"       {len(graph_data['nodes'])} nodes, {len(graph_data['edges'])} edges, {size_kb} KB")
+
+    if args.screenshot:
+        print("\n[screenshot] launching headless Chromium...")
+        try:
+            shot_path = screenshot_kg(output_path)
+            print(f"[screenshot] saved: {shot_path.resolve()}")
+            print(f"             markdown: ![{args.title}]({shot_path.resolve().as_posix()})")
+        except RuntimeError as e:
+            print(f"[screenshot] skipped — {e}")
 
     if not args.no_open:
         webbrowser.open(output_path.resolve().as_uri())
