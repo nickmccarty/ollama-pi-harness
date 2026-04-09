@@ -39,3 +39,7 @@ _smoke*.md
 
 # Images (test fixtures, not source)
 test-vision.png
+
+# Autoresearch
+autoresearch.tsv
+wiggum_test_output.md

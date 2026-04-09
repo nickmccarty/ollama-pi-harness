@@ -17,6 +17,7 @@ Environment:
     conda activate ollama-pi
 """
 
+import json
 import os
 import re
 import sys
@@ -222,6 +223,77 @@ def check_task(task_def: dict) -> list[dict]:
     return results
 
 
+def score_suite(task_ids: list[str] | None = None, runs_jsonl: str = "runs.jsonl") -> float:
+    """
+    Run a subset of SUITE tasks and return a composite float metric for autoresearch.
+
+    Composite = 0.7 * mean_wiggum_r1 + 0.3 * criteria_rate * 10
+
+    Wiggum r1 score comes from the most recent runs.jsonl entries matching the
+    eval task fingerprints. Criteria rate is the fraction of content criteria passed.
+
+    task_ids: list of task IDs to run (e.g. ["T_A", "T_B"]). None = all.
+    Returns a float in [0, 10].
+    """
+    tasks = [t for t in SUITE if task_ids is None or t["id"] in task_ids]
+    if not tasks:
+        return 0.0
+
+    # Note run count before
+    try:
+        with open(runs_jsonl, encoding="utf-8") as f:
+            n_before = sum(1 for l in f if l.strip())
+    except FileNotFoundError:
+        n_before = 0
+
+    # Run tasks
+    for task_def in tasks:
+        run_task(task_def, use_wiggum=True)
+
+    # Read new runs.jsonl entries
+    try:
+        with open(runs_jsonl, encoding="utf-8") as f:
+            all_runs = [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        all_runs = []
+
+    new_runs = all_runs[n_before:]
+
+    # Extract wiggum r1 scores for our tasks
+    FINGERPRINTS = {
+        "T_A": "top 5 context engineering",
+        "T_B": "cost envelope management",
+        "T_C": "3 most common failure modes",
+        "T_D": "context window management strategies",
+        "T_E": "prompt injection defense",
+    }
+    fingerprints = {t["id"]: FINGERPRINTS.get(t["id"], t["id"]) for t in tasks}
+
+    wiggum_scores = []
+    for run in new_runs:
+        task_str = run.get("task", "").lower()
+        for tid, fp in fingerprints.items():
+            if fp.lower() in task_str:
+                scores = run.get("wiggum_scores", [])
+                if scores:
+                    wiggum_scores.append(scores[0])
+                break
+
+    mean_wiggum = sum(wiggum_scores) / len(wiggum_scores) if wiggum_scores else 0.0
+
+    # Content criteria
+    total_criteria = 0
+    passed_criteria = 0
+    for task_def in tasks:
+        results = check_task(task_def)
+        total_criteria += len(results)
+        passed_criteria += sum(1 for r in results if r["passed"])
+    criteria_rate = passed_criteria / total_criteria if total_criteria else 0.0
+
+    composite = round(0.7 * mean_wiggum + 0.3 * criteria_rate * 10, 3)
+    return composite
+
+
 def print_results(task_def: dict, results: list[dict]):
     passed_all = all(r["passed"] for r in results)
     status = "PASS" if passed_all else "FAIL"
@@ -236,6 +308,17 @@ def print_results(task_def: dict, results: list[dict]):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # --score [--tasks T_A,T_B] — machine-readable composite float for autoresearch
+    if "--score" in sys.argv:
+        task_ids = None
+        if "--tasks" in sys.argv:
+            idx = sys.argv.index("--tasks")
+            if idx + 1 < len(sys.argv):
+                task_ids = [t.strip() for t in sys.argv[idx + 1].split(",")]
+        score = score_suite(task_ids=task_ids)
+        print(f"{score:.3f}")
+        sys.exit(0)
+
     fast = "--fast" in sys.argv
     no_wiggum = "--no-wiggum" in sys.argv
 

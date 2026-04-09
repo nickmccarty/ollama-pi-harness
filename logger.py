@@ -15,15 +15,19 @@ LOG_PATH = os.path.join(os.path.dirname(__file__), "runs.jsonl")
 
 def _extract_usage(response) -> dict:
     """
-    Pull token counts and timing from an ollama ChatResponse.
-    Returns zeros for any missing fields (safe to call on any response).
+    Pull token counts, timing, and thinking content from an ollama ChatResponse.
+    Returns zeros/empty for any missing fields (safe to call on any response).
     """
+    msg = getattr(response, "message", None)
+    thinking = (getattr(msg, "thinking", None) or "") if msg is not None else ""
     return {
-        "input_tokens":  getattr(response, "prompt_eval_count", 0) or 0,
-        "output_tokens": getattr(response, "eval_count", 0) or 0,
-        "total_ms":      round((getattr(response, "total_duration", 0) or 0) / 1e6, 1),
-        "eval_ms":       round((getattr(response, "eval_duration",  0) or 0) / 1e6, 1),
-        "prompt_ms":     round((getattr(response, "prompt_eval_duration", 0) or 0) / 1e6, 1),
+        "input_tokens":   getattr(response, "prompt_eval_count", 0) or 0,
+        "output_tokens":  getattr(response, "eval_count", 0) or 0,
+        "total_ms":       round((getattr(response, "total_duration", 0) or 0) / 1e6, 1),
+        "eval_ms":        round((getattr(response, "eval_duration",  0) or 0) / 1e6, 1),
+        "prompt_ms":      round((getattr(response, "prompt_eval_duration", 0) or 0) / 1e6, 1),
+        "thinking":       thinking,
+        "thinking_chars": len(thinking),
     }
 
 
@@ -74,6 +78,7 @@ class RunTrace:
             "wiggum_rounds":        0,
             "wiggum_scores":        [],
             "wiggum_dims":          [],
+            "wiggum_eval_log":      [],   # [{round, score, dims, issues, feedback}] per round
 
             "final":                None,
         }
@@ -84,7 +89,7 @@ class RunTrace:
 
     def log_usage(self, response, stage: str = "other"):
         """
-        Accumulate token counts and latency from one ollama.chat response.
+        Accumulate token counts, latency, and thinking chars from one ollama.chat response.
         Call immediately after every ollama.chat() call.
         stage: "search_query" | "synth" | "synth_count" | "tool_loop" |
                "wiggum_eval" | "wiggum_revise" | "planner" | "memory" | "other"
@@ -93,11 +98,14 @@ class RunTrace:
         self.data["input_tokens"]  += u["input_tokens"]
         self.data["output_tokens"] += u["output_tokens"]
 
-        s = self.data["tokens_by_stage"].setdefault(stage, {"input": 0, "output": 0, "calls": 0, "total_ms": 0})
-        s["input"]    += u["input_tokens"]
-        s["output"]   += u["output_tokens"]
-        s["calls"]    += 1
-        s["total_ms"] += u["total_ms"]
+        s = self.data["tokens_by_stage"].setdefault(
+            stage, {"input": 0, "output": 0, "thinking_chars": 0, "calls": 0, "total_ms": 0}
+        )
+        s["input"]          += u["input_tokens"]
+        s["output"]         += u["output_tokens"]
+        s["thinking_chars"] += u["thinking_chars"]
+        s["calls"]          += 1
+        s["total_ms"]       += u["total_ms"]
 
     # ------------------------------------------------------------------
     # Existing log methods
@@ -147,6 +155,17 @@ class RunTrace:
         self.data["wiggum_dims"]   = [r.get("dims", {}) for r in rounds]
         self.data["task_type"]     = wiggum_trace.get("task_type")
         self.data["final"]         = wiggum_trace.get("final")
+        self.data["wiggum_eval_log"] = [
+            {
+                "round":    r["round"],
+                "score":    r["score"],
+                "dims":     r.get("dims", {}),
+                "issues":   r.get("issues", []),
+                "feedback": r.get("feedback", ""),
+                **({"thinking": r["thinking"]} if r.get("thinking") else {}),
+            }
+            for r in rounds
+        ]
 
         # Merge token stats from wiggum if present
         for stage, vals in wiggum_trace.get("tokens_by_stage", {}).items():

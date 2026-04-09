@@ -39,7 +39,7 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
-PRODUCER_MODEL = "pi-qwen"
+PRODUCER_MODEL = "pi-qwen-32b"
 EVALUATOR_MODEL = "Qwen3-Coder:30b"
 MAX_ROUNDS = 3
 PASS_THRESHOLD = 8.0
@@ -197,6 +197,9 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
     if _trace is not None:
         _trace.log_usage(response, stage="wiggum_eval")
 
+    # Capture thinking content if the evaluator model supports it
+    thinking = getattr(response.message, "thinking", None) or ""
+
     raw = response["message"]["content"].strip()
 
     # Strip markdown code fences if present
@@ -223,6 +226,11 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
 
     # Enforce threshold
     result["passed"] = composite >= PASS_THRESHOLD
+
+    # Attach thinking content if present (non-empty only)
+    if thinking:
+        result["thinking"] = thinking
+
     return result
 
 
@@ -322,13 +330,15 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
                 print(f"    - {issue}")
 
         round_record = {
-            "round": round_num,
-            "score": score,
-            "dims": dims,
-            "passed": passed,
-            "issues": issues,
+            "round":    round_num,
+            "score":    score,
+            "dims":     dims,
+            "passed":   passed,
+            "issues":   issues,
             "feedback": feedback,
         }
+        if result.get("thinking"):
+            round_record["thinking"] = result["thinking"]
         trace["rounds"].append(round_record)
 
         if passed:

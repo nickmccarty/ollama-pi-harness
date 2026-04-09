@@ -28,7 +28,25 @@ from security import check_python_code, check_file_path, scan_for_injection, str
 from memory import MemoryStore
 from planner import make_plan, Plan
 
-MODEL = "pi-qwen"
+MODEL = "pi-qwen-32b"
+
+# ---------------------------------------------------------------------------
+# Synthesis instruction — the text appended to every synthesis prompt.
+# This is the primary target for autoresearch.py experiments.
+# autoresearch.py reads and rewrites SYNTH_INSTRUCTION between the sentinels.
+# Do not rename the sentinels or move them off their own lines.
+# ---------------------------------------------------------------------------
+# AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
+SYNTH_INSTRUCTION = (
+    "Using the findings above, output ONLY the markdown document starting with # — no preamble, no commentary, no file path references, no explanation. Each item must include a concrete implementation note or example. Do not mention where the file will be saved."
+)
+# AUTORESEARCH:SYNTH_INSTRUCTION:END
+
+# AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
+SYNTH_INSTRUCTION_COUNT = (
+    "Output ONLY the markdown document starting with # — no preamble, no commentary, no file path references, no explanation. Each item must include a concrete implementation note or example. Do not mention where the file will be saved."
+)
+# AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 SEARCHES_PER_TASK = 2       # always run this many searches before synthesizing
 SEARCH_QUALITY_FLOOR = 1800  # total merged chars — below this, run one more search
 MAX_RESULTS_PER_SEARCH = 5
@@ -289,10 +307,7 @@ def synthesize(task: str, research_context: str, vision_context: str = "", file_
         f"Task: {task}\n\n"
         f"Research findings:\n{research_context}\n"
         f"{vision_block}{file_block}{code_block}{memory_block}\n"
-        "Using the findings above, output ONLY the markdown document starting with # — "
-        "no preamble, no commentary, no file path references, no explanation. "
-        "Each item must include a concrete implementation note or example. "
-        "Do not mention where the file will be saved."
+        f"{SYNTH_INSTRUCTION}"
     )
     response = ollama.chat(
         model=producer_model,
@@ -345,10 +360,7 @@ def synthesize_with_count(task: str, research_context: str, expected_count: int,
         f"{vision_block}{file_block}{code_block}{memory_block}\n"
         f"IMPORTANT: You must produce EXACTLY {expected_count} numbered sections "
         f"(## 1. ... through ## {expected_count}. ...) — no more, no fewer. "
-        "Output ONLY the markdown document starting with # — "
-        "no preamble, no commentary, no file path references, no explanation. "
-        "Each item must include a concrete implementation note or example. "
-        "Do not mention where the file will be saved."
+        f"{SYNTH_INSTRUCTION_COUNT}"
     )
     response = ollama.chat(
         model=producer_model,
