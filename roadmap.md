@@ -342,6 +342,47 @@ blob = struct.pack(f"{len(embedding)}f", *embedding)   # sqlite-vec binary forma
 
 **When to build:** after 5a–5c are stable and vision use cases have multiplied beyond the current single-image-preprocessing pattern.
 
+### 5e: Perfetto trace instrumentation
+
+**Problem:** `runs.jsonl` captures token counts and stage timing as aggregates, but gives no flame-graph view of wall time. It's hard to see whether a slow run is bottlenecked on Ollama inference, DDGS latency, MarkItDown URL fetching, or wiggum rounds — and impossible to compare the shape of runs across task types or producer sizes.
+
+**Approach:** emit a Perfetto JSON trace file (`.perfetto-trace`) alongside `runs.jsonl` for every run. `logger.py` is the integration point — `RunTrace` already has monotonic start times and stage boundaries; it just needs to accumulate begin/end events and flush them at `finish()`.
+
+**Trace format:** Perfetto's JSON trace event format (`"ph": "B"` / `"ph": "E"` slices, `"ph": "M"` metadata). Load at `ui.perfetto.dev` — no install required.
+
+```python
+# Slice with annotations
+{"ph": "B", "pid": 1, "tid": 1, "ts": t_us, "name": "wiggum_eval",
+ "args": {"round": 2, "score": 7.0, "task_type": "enumerated", "model": "Qwen3-Coder:30b"}}
+{"ph": "E", "pid": 1, "tid": 1, "ts": t_us, "name": "wiggum_eval"}
+```
+
+**Annotations — embed at trace time, not post-hoc:**
+
+All the metadata needed for useful analysis already flows through `RunTrace`. Key annotations per span:
+
+| Span | Annotations |
+|------|------------|
+| `gather_research` | `total_search_chars`, `quality_floor_hit`, query strings |
+| `markitdown_fetch` | URL, chars returned, success/fail per URL |
+| `tool_loop` | round number, blocked/allowed, code length |
+| `synth` | `count_check_retry`, expected vs actual section count |
+| `wiggum_eval` (per round) | round, score, dims, `task_type` |
+| `wiggum_revise` (per round) | round, producer model |
+| `planner` | `task_type`, `complexity`, `expected_sections` |
+| run-level metadata | `producer_model`, `evaluator_model`, `memory_hits` |
+
+Annotations embedded at write time are worth far more than reconstructing context post-hoc. A trace without `task_type` and `score` on wiggum spans is just timing bars.
+
+**Views it unlocks:**
+- Flame graph of wall time — which stage actually dominates?
+- MarkItDown URL fetch cost vs inference time — is the 6× context gain worth it?
+- Wiggum round cost breakdown — evaluator vs producer in revision
+- Cross-run comparison filtered by `task_type` or `producer_model`
+- Flag every run where `quality_floor_hit=True` and see what that looks like in the trace
+
+**Trace file location:** `traces/<run_timestamp>.perfetto-trace` (gitignored).
+
 ### Priority order
 
 | Step | Dependency | Trigger |
@@ -350,6 +391,7 @@ blob = struct.pack(f"{len(embedding)}f", *embedding)   # sqlite-vec binary forma
 | 5b: Embedding model + semantic memory | None | Memory recall misses on semantic overlap |
 | 5c: Chunked URL retrieval | 5b (embedding model) | MarkItDown truncation losing relevant content |
 | 5d: CLIP | 5b (shared infra) | Vision use cases multiply; image retrieval needed |
+| 5e: Perfetto traces | None | Need flame-graph view of run wall time and bottleneck identification |
 
 ---
 
