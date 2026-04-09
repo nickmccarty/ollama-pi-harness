@@ -53,6 +53,10 @@ EVALUATOR_MODEL = "Qwen3-Coder:30b"
 MAX_ROUNDS = 3
 PASS_THRESHOLD = 8.0
 
+# WIGGUM_PANEL=1 enables the TinyTroupe multi-persona panel after each evaluate() call.
+# Panel issues are merged into the revision prompt for richer feedback.
+_PANEL_ENABLED = os.environ.get("WIGGUM_PANEL", "0").strip() == "1"
+
 
 # ---------------------------------------------------------------------------
 # Normalization
@@ -339,6 +343,20 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         passed = result.get("passed", False)
         issues = [i for i in result.get("issues", []) if i and str(i).strip().lower() not in ("none", "n/a", "")]
         feedback = result.get("feedback", "")
+
+        # 2b. Optional panel — augments issues with multi-persona perspectives
+        panel_reviews = []
+        if _PANEL_ENABLED:
+            from panel import run_panel, panel_issues
+            print(f"\n  [panel] running 3-persona evaluation panel...")
+            panel_reviews = run_panel(task, content, evaluator_model)
+            panel_issue_list = panel_issues(panel_reviews)
+            if panel_issue_list:
+                # Merge panel issues: deduplicate against wiggum issues
+                existing = {i.lower() for i in issues}
+                new_panel_issues = [i for i in panel_issue_list if i.lower() not in existing]
+                issues = issues + new_panel_issues
+                print(f"  [panel] added {len(new_panel_issues)} new issue(s) from panel")
         dims = result.get("dims", {})
 
         abbrev = {"relevance": "rel", "completeness": "cmp", "depth": "dep", "specificity": "spc", "structure": "str"}
@@ -358,6 +376,8 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         }
         if result.get("thinking"):
             round_record["thinking"] = result["thinking"]
+        if panel_reviews:
+            round_record["panel_reviews"] = panel_reviews
         trace["rounds"].append(round_record)
 
         if passed:
