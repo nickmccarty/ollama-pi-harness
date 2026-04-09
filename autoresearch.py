@@ -126,8 +126,9 @@ def _parse_instruction_value(block: str) -> str:
 
 def _build_instruction_block(var_name: str, value: str) -> str:
     """Build a SYNTH_INSTRUCTION = (...) block from a plain string value."""
-    # Escape any double quotes in the value
-    escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+    # Collapse to single line, then escape for a Python string literal
+    single_line = " ".join(value.splitlines()).strip()
+    escaped = single_line.replace('\\', '\\\\').replace('"', '\\"')
     return f'{var_name} = (\n    "{escaped}"\n)'
 
 
@@ -380,6 +381,7 @@ Rules:
   - Both instructions must still say "output ONLY the markdown starting with #"
   - Make one focused change; don't try to fix everything at once
   - If history shows a change was DISCARDed, don't repeat it
+  - CRITICAL: the instruction is a SHORT directive (1-4 sentences, under 600 chars). Do NOT output an example document, markdown content, or code — only the instruction text that tells the model how to write its output.
 
 Output ONLY valid JSON (no preamble, no markdown fences):
 {{
@@ -424,6 +426,17 @@ def propose_instructions(current: dict, history: str, eval_feedback: str, resear
     for key in ("synth", "synth_count", "description"):
         if key not in result:
             print(f"  [propose] missing key '{key}' in response")
+            return None
+
+    # Sanity check: reject if proposer hallucinated a document as the instruction
+    MAX_INSTRUCTION_CHARS = 1200
+    for key in ("synth", "synth_count"):
+        val = result[key]
+        if len(val) > MAX_INSTRUCTION_CHARS:
+            print(f"  [propose] rejected: {key} too long ({len(val)} chars > {MAX_INSTRUCTION_CHARS}) — proposer likely hallucinated a document")
+            return None
+        if val.count("\n") > 3:
+            print(f"  [propose] rejected: {key} contains {val.count(chr(10))} newlines — proposer likely hallucinated a document")
             return None
 
     return result

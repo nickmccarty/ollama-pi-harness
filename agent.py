@@ -27,7 +27,6 @@ from vision import extract_image_context, detect_image_paths
 from security import check_python_code, check_file_path, scan_for_injection, strip_injection_candidates
 from memory import MemoryStore
 from planner import make_plan, Plan
-from search_cache import cached_search
 
 try:
     from markitdown import MarkItDown
@@ -84,19 +83,14 @@ PYTHON_TOOLS = [
 ]
 
 
-def _ddgs_fetch(query: str, max_results: int = MAX_RESULTS_PER_SEARCH) -> list[dict]:
-    """Raw DDGS fetch — used as fallback by cached_search."""
+def web_search_raw(query: str, max_results: int = MAX_RESULTS_PER_SEARCH) -> list[dict]:
+    """Return raw result dicts from DDGS."""
     try:
         with DDGS() as ddgs:
             return list(ddgs.text(query, max_results=max_results))
     except Exception as e:
         print(f"  [web_search error] {e}")
         return []
-
-
-def web_search_raw(query: str, max_results: int = MAX_RESULTS_PER_SEARCH) -> list[dict]:
-    """Return search results, served from cache when fresh."""
-    return cached_search(query, _ddgs_fetch, max_results=max_results)
 
 
 def format_results(results: list[dict]) -> str:
@@ -296,7 +290,7 @@ def generate_second_query(task: str, first_query: str, first_results: str, produ
     return response["message"]["content"].strip().strip('"')
 
 
-def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL, task_type: str = None) -> str:
+def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL) -> str:
     """
     Run SEARCHES_PER_TASK searches, merge results, check quality floor.
     Uses planned_queries when provided; falls back to auto-generation otherwise.
@@ -351,11 +345,10 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
         trace.log_search_quality(total_chars)
         print(f"  [research] after fallback: {len(merged)} results, {total_chars} chars")
 
-    # URL enrichment — skip for enumerated tasks (inflates prose → count_check_retry)
-    enrich_count = 0 if task_type == "enumerated" else URL_ENRICH_COUNT
-    if enrich_count > 0 and MARKITDOWN_AVAILABLE:
-        print(f"  [markitdown] enriching top {enrich_count} URL(s)...")
-        page_content = enrich_with_page_content(merged, enrich_count)
+    # URL enrichment — fetch full page content for top results via MarkItDown
+    if URL_ENRICH_COUNT > 0 and MARKITDOWN_AVAILABLE:
+        print(f"  [markitdown] enriching top {URL_ENRICH_COUNT} URL(s)...")
+        page_content = enrich_with_page_content(merged, URL_ENRICH_COUNT)
         if page_content:
             merged_text = merged_text + "\n\n## Full page content\n\n" + page_content
             print(f"  [markitdown] added {len(page_content)} chars of page content")
@@ -553,7 +546,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
         full_memory_context = "\n\n".join(filter(None, [memory_context, plan_ctx]))
 
         print("\n[turn 1] researching...\n")
-        context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model, task_type=plan.task_type)
+        context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model)
 
         # run_python tool loop — optional pre-synthesis code execution
         code_context = ""
