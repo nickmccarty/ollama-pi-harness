@@ -38,16 +38,32 @@ import time
 
 import ollama
 
+try:
+    from ddgs import DDGS
+    _ddgs = DDGS()
+    DDGS_AVAILABLE = True
+except Exception:
+    DDGS_AVAILABLE = False
+
+try:
+    from markitdown import MarkItDown
+    _md = MarkItDown(enable_plugins=False)
+    MARKITDOWN_AVAILABLE = True
+except ImportError:
+    MARKITDOWN_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-PROPOSER_MODEL  = "Qwen3-Coder:30b"   # stronger than producer — proposes improvements
-EVAL_TASKS      = ["T_A", "T_B"]      # subset for speed; T_A (enumerated) + T_B (open)
-DELTA_THRESHOLD = 0.1                  # minimum score improvement to keep a change
-TSV_PATH        = "autoresearch.tsv"
-AGENT_PATH      = "agent.py"
-RUNS_JSONL      = "runs.jsonl"
+PROPOSER_MODEL      = "Qwen3-Coder:30b"   # stronger than producer — proposes improvements
+EVAL_TASKS          = ["T_A", "T_B"]      # subset for speed; T_A (enumerated) + T_B (open)
+DELTA_THRESHOLD     = 0.1                  # minimum score improvement to keep a change
+TSV_PATH            = "autoresearch.tsv"
+AGENT_PATH          = "agent.py"
+RUNS_JSONL          = "runs.jsonl"
+RESEARCH_ENABLED    = True                 # gather web context before each proposal
+RESEARCH_MAX_CHARS  = 4000                 # max chars of research context fed to proposer
 
 # Use the same Python interpreter that launched autoresearch.py — ensures the
 # correct conda environment (with ddgs, ollama, etc.) is used for eval subprocesses.
@@ -230,6 +246,92 @@ def get_run_count() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Pre-proposal research
+# ---------------------------------------------------------------------------
+
+_RESEARCH_QUERIES = [
+    "effective LLM synthesis prompt engineering depth specificity",
+    "prompt instruction techniques chain-of-thought output quality improvement",
+]
+_RESEARCH_URL_COUNT = 2  # MarkItDown pages to fetch per session
+
+
+def _web_search_brief(query: str, max_results: int = 5) -> str:
+    """Run a DuckDuckGo search and return a compact text snippet."""
+    if not DDGS_AVAILABLE:
+        return ""
+    try:
+        results = list(_ddgs.text(query, max_results=max_results))
+        lines = []
+        for r in results:
+            title = r.get("title", "")
+            body = r.get("body", "")[:200]
+            href = r.get("href", "")
+            lines.append(f"- {title}: {body} ({href})")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _fetch_page(url: str, max_chars: int = 2000) -> str:
+    """Fetch a URL via MarkItDown and return truncated markdown text."""
+    if not MARKITDOWN_AVAILABLE or not url.startswith("http"):
+        return ""
+    try:
+        result = _md.convert(url)
+        text = (result.text_content or "").strip()
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n[truncated]"
+        return text
+    except Exception:
+        return ""
+
+
+def gather_proposal_context() -> str:
+    """
+    Search the web for prompt engineering research and fetch top pages via MarkItDown.
+    Returns a compact research brief to enrich the proposer's context.
+    Skips gracefully if ddgs or markitdown are unavailable.
+    """
+    if not RESEARCH_ENABLED or not DDGS_AVAILABLE:
+        return ""
+
+    print("  [research] gathering proposal context...")
+    sections = []
+    fetched_urls: list[str] = []
+
+    for query in _RESEARCH_QUERIES:
+        snippet = _web_search_brief(query)
+        if snippet:
+            sections.append(f"Search: {query}\n{snippet}")
+        # Collect URLs for page fetching
+        if MARKITDOWN_AVAILABLE and len(fetched_urls) < _RESEARCH_URL_COUNT:
+            try:
+                results = list(_ddgs.text(query, max_results=3))
+                for r in results:
+                    url = r.get("href", "")
+                    if url.startswith("http") and url not in fetched_urls:
+                        fetched_urls.append(url)
+                        break
+            except Exception:
+                pass
+
+    # Fetch full pages for top URLs
+    for url in fetched_urls[:_RESEARCH_URL_COUNT]:
+        print(f"  [research] fetching {url[:70]}...")
+        page = _fetch_page(url, max_chars=1500)
+        if page:
+            sections.append(f"Full page ({url}):\n{page}")
+
+    brief = "\n\n---\n\n".join(sections)
+    if len(brief) > RESEARCH_MAX_CHARS:
+        brief = brief[:RESEARCH_MAX_CHARS] + "\n[truncated]"
+
+    print(f"  [research] {len(brief)} chars of context gathered")
+    return brief
+
+
+# ---------------------------------------------------------------------------
 # Proposer
 # ---------------------------------------------------------------------------
 
@@ -261,6 +363,9 @@ Experiment history (tab-separated: experiment, score, baseline, delta, status, d
 Latest evaluator feedback from the most recent eval run:
 {eval_feedback}
 
+External research context (prompt engineering literature and best practices):
+{research_context}
+
 Your task: propose ONE specific change to the synthesis instruction(s) that might improve
 the composite eval score (0.7 * mean_wiggum_r1 + 0.3 * criteria_rate * 10).
 
@@ -284,13 +389,14 @@ Output ONLY valid JSON (no preamble, no markdown fences):
 }}"""
 
 
-def propose_instructions(current: dict, history: str, eval_feedback: str) -> dict | None:
+def propose_instructions(current: dict, history: str, eval_feedback: str, research_context: str = "") -> dict | None:
     """Ask proposer model to suggest new synthesis instructions. Returns dict or None on failure."""
     prompt = PROPOSE_PROMPT.format(
         synth=current["synth"],
         synth_count=current["synth_count"],
         history=history,
         eval_feedback=eval_feedback,
+        research_context=research_context or "(none gathered)",
     )
     print("  [propose] asking proposer for new instruction...")
     try:
@@ -331,19 +437,25 @@ def run_eval(task_ids: list[str]) -> float:
     """Run eval_suite --score --tasks <tasks> and return composite float."""
     tasks_arg = ",".join(task_ids)
     print(f"  [eval] running eval_suite on {tasks_arg}...")
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     result = subprocess.run(
         [PYTHON, "eval_suite.py", "--score", "--tasks", tasks_arg],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        env=env,
         cwd=os.path.dirname(os.path.abspath(__file__)),
     )
+    if result.returncode != 0 or result.stderr.strip():
+        print(f"  [eval] returncode: {result.returncode}")
+        print(f"  [eval] stderr: {result.stderr[:2000]}")
     stdout = result.stdout.strip()
     try:
         score = float(stdout.split("\n")[-1].strip())
         print(f"  [eval] composite score: {score:.3f}")
         return score
     except (ValueError, IndexError):
-        print(f"  [eval] parse error, stdout: {stdout[:200]!r}")
+        print(f"  [eval] parse error, stdout: {stdout[:400]!r}")
         return 0.0
 
 
@@ -427,8 +539,9 @@ def main():
         if not eval_feedback or eval_feedback == "(no eval feedback found)":
             eval_feedback = "(no prior eval feedback — first experiment)"
 
-        # 2. Propose
-        proposal = propose_instructions(current, history, eval_feedback)
+        # 2. Gather external research context, then propose
+        research_context = gather_proposal_context()
+        proposal = propose_instructions(current, history, eval_feedback, research_context)
         if proposal is None:
             print("  [warn] proposer failed — skipping experiment")
             time.sleep(5)
