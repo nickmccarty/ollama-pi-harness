@@ -285,11 +285,37 @@ Install TinyTroupe: `pip install git+https://github.com/microsoft/TinyTroupe.git
 
 **Problem:** `memory.py` uses FTS5 BM25 keyword search. Semantic overlap without lexical overlap is missed — "token pruning" and "context compression" describe the same technique and won't co-retrieve.
 
-**Approach:** add an embedding vector column to `memory.db`. At write time, embed the observation narrative + facts. At read time, run both FTS5 and cosine similarity, merge with reciprocal rank fusion (RRF). Keeps SQLite as the store — `sqlite-vec` or `numpy` for similarity.
+**Approach:** add a `vec0` virtual table to `memory.db` via `sqlite-vec`. At write time, embed the observation narrative + facts via Ollama and insert into `vec0`. At read time, run both FTS5 BM25 and KNN on `vec0`, merge results with reciprocal rank fusion (RRF). Pure C extension, no new services, runs in the same SQLite process.
 
-**Model:** `nomic-embed-text` via Ollama (~270MB, fast, runs locally). Consistent with the no-external-API-keys constraint.
+```python
+import sqlite_vec
+db.enable_load_extension(True)
+sqlite_vec.load(db)
+db.enable_load_extension(False)
 
-**Shared infrastructure:** the same embedding model feeds both memory retrieval (5b) and chunked URL retrieval (5c). Build once, use twice.
+# vec0 virtual table — dimensionality matches nomic-embed-text output (768)
+db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS vec_observations USING vec0(embedding float[768])")
+
+# KNN query — top-5 nearest observations to the task embedding
+db.execute("""
+    SELECT o.id, o.title, o.narrative, vec_distance_cosine(v.embedding, ?) AS distance
+    FROM vec_observations v JOIN observations o ON o.id = v.rowid
+    ORDER BY distance LIMIT 5
+""", [task_embedding_blob])
+```
+
+**Embedding model:** `nomic-embed-text` via Ollama (~270MB, fast, runs locally).
+```python
+resp = ollama.embeddings(model="nomic-embed-text", prompt=text)
+embedding = resp["embedding"]   # list[float], len=768
+blob = struct.pack(f"{len(embedding)}f", *embedding)   # sqlite-vec binary format
+```
+
+**Related:** `sqlite-rembed` (same author) can call Ollama's embedding API directly from SQL — useful for ad-hoc SQL scripts, but Python-side embedding gives more control for the write path.
+
+**Install:** `pip install sqlite-vec`
+
+**Shared infrastructure:** the same embedding model and `sqlite-vec` setup feeds both memory retrieval (5b) and chunked URL retrieval (5c). Build once, use twice.
 
 ### 5c: Chunked URL content retrieval
 
@@ -302,7 +328,7 @@ Install TinyTroupe: `pip install git+https://github.com/microsoft/TinyTroupe.git
 - Retrieval: top-3 chunks per URL, concatenated
 - Fallback: if embedding model unavailable, revert to head truncation
 
-**Dependency on 5b:** uses the same `nomic-embed-text` model and embedding infrastructure. Implement 5b first.
+**Dependency on 5b:** uses the same `nomic-embed-text` model, `sqlite-vec` binary format, and `vec0` infrastructure. Implement 5b first.
 
 ### 5d: CLIP multimodal embeddings
 
