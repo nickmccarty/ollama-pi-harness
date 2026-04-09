@@ -45,13 +45,13 @@ MODEL = "pi-qwen-32b"
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "Output ONLY the markdown starting with #. For each section, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section."
+    "Output ONLY the markdown starting with #. For each section, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "Output ONLY the markdown starting with #. For each of the 5 sections, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section."
+    "Output ONLY the markdown starting with #. For each of the 5 sections, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 SEARCHES_PER_TASK = 2       # always run this many searches before synthesizing
