@@ -285,11 +285,44 @@ def merge_results(sets: list[list[dict]]) -> list[dict]:
     return merged
 
 
-def _build_knowledge_state(current: str, new_results: list[dict]) -> str:
-    """Accumulate result bodies into a rolling knowledge state (no model call)."""
+COMPRESS_PROMPT = """\
+Current knowledge summary:
+{current_state}
+
+New search results to incorporate:
+{new_results}
+
+Update the summary to include the new information. Be concise — 5–8 bullet points, \
+each starting with a key fact. Do not exceed {max_chars} characters total.
+Output ONLY the bullet points, nothing else."""
+
+
+def compress_knowledge(current_state: str, new_results: list[dict],
+                       producer_model: str = MODEL, trace=None) -> str:
+    """
+    Compress accumulated search results into a rolling bullet-point knowledge state.
+    Round 1 (empty current_state): returns raw body text — no model call.
+    Round 2+: model call with num_predict=400 cap so it stays fast.
+    """
     new_text = " ".join(r.get("body", "") for r in new_results)
-    combined = (current + " " + new_text).strip()
-    return combined[:KNOWLEDGE_MAX_CHARS]
+
+    if not current_state:
+        # First round — skip model call, just seed with raw bodies
+        return new_text[:KNOWLEDGE_MAX_CHARS]
+
+    prompt = COMPRESS_PROMPT.format(
+        current_state=current_state,
+        new_results=new_text[:800],
+        max_chars=KNOWLEDGE_MAX_CHARS,
+    )
+    response = ollama.chat(
+        model=producer_model,
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0.1, "num_predict": 400},
+    )
+    if trace is not None:
+        trace.log_usage(response, stage="compress_knowledge")
+    return response["message"]["content"].strip()[:KNOWLEDGE_MAX_CHARS]
 
 
 def plan_query(task: str, knowledge_state: str, round_num: int, producer_model: str = MODEL, trace=None) -> str:
@@ -361,7 +394,7 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
 
         all_result_sets.append(results)
         queries_used.append(query)
-        knowledge_state = _build_knowledge_state(knowledge_state, results)
+        knowledge_state = compress_knowledge(knowledge_state, results, producer_model=producer_model, trace=trace)
 
     # Log to trace
     trace.data["novelty_scores"]  = novelty_scores
