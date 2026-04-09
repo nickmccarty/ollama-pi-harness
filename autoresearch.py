@@ -49,6 +49,10 @@ TSV_PATH        = "autoresearch.tsv"
 AGENT_PATH      = "agent.py"
 RUNS_JSONL      = "runs.jsonl"
 
+# Use the same Python interpreter that launched autoresearch.py — ensures the
+# correct conda environment (with ddgs, ollama, etc.) is used for eval subprocesses.
+PYTHON          = sys.executable
+
 # Sentinel markers in agent.py (do not change without updating agent.py too)
 BEGIN_MARKER = "# AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN"
 END_MARKER   = "# AUTORESEARCH:SYNTH_INSTRUCTION:END"
@@ -328,7 +332,7 @@ def run_eval(task_ids: list[str]) -> float:
     tasks_arg = ",".join(task_ids)
     print(f"  [eval] running eval_suite on {tasks_arg}...")
     result = subprocess.run(
-        [sys.executable, "eval_suite.py", "--score", "--tasks", tasks_arg],
+        [PYTHON, "eval_suite.py", "--score", "--tasks", tasks_arg],
         capture_output=True,
         text=True,
         cwd=os.path.dirname(os.path.abspath(__file__)),
