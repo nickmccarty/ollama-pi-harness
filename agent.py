@@ -36,7 +36,7 @@ from wiggum import loop as wiggum_loop
 from logger import RunTrace
 from vision import extract_image_context, detect_image_paths
 from security import check_python_code, check_file_path, scan_for_injection, strip_injection_candidates
-from memory import MemoryStore
+from memory import MemoryStore, assess_novelty
 from planner import make_plan, Plan
 
 try:
@@ -65,8 +65,11 @@ SYNTH_INSTRUCTION_COUNT = (
     "Output ONLY the markdown starting with #. For each of the 5 sections, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges, and explicitly mention at least one production-ready library or framework (e.g., LangChain, HuggingFace Transformers, Prometheus, ELK stack) where relevant to improve depth and specificity. Ensure all sections include a practical example or implementation detail that demonstrates how the concept would be applied in a real-world system, especially for areas like chunk overlap, prompt templating, anomaly detection, and response verification."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
-SEARCHES_PER_TASK = 2       # always run this many searches before synthesizing
+SEARCHES_PER_TASK = 2        # minimum searches before novelty gating kicks in
 SEARCH_QUALITY_FLOOR = 1800  # total merged chars — below this, run one more search
+MAX_SEARCH_ROUNDS   = 5      # hard cap regardless of novelty
+NOVELTY_THRESHOLD   = 3      # 0–10; stop if new results score below this
+KNOWLEDGE_MAX_CHARS = 1500   # cap on rolling knowledge state fed to novelty scoring
 MAX_RESULTS_PER_SEARCH = 5
 PYTHON_TOOL_ROUNDS = 3       # max rounds in the run_python tool loop
 PYTHON_TIMEOUT = 10          # seconds before code execution is killed
@@ -282,14 +285,28 @@ def merge_results(sets: list[list[dict]]) -> list[dict]:
     return merged
 
 
-def generate_second_query(task: str, first_query: str, first_results: str, producer_model: str = MODEL, trace=None) -> str:
-    """Ask the model to produce a complementary search query."""
+def _build_knowledge_state(current: str, new_results: list[dict]) -> str:
+    """Accumulate result bodies into a rolling knowledge state (no model call)."""
+    new_text = " ".join(r.get("body", "") for r in new_results)
+    combined = (current + " " + new_text).strip()
+    return combined[:KNOWLEDGE_MAX_CHARS]
+
+
+def plan_query(task: str, knowledge_state: str, round_num: int, producer_model: str = MODEL, trace=None) -> str:
+    """
+    Generate a search query for the given round.
+    Round 1: derives query directly from task (no model call).
+    Round 2+: targets gaps in knowledge_state via model call.
+    Replaces generate_second_query() — knowledge-state-aware for all rounds.
+    """
+    if round_num == 1 or not knowledge_state:
+        return re.sub(r"(?i)^search\s+(for\s+)?", "", task.split("save to")[0].strip()).strip().rstrip("and ,.")
+
     prompt = (
-        f"Original task: {task}\n\n"
-        f"First search query used: {first_query}\n\n"
-        f"First search returned {len(first_results)} characters of results.\n\n"
-        "Generate ONE alternative search query that would find complementary or more specific "
-        "information not covered by the first query. Output ONLY the query string, nothing else."
+        f"Task: {task}\n\n"
+        f"What is already known:\n{knowledge_state}\n\n"
+        "Generate ONE search query to find important information about the task NOT yet covered above. "
+        "Output ONLY the query string, nothing else."
     )
     response = ollama.chat(
         model=producer_model,
@@ -303,53 +320,68 @@ def generate_second_query(task: str, first_query: str, first_results: str, produ
 
 def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL) -> str:
     """
-    Run SEARCHES_PER_TASK searches, merge results, check quality floor.
-    Uses planned_queries when provided; falls back to auto-generation otherwise.
-    Returns a single merged context string ready for synthesis.
+    Saturation-based search loop: runs up to MAX_SEARCH_ROUNDS searches, stopping
+    early when new results score below NOVELTY_THRESHOLD against the accumulated
+    knowledge state. Minimum SEARCHES_PER_TASK rounds always run before gating.
+
+    planned_queries are used for rounds 1–N before switching to plan_query().
+    Returns a merged context string ready for synthesis.
     """
     all_result_sets = []
-    queries_used = []
+    queries_used    = []
+    knowledge_state = ""
+    novelty_scores  = []
 
-    # First query
-    if planned_queries and len(planned_queries) >= 1:
-        first_query = planned_queries[0]
-        print(f"  [web_search 1] {first_query}  (planned)")
-    else:
-        first_query = re.sub(r"(?i)^search\s+(for\s+)?", "", task.split("save to")[0].strip()).strip().rstrip("and ,.")
-        print(f"  [web_search 1] {first_query}")
-    results_1 = web_search_raw(first_query)
-    all_result_sets.append(results_1)
-    queries_used.append(first_query)
-    trace.log_tool_call("web_search", first_query, len(format_results(results_1)))
+    for round_num in range(1, MAX_SEARCH_ROUNDS + 1):
+        # Query selection: planned first, then gap-targeted model call
+        if planned_queries and round_num <= len(planned_queries):
+            query = planned_queries[round_num - 1]
+            print(f"  [web_search {round_num}] {query}  (planned)")
+        else:
+            query = plan_query(task, knowledge_state, round_num, producer_model=producer_model, trace=trace)
+            suffix = "" if round_num == 1 else "  (gap-targeted)"
+            print(f"  [web_search {round_num}] {query}{suffix}")
 
-    # Second query
-    if planned_queries and len(planned_queries) >= 2:
-        second_query = planned_queries[1]
-        print(f"  [web_search 2] {second_query}  (planned)")
-    else:
-        formatted_1 = format_results(results_1)
-        second_query = generate_second_query(task, first_query, formatted_1, producer_model=producer_model, trace=trace)
-        print(f"  [web_search 2] {second_query}")
-    results_2 = web_search_raw(second_query)
-    all_result_sets.append(results_2)
-    queries_used.append(second_query)
-    trace.log_tool_call("web_search", second_query, len(format_results(results_2)))
+        results = web_search_raw(query)
+        trace.log_tool_call("web_search", query, len(format_results(results)))
+
+        # Novelty gate — only after minimum rounds have run
+        if round_num > SEARCHES_PER_TASK:
+            novelty = assess_novelty(results, knowledge_state)
+            novelty_scores.append(novelty)
+            print(f"  [novelty] round {round_num}: {novelty}/10")
+            if novelty < NOVELTY_THRESHOLD:
+                print(f"  [novelty] saturation — stopping search")
+                break
+        elif round_num > 1:
+            # Log novelty for rounds inside the minimum window (informational only)
+            novelty = assess_novelty(results, knowledge_state)
+            novelty_scores.append(novelty)
+            print(f"  [novelty] round {round_num}: {novelty}/10  (below gate minimum — continuing)")
+
+        all_result_sets.append(results)
+        queries_used.append(query)
+        knowledge_state = _build_knowledge_state(knowledge_state, results)
+
+    # Log to trace
+    trace.data["novelty_scores"]  = novelty_scores
+    trace.data["search_rounds"]   = len(queries_used)
 
     # Merge and check quality floor
-    merged = merge_results(all_result_sets)
+    merged      = merge_results(all_result_sets)
     merged_text = format_results(merged)
     total_chars = len(merged_text)
-    print(f"  [research] merged {len(merged)} results, {total_chars} chars")
+    print(f"  [research] merged {len(merged)} results, {total_chars} chars ({len(queries_used)} rounds)")
     trace.log_search_quality(total_chars)
 
     if total_chars < SEARCH_QUALITY_FLOOR:
         print(f"  [quality floor] {total_chars} < {SEARCH_QUALITY_FLOOR} — running fallback search")
-        fallback_query = f"{first_query} examples implementation best practices"
+        fallback_query = f"{queries_used[0]} examples implementation best practices"
         print(f"  [web_search fallback] {fallback_query}")
         results_fallback = web_search_raw(fallback_query)
         all_result_sets.append(results_fallback)
         queries_used.append(fallback_query)
-        merged = merge_results(all_result_sets)
+        merged      = merge_results(all_result_sets)
         merged_text = format_results(merged)
         total_chars = len(merged_text)
         trace.log_tool_call("web_search", fallback_query, len(format_results(results_fallback)))
