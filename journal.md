@@ -874,3 +874,47 @@ After merging search results, `enrich_with_page_content` fetches full page conte
 ```bash
 pip install "markitdown[all]"
 ```
+
+---
+
+## Experiment 04: Producer Upgrade Impact
+
+### Design
+
+9-run CRD (16 recorded due to MarkItDown integration mid-experiment), same 3 tasks as experiments 01-03. First experiment with `pi-qwen-32b` (qwen2.5:32b Q4_K_M) as the default producer. Evaluator and threshold unchanged (Qwen3-Coder:30b, 8.0).
+
+### Key results
+
+| Task | score_r1 mean | rounds mean | pass rate | depth_r1 | spc_r1 |
+|------|--------------|-------------|-----------|----------|--------|
+| T_A | 8.00 ±0.74 | 1.25 | 4/4 | 7.2 | 7.0 |
+| T_B | 6.97 ±0.53 | 2.71 | 4/7 (57%) | 6.1 | 5.9 |
+| T_C | 7.54 ±0.80 | 2.00 | 4/5 (80%) | 6.8 | 6.4 |
+
+Overall: 12/16 PASS (75%). Exp-03 was 4/9 (44%). Zero revision regressions (exp-03 had 2).
+
+### H1–H5 assessment
+
+- **H1 (pass rate > 4/9): CONFIRMED** — 12/16
+- **H2 (T_A ceiling broken): CONFIRMED** — 4/4 PASS, rounds 3.0→1.25
+- **H3 (no regression): CONFIRMED** — 0 regressions vs 2 in exp-03
+- **H4 (score_r1 > 7.07): CONFIRMED** — 7.41
+- **H5 (T_A depth/spc > 6): CONFIRMED** — depth=7.2, spc=7.0
+
+### What worked
+
+**T_A is solved.** The 32B producer breaks the enumerated-task ceiling. First-pass depth +1.2, specificity +1.0 vs exp-03. The revision trajectory reversed: the 7B regressed or stagnated on T_A; the 32B improves cleanly on feedback every time.
+
+**Revision reliability.** Zero regressions across 16 runs is the clearest signal: the 32B can act on evaluator feedback without degrading. This means the wiggum ceiling is now set by the synthesis instruction and evaluator, not by the producer's revision capability.
+
+### What failed / what's next
+
+**T_B first-pass quality is flat.** depth_r1 = 6.1 (exp-03: 6.0). The 32B produces *shorter* T_B output than the 7B (2198 vs 3288 bytes, −33%). Longer revision loop required (mean 2.71 rounds). Two T_B runs failed outright after 3 rounds.
+
+The dimension data is decisive: T_B depth is unchanged despite a 4.5× parameter increase. This is not a producer problem — it's a **synthesis instruction problem**. `SYNTH_INSTRUCTION` doesn't push hard enough on depth for open-ended tasks, and the 32B complies faithfully with a weak instruction. This is the autoresearch target.
+
+**count_check_retry rate is high on MarkItDown-enriched runs.** T_A retry rate 4/4, T_C 4/5 on runs with URL enrichment. The 16k-char context causes the model to produce flat lists instead of H2 sections on first synthesis pass. The retry path fixes it but adds latency. Consider making `URL_ENRICH_COUNT` task-type-aware — disable for enumerated tasks where format compliance is critical.
+
+### Decision
+
+Start autoresearch immediately. T_B depth/specificity is the target. T_A and T_C are stable baselines.

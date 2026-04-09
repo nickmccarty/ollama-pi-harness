@@ -234,7 +234,14 @@ Experiment-03 exposed the 7B producer ceiling: depth=6, specificity=6 on enumera
 | `mistral-small3.1:24b` | ~15GB | Pulled, Modelfile pending |
 | `phi4:14b` | ~9GB | Pulled, needs template override for tool-calling |
 
-**Default swapped:** `MODEL = "pi-qwen-32b"` in `agent.py` and `PRODUCER_MODEL = "pi-qwen-32b"` in `wiggum.py`. **Experiment-04 in progress** — 9-run CRD (T_B, T_A, T_C × 3 replications each) to collect clean comparison data. Full design in `experiment-04.md`.
+**Default swapped:** `MODEL = "pi-qwen-32b"` in `agent.py` and `PRODUCER_MODEL = "pi-qwen-32b"` in `wiggum.py`. **Experiment-04 complete** — 16 runs, 12/16 PASS (75% vs 44% in exp-03). Full results in `experiment-04.md`.
+
+**Key findings from exp-04:**
+- T_A ceiling broken: 4/4 PASS, rounds 3.0→1.25, depth +1.2, zero revision regressions
+- T_B first-pass quality flat (depth_r1 6.1 vs 6.0 in exp-03) — synthesis instruction is the bottleneck, not the producer
+- MarkItDown URL enrichment triggers high count_check_retry on enumerated tasks — tune `URL_ENRICH_COUNT` to be task-type-aware
+
+**Next: autoresearch** targeting T_B depth/specificity.
 
 ### 4b: Evaluator upgrade — DONE
 
