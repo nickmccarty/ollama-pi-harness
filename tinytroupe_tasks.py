@@ -5,6 +5,9 @@ Uses TinyTroupe personas (if available) or falls back to raw ollama.chat to gene
 diverse research task requests from 8 practitioner archetypes. Output is saved as
 generated_tasks.json in eval_suite.py SUITE format.
 
+Install TinyTroupe (not on PyPI — install from GitHub):
+    pip install git+https://github.com/microsoft/TinyTroupe.git@main
+
 Usage:
     conda activate ollama-pi
     python tinytroupe_tasks.py                      # generate all personas, save to generated_tasks.json

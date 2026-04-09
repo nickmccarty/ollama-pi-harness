@@ -254,7 +254,7 @@ Experiment-03 exposed the 7B producer ceiling: depth=6, specificity=6 on enumera
 
 `tinytroupe_tasks.py` — 8 practitioner personas generate diverse research task requests, saved to `generated_tasks.json`. Extends the autoresearch eval surface beyond 5 fixed tasks. `eval_suite.py --generated` loads and runs them.
 
-Install TinyTroupe: `pip install git+https://github.com/microsoft/TinyTroupe.git@main`
+Install TinyTroupe: `pip install git+https://github.com/microsoft/TinyTroupe.git@main` (PyPI package not available; install from GitHub)
 
 ### Shared harness layer (in place)
 - Shared memory (`memory.db` — all agents read/write across the session)
