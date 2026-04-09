@@ -28,6 +28,9 @@ Architecture:
 import os
 import sys
 import re
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ollama
 
@@ -41,6 +44,8 @@ from logger import RunTrace
 from wiggum import loop as wiggum_loop, EVALUATOR_MODEL
 
 ASSEMBLY_MODEL = "pi-qwen"
+SUBTASK_MAX_RETRIES = 1    # retry a failed subtask this many times before skipping
+SUBTASK_MAX_WORKERS = 4    # max parallel subtask threads
 
 
 # ---------------------------------------------------------------------------
@@ -113,29 +118,90 @@ def _assign_paths(subtask_descs: list[str], workspace: str) -> list[dict]:
     return results
 
 
-def _run_subtasks(subtask_defs: list[dict]) -> list[dict]:
-    """Execute each subtask through agent.run(). Returns defs enriched with content."""
-    import agent  # import here to avoid circular at module level
+def _run_one_subtask(sub: dict) -> dict:
+    """
+    Run a single subtask as a subprocess with retry policy.
+    Captures output per-subtask so parallel runs don't interleave on stdout.
+    Failure policy: retry up to SUBTASK_MAX_RETRIES times, then mark as failed.
+    Returns sub enriched with: content, output_log, attempts, elapsed.
+    """
+    agent_script = os.path.join(os.path.dirname(__file__), "agent.py")
+    sub["output_log"] = []
+    sub["attempts"] = 0
+    t0 = time.time()
 
-    for sub in subtask_defs:
-        print(f"\n{'='*50}")
-        print(f"[orchestrator] subtask: {sub['desc']}")
-        print(f"{'='*50}")
-        try:
-            agent.run(sub["task"], use_wiggum=False)
-        except SystemExit:
-            print(f"  [orchestrator] subtask exited early — continuing")
+    for attempt in range(1, SUBTASK_MAX_RETRIES + 2):
+        sub["attempts"] = attempt
+        result = subprocess.run(
+            [sys.executable, agent_script, "--no-wiggum", sub["task"]],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(__file__),
+        )
+        sub["output_log"].append(result.stdout + (result.stderr or ""))
 
         expanded = os.path.expanduser(sub["path"])
-        if os.path.exists(expanded):
+        if result.returncode == 0 and os.path.exists(expanded):
             with open(expanded, "r", encoding="utf-8") as f:
-                sub["content"] = f.read()
-            print(f"  [orchestrator] subtask output: {len(sub['content'])} chars")
+                content = f.read()
+            if content.strip():
+                sub["content"] = content
+                sub["elapsed"] = round(time.time() - t0, 1)
+                return sub
+
+        # Failure — retry or give up
+        if attempt <= SUBTASK_MAX_RETRIES:
+            sub["output_log"].append(f"[retry {attempt}/{SUBTASK_MAX_RETRIES}]")
         else:
             sub["content"] = ""
-            print(f"  [orchestrator] subtask produced no output")
+            sub["elapsed"] = round(time.time() - t0, 1)
+            return sub
 
-    return subtask_defs
+    sub["content"] = ""
+    sub["elapsed"] = round(time.time() - t0, 1)
+    return sub
+
+
+def _run_subtasks_parallel(subtask_defs: list[dict]) -> list[dict]:
+    """
+    Execute subtasks in parallel threads (each spawns its own subprocess).
+    Prints each subtask's captured output sequentially after all complete.
+    Returns subtask_defs enriched with content, elapsed, attempts.
+    """
+    n = len(subtask_defs)
+    workers = min(n, SUBTASK_MAX_WORKERS)
+    print(f"\n[orchestrator] running {n} subtask(s) in parallel (max {workers} workers)...")
+
+    t_wall_start = time.time()
+    results = [None] * n
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_idx = {pool.submit(_run_one_subtask, sub): i
+                         for i, sub in enumerate(subtask_defs)}
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                results[idx] = {**subtask_defs[idx], "content": "", "error": str(e),
+                                "elapsed": 0, "attempts": 1}
+
+    wall_time = round(time.time() - t_wall_start, 1)
+
+    # Print each subtask's captured output in order
+    for i, sub in enumerate(results):
+        status = "OK" if sub.get("content") else "FAILED"
+        attempts_str = f", {sub.get('attempts', 1)} attempt(s)" if sub.get('attempts', 1) > 1 else ""
+        print(f"\n{'='*50}")
+        print(f"[subtask {i+1}/{n}] {sub['desc']}  —  {status}  ({sub.get('elapsed', '?')}s{attempts_str})")
+        print(f"{'='*50}")
+        for line in (sub.get("output_log") or []):
+            print(line, end="")
+
+    seq_estimate = round(sum(s.get("elapsed", 0) for s in results), 1)
+    print(f"\n[orchestrator] wall time: {wall_time}s  (sequential estimate: {seq_estimate}s)")
+
+    return results
 
 
 def _cleanup_subtask_files(subtask_defs: list[dict]):
@@ -197,16 +263,18 @@ def orchestrate(task: str, use_wiggum: bool = True):
     trace.log_memory_hits(memory_context.count("**[") if memory_context else 0)
     trace.data["orchestrated"] = True
     trace.data["subtask_count"] = len(plan.subtasks)
+    trace.data["parallel"] = True
 
     try:
         subtask_defs = _assign_paths(plan.subtasks, workspace)
 
-        # Execute subtasks
-        print(f"\n[orchestrator] executing {len(subtask_defs)} subtask(s)...")
-        subtask_defs = _run_subtasks(subtask_defs)
+        # Execute subtasks in parallel
+        subtask_defs = _run_subtasks_parallel(subtask_defs)
 
         completed = [s for s in subtask_defs if s.get("content")]
-        print(f"\n[orchestrator] {len(completed)}/{len(subtask_defs)} subtasks produced output")
+        failed = [s for s in subtask_defs if not s.get("content")]
+        print(f"\n[orchestrator] {len(completed)}/{len(subtask_defs)} subtasks produced output"
+              + (f"  ({len(failed)} failed: {', '.join(s['desc'][:40] for s in failed)})" if failed else ""))
 
         if not completed:
             print("[error] all subtasks failed — aborting")

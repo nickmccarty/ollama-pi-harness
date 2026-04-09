@@ -134,7 +134,7 @@ def execute_python(code: str) -> str:
         return f"[error] {e}"
 
 
-def run_tool_loop(task: str, research_context: str, trace: RunTrace) -> str:
+def run_tool_loop(task: str, research_context: str, trace: RunTrace, producer_model: str = MODEL) -> str:
     """
     Optional pre-synthesis tool loop: lets the model call run_python for data tasks.
     Returns accumulated execution output (empty string if model doesn't call tools).
@@ -153,11 +153,12 @@ def run_tool_loop(task: str, research_context: str, trace: RunTrace) -> str:
     execution_log = []
     for _ in range(PYTHON_TOOL_ROUNDS):
         response = ollama.chat(
-            model=MODEL,
+            model=producer_model,
             messages=messages,
             tools=PYTHON_TOOLS,
             options={"temperature": 0.1},
         )
+        trace.log_usage(response, stage="tool_loop")
         msg = response["message"]
         messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": msg.get("tool_calls", [])})
 
@@ -191,7 +192,7 @@ def merge_results(sets: list[list[dict]]) -> list[dict]:
     return merged
 
 
-def generate_second_query(task: str, first_query: str, first_results: str) -> str:
+def generate_second_query(task: str, first_query: str, first_results: str, producer_model: str = MODEL, trace=None) -> str:
     """Ask the model to produce a complementary search query."""
     prompt = (
         f"Original task: {task}\n\n"
@@ -201,14 +202,16 @@ def generate_second_query(task: str, first_query: str, first_results: str) -> st
         "information not covered by the first query. Output ONLY the query string, nothing else."
     )
     response = ollama.chat(
-        model=MODEL,
+        model=producer_model,
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.3},
     )
+    if trace is not None:
+        trace.log_usage(response, stage="search_query")
     return response["message"]["content"].strip().strip('"')
 
 
-def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None) -> str:
+def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL) -> str:
     """
     Run SEARCHES_PER_TASK searches, merge results, check quality floor.
     Uses planned_queries when provided; falls back to auto-generation otherwise.
@@ -235,7 +238,7 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
         print(f"  [web_search 2] {second_query}  (planned)")
     else:
         formatted_1 = format_results(results_1)
-        second_query = generate_second_query(task, first_query, formatted_1)
+        second_query = generate_second_query(task, first_query, formatted_1, producer_model=producer_model, trace=trace)
         print(f"  [web_search 2] {second_query}")
     results_2 = web_search_raw(second_query)
     all_result_sets.append(results_2)
@@ -276,7 +279,7 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
     return merged_text
 
 
-def synthesize(task: str, research_context: str, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "") -> str:
+def synthesize(task: str, research_context: str, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "", producer_model: str = MODEL, trace=None) -> str:
     """Ask the model to synthesize research (and optional contexts) into a markdown document."""
     vision_block = f"\nImage analysis:\n{vision_context}\n" if vision_context else ""
     file_block = f"\nFile contents:\n{file_context}\n" if file_context else ""
@@ -292,10 +295,12 @@ def synthesize(task: str, research_context: str, vision_context: str = "", file_
         "Do not mention where the file will be saved."
     )
     response = ollama.chat(
-        model=MODEL,
+        model=producer_model,
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.1},
     )
+    if trace is not None:
+        trace.log_usage(response, stage="synth")
     return response["message"].get("content", "")
 
 
@@ -328,7 +333,7 @@ def count_output_items(content: str) -> int:
     )
 
 
-def synthesize_with_count(task: str, research_context: str, expected_count: int, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "") -> str:
+def synthesize_with_count(task: str, research_context: str, expected_count: int, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "", producer_model: str = MODEL, trace=None) -> str:
     """Re-synthesize with an explicit count constraint injected into the prompt."""
     vision_block = f"\nImage analysis:\n{vision_context}\n" if vision_context else ""
     file_block = f"\nFile contents:\n{file_context}\n" if file_context else ""
@@ -346,15 +351,17 @@ def synthesize_with_count(task: str, research_context: str, expected_count: int,
         "Do not mention where the file will be saved."
     )
     response = ollama.chat(
-        model=MODEL,
+        model=producer_model,
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.1},
     )
+    if trace is not None:
+        trace.log_usage(response, stage="synth_count")
     return response["message"]["content"].strip()
 
 
 def extract_path(task: str) -> str | None:
-    match = re.search(r"(~[\w/\\.\-]+\.md|[A-Za-z]:[\w/\\.\-]+\.md|/[\w/.\-]+\.md)", task)
+    match = re.search(r"(~[\w/\\.\-]+\.md|[A-Za-z]:[\w/\\.\-]+\.md|/[\w/.\-]+\.md|[\w./\\\-]+\.md)", task)
     return match.group(1) if match else None
 
 
@@ -403,9 +410,9 @@ def _store_memory(memory: MemoryStore, task: str, task_type: str, trace_data: di
         print(f"  [memory] compression failed (non-fatal): {e}")
 
 
-def run(task: str, use_wiggum: bool = True):
+def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
     from wiggum import EVALUATOR_MODEL
-    trace = RunTrace(task=task, producer_model=MODEL, evaluator_model=EVALUATOR_MODEL)
+    trace = RunTrace(task=task, producer_model=producer_model, evaluator_model=EVALUATOR_MODEL)
     memory = MemoryStore()
 
     try:
@@ -458,19 +465,19 @@ def run(task: str, use_wiggum: bool = True):
         full_memory_context = "\n\n".join(filter(None, [memory_context, plan_ctx]))
 
         print("\n[turn 1] researching...\n")
-        context = gather_research(task, trace, planned_queries=plan.search_queries or None)
+        context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model)
 
         # run_python tool loop — optional pre-synthesis code execution
         code_context = ""
         print("\n  [tool loop] checking for code execution needs...")
-        code_context = run_tool_loop(task, context, trace)
+        code_context = run_tool_loop(task, context, trace, producer_model=producer_model)
         if code_context:
             print(f"  [tool loop] {len(code_context)} chars of execution output")
         else:
             print("  [tool loop] no code needed")
 
         print("\n  [synth] synthesizing from merged results...")
-        content = synthesize(task, context, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context)
+        content = synthesize(task, context, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, producer_model=producer_model, trace=trace)
 
         # Count constraint: planner takes precedence over regex
         expected_count = plan.expected_sections or extract_count_constraint(task)
@@ -479,7 +486,7 @@ def run(task: str, use_wiggum: bool = True):
             if actual_count != expected_count:
                 print(f"\n[count check] expected {expected_count} items, got {actual_count} — retrying synthesis")
                 trace.log_count_retry()
-                content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context)
+                content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, producer_model=producer_model, trace=trace)
                 actual_count = count_output_items(content)
                 if actual_count == expected_count:
                     print(f"  [count check] OK — {actual_count} items after retry")
@@ -497,7 +504,7 @@ def run(task: str, use_wiggum: bool = True):
         write_output(content, path, trace)
 
         if use_wiggum:
-            wiggum_trace = wiggum_loop(task, path)
+            wiggum_trace = wiggum_loop(task, path, producer_model=producer_model)
             trace.log_wiggum(wiggum_trace)
             print(f"\n[wiggum] {wiggum_trace['final']} after {len(wiggum_trace['rounds'])} round(s)")
             for r in wiggum_trace["rounds"]:
@@ -525,5 +532,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     no_wiggum = "--no-wiggum" in args
+
+    producer = MODEL
+    if "--producer" in args:
+        idx = args.index("--producer")
+        if idx + 1 < len(args):
+            producer = args[idx + 1]
+            args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
+
     task_args = [a for a in args if a != "--no-wiggum"]
-    run(" ".join(task_args), use_wiggum=not no_wiggum)
+    run(" ".join(task_args), use_wiggum=not no_wiggum, producer_model=producer)

@@ -538,6 +538,223 @@ Task: *"Research agent failure modes and context engineering techniques, then sy
 
 ### Known gaps
 
-- **Sequential only** — subtasks run one after another. Parallel execution (threading) would cut wall time for N subtasks by ~N×, at the cost of shared-memory write ordering.
+- ~~Sequential only~~ — **fixed in Stage 4a** (parallel subprocess execution).
 - **No inter-subtask coordination** — subtasks don't know about each other's scope at planning time; they discover shared context only via memory. A richer subtask spec (including what other subtasks are doing) would reduce overlap.
 - **Assembly quality bounded by producer** — the final synthesis is only as good as pi-qwen's ability to cross-reference. A stronger assembly model (qwen2.5:72b) would produce richer synthesis, at latency cost.
+
+---
+
+## Stage 4a: Parallel Subtask Execution
+
+### Problem
+Sequential subtask execution imposed a wall time proportional to N subtasks × average subtask duration. On a 3-subtask orchestrated run, that was ~90s total.
+
+### Implementation
+Subtasks now execute in parallel via `ThreadPoolExecutor` — each thread spawns a subprocess (`agent.py --no-wiggum`). Subprocess isolation avoids shared-state problems (stdout interleaving, `sys.exit()` propagating):
+
+- `_run_one_subtask(sub)` — subprocess runner with retry policy (`SUBTASK_MAX_RETRIES = 1`). Captures all output in memory; writes nothing to stdout until the future completes.
+- `_run_subtasks_parallel(subtask_defs)` — collects futures via `as_completed`, prints each subtask's output sequentially after all complete. Reports wall time vs sequential estimate.
+- `SUBTASK_MAX_WORKERS = 4` — caps concurrency to avoid Ollama queue saturation.
+
+### SQLite concurrent writes
+Multiple subprocess agents write to `memory.db` simultaneously. Fix: `PRAGMA journal_mode=WAL` in `MemoryStore._init_db()` allows one writer + multiple readers concurrently without locking errors.
+
+### Results
+Wall time: ~35s for 2-subtask run (was ~65s sequential). Sequential estimate: ~65s. ~1.9× speedup with 2 workers.
+
+---
+
+## Stage 4b: Evaluator Replacement
+
+### Problem
+`glm4:9b` as evaluator produced a ceiling of ~8.3/10 regardless of output quality. The wiggum revision loop was effectively dormant — peer-tier model evaluating peer-tier output, rubber-stamping everything above PASS_THRESHOLD.
+
+Root cause: the evaluator needs to be *more capable* than the producer to identify genuine deficiencies. Peer evaluation is circular.
+
+### Fix
+**Model:** `Qwen3-Coder:30b` — 30B parameters vs 9B for glm4:9b, 3× the reasoning capacity. Available locally (18GB).
+
+**Prompt changes:**
+1. Calibration anchors added — concrete score-to-behaviour mappings prevent vague "good enough" middle scores.
+2. Per-dimension issue rule — every dimension scored 8 or below must have at least one named issue.
+3. Strict bias instruction — "when in doubt, score lower rather than higher."
+
+### Observed behaviour after change
+
+| Output | Old score (glm4:9b) | New score (Qwen3-Coder:30b) | Rounds |
+|---|---|---|---|
+| eval-context-engineering.md | ~8.3 pass | 8.1 pass | 1 (issues named) |
+| eval-agent-failure-modes.md | ~8.3 pass | **7.0 fail → 8.8 pass** | 2 |
+| eval-cost-management.md | ~8.3 pass | **7.9 fail → 8.1 pass** | 2 |
+
+The revision loop now activates on genuinely weak outputs. Issues are specific and named rather than generic praise.
+
+### Design note
+The three-model architecture is now: `pi-qwen` (producer, 7B), `glm4:9b` (planner/compressor, 9B), `Qwen3-Coder:30b` (evaluator, 30B). The evaluator is the most capable model in the stack — which is the correct hierarchy for the verify-then-revise loop to have teeth.
+
+---
+
+## Experiment 03: Evaluator Upgrade Impact
+
+### Design
+9-run CRD, same 3 tasks as experiments 01/02. First experiment with `Qwen3-Coder:30b` as evaluator. PASS_THRESHOLD = 8.0.
+
+### Key results
+
+| Task | score_r1 mean | rounds mean | pass rate | revision gains |
+|---|---|---|---|---|
+| T_A (top 5) | 7.00 ±0.00 | 3.0 | 0/3 | –0.1, –0.2, 0.0 |
+| T_B (best practices) | 7.20 ±1.08 | 2.0 | 2/3 | +1.2, +0.7 |
+| T_C (top 3) | 7.00 ±0.00 | 2.3 | 2/3 | +1.8, 0.0, +1.1 |
+
+Overall: 4/9 PASS. Revision loop active in 8/9 runs. First-pass score std = 0.55 (vs ~0 in both prior experiments).
+
+### What worked
+
+The evaluator is doing its job. Score variance is real, issues are specific, revision triggers on anything below 8.0. H1 (revision activates) and H2 (score variance) both confirmed.
+
+### What failed
+
+T_A is a 0/3 failure rate. Revision makes it *worse* on two of three runs (7.0→6.8 twice). The producer cannot respond to depth feedback on 5-item enumerated outputs — it over-corrects or strips content instead of deepening it.
+
+### Two distinct revision failure modes
+
+1. **Regression**: score 7.0 → 6.8. Producer rewrites sections and makes them shorter/worse while trying to address specific critique. The evaluator's feedback may be too precise for a 7B model to apply.
+2. **Stagnation**: score stays at 7.0 across all 3 rounds. Producer edits surface wording without touching the underlying depth gap the evaluator identified.
+
+### Implication: producer ceiling exposed
+
+The wiggum loop design is correct. The evaluator is now calibrated. The bottleneck is the producer. Pi-qwen (7B) can produce output the new evaluator scores ≥8.0 on open-ended tasks (T_B) and short enumerated tasks (T_C) when depth per item is achievable. For T_A (5 items, each requiring a concrete implementation note), the ceiling is ~7.0 regardless of revision.
+
+**Decision:** replace the producer. Lowering the threshold accepts the ceiling permanently; swapping the producer tests whether the ceiling is real or model-specific.
+
+---
+
+## Producer Upgrade Research
+
+### Problem statement from experiment-03
+
+T_A failure signature: depth=6, specificity=6 on every run. Composite = 6.95. To reach 8.0 requires depth=8, specificity=8, completeness=8 simultaneously — 2 points above what pi-qwen reliably produces.
+
+The gap is content generation quality, not prompt engineering. The model writes to ~7-line depth per item; a passing output requires concrete implementation steps specific enough that the evaluator cannot call them generic.
+
+### Model selection criteria
+
+1. Available in Ollama with a named tag
+2. Native JSON tool-calling support (Ollama format)
+3. Different family from Qwen3-Coder:30b (evaluator) — no circular evaluation
+4. Fits in ~24GB VRAM at Q4_K_M
+5. 4.5× parameter count vs current 7B minimum
+
+### Candidates researched and pulled
+
+| Model | Size | Tool-calling | Family | Verdict |
+|-------|------|-------------|--------|---------|
+| `qwen2.5:32b-instruct-q4_K_M` | ~20GB | Native | Qwen2.5 (same as current) | **Test first** — one Modelfile line change, zero compatibility risk |
+| `mistral-small3.1:24b` | ~15GB | Native | Mistral | Different family; 15GB leaves headroom; backup if 32B too slow |
+| `phi4:14b` | ~9GB | Needs template override | Microsoft | Best instruction-following per GB; tool-calling requires community Modelfile workaround |
+
+**Hard passes:** llama3.3:70b (~42GB, blows VRAM budget), gemma3:27b (tool-calling officially broken, GitHub issue #9941).
+
+### `--producer` flag added to agent.py
+
+Both synthesis and wiggum revision previously hardcoded to `MODEL = "pi-qwen"`. Now `run()` accepts `producer_model` parameter threaded through to:
+- `run_tool_loop()` — pre-synthesis code execution
+- `generate_second_query()` — complementary search query generation
+- `synthesize()` — initial document generation
+- `synthesize_with_count()` — count-constrained re-synthesis
+- `wiggum_loop()` — revision model during evaluate → revise → verify
+
+CLI: `python agent.py --producer pi-qwen-32b "task..."` — overrides producer for the full run including revision. Default behaviour unchanged.
+
+### Initial test result (pi-qwen-32b, T_A)
+
+First run with `--producer pi-qwen-32b` flag hit a wiring bug: `--producer` was not implemented, flag prepended to task string, pi-qwen (7B) ran the whole task. Bug fixed before real test.
+
+The pre-fix run showed an interesting artifact: round 2 score was 7.7 (depth=8) — the first time depth=8 appeared on T_A in any experiment. This was stochastic improvement from the 7B, not the 32B. But it confirms the threshold is reachable on T_A; the 32B should hit it more consistently.
+
+### 32B producer confirmed — T_A ceiling broken
+
+Post-fix test with `--producer pi-qwen-32b` on T_A (top 5 context engineering techniques):
+
+- Round 1: **7.0** (depth=7, spc=7) — identical first-pass to 7B baseline
+- Round 2: **8.1 PASS** (depth=8, spc=8) — revision produced a concrete implementation note per item
+
+This is a clean result: the 32B responds to depth feedback where the 7B couldn't. The first-pass score is the same (both models produce shallow first drafts), but the revision trajectory is different. The 7B regressed or stagnated; the 32B improved.
+
+T_B and T_C also tested — both PASS on round 1 at 8.6+ (open-ended tasks benefit more from 32B on first pass).
+
+**Decision:** pi-qwen-32b is the confirmed upgrade path. Next: make it the default producer.
+
+---
+
+## Token Tracking
+
+Added per-run token and timing instrumentation to `runs.jsonl`.
+
+### Motivation
+
+Previously, runs.jsonl captured what happened (tools called, scores, final status) but not the cost (tokens consumed, time spent). Token data is needed to understand model cost envelopes, identify expensive stages, and compare producers fairly on token-per-quality ratios.
+
+### Implementation
+
+**`logger.py` — `_extract_usage()` and `log_usage()`:**
+
+Ollama's `ChatResponse` is a Pydantic object with fields: `prompt_eval_count` (input tokens), `eval_count` (output tokens), and duration fields in nanoseconds (`total_duration`, `eval_duration`, `prompt_eval_duration`). `_extract_usage()` extracts all five values safely (returns zeros for missing fields). `log_usage(response, stage)` accumulates into:
+- `input_tokens` / `output_tokens` — run-level totals
+- `tokens_by_stage` — `{stage: {input, output, calls, total_ms}}`
+
+Called immediately after every `ollama.chat()` call with a stage name.
+
+**Stages tracked:**
+- `tool_loop` — pre-synthesis code execution rounds
+- `synth` — initial document synthesis
+- `synth_count` — count-constrained re-synthesis (when triggered)
+- `wiggum_eval` — evaluator scoring call
+- `wiggum_revise` — producer revision call (each round)
+- `search_query` — second query generation
+- `planner` — task plan generation
+- `memory` — memory compression
+
+**`wiggum.py` — local trace pattern:**
+
+`loop()` creates a lightweight local `RunTrace` for accumulation, passes `_trace=_local_trace` to `evaluate()` and `revise()`. On return, `_attach_token_stats()` copies the wiggum-specific token data into the wiggum trace dict. `logger.py`'s `log_wiggum()` then merges it into the main run record — no double counting.
+
+**`run_duration_s`:**
+
+`RunTrace.__init__` calls `time.monotonic()`. `finish()` computes the difference and stores it as `run_duration_s`. Also prints: `[log] {dur}s  in={tok_in} out={tok_out} tok  → runs.jsonl`.
+
+### First confirmed output (run 75)
+
+```json
+{
+  "input_tokens": 10391,
+  "output_tokens": 2424,
+  "run_duration_s": 714.0,
+  "tokens_by_stage": {
+    "tool_loop": {"input": 4481, "output": 1292, "calls": 3, "total_ms": 364331},
+    "synth":     {"input": 2337, "output":  461, "calls": 1, "total_ms": 128263},
+    "synth_count":{"input":2363, "output":  420, "calls": 1, "total_ms": 112990},
+    "wiggum_eval":{"input": 1210, "output":  251, "calls": 1, "total_ms": 15919}
+  },
+  "wiggum_rounds": 1,
+  "wiggum_scores": [8.8]
+}
+```
+
+`tool_loop` dominates input tokens (3 calls to pi-qwen-32b for code execution decisions on a research task where run_python was blocked each time). `wiggum_eval` is cheap — 1.2s for a Qwen3-Coder 30B scoring call.
+
+### `inspect_run.py`
+
+Added a utility for interactive inspection:
+```bash
+python inspect_run.py          # last run (full detail)
+python inspect_run.py 3        # last 3 runs
+python inspect_run.py --all    # summary table of all runs
+```
+
+Prints: timestamp, models, final status, duration, token totals, per-stage breakdown, wiggum rounds/scores/dims, output path/size.
+
+### `extract_path()` fix
+
+Also fixed a latent bug: the regex in `extract_path()` required a path prefix (`~/`, drive letter, `/`) — bare filenames like `output.md` would fail with "no .md output path found". Added a fallback branch to match bare filenames. Backwards-compatible — prefixed paths still match first.

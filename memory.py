@@ -174,6 +174,7 @@ class MemoryStore:
 
     def _init_db(self):
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")  # safe for concurrent multi-process writes
             conn.executescript(SCHEMA)
 
     # ------------------------------------------------------------------

@@ -23,20 +23,31 @@ Demonstrated self-correction: 3/10 to 9/10 in one wiggum revision round without 
 
 ```json
 {
-  "timestamp": "2026-04-07T18:13:15+00:00",
+  "timestamp": "2026-04-08T22:15:10+00:00",
   "task": "...",
-  "producer_model": "pi-qwen",
-  "evaluator_model": "glm4:9b",
+  "producer_model": "pi-qwen-32b",
+  "evaluator_model": "Qwen3-Coder:30b",
+  "run_duration_s": 714.0,
+  "input_tokens": 10391,
+  "output_tokens": 2424,
+  "tokens_by_stage": {
+    "tool_loop":   {"input": 4481, "output": 1292, "calls": 3, "total_ms": 364331},
+    "synth":       {"input": 2337, "output":  461, "calls": 1, "total_ms": 128263},
+    "wiggum_eval": {"input": 1210, "output":  251, "calls": 1, "total_ms": 15919}
+  },
   "tool_calls": [{"name": "web_search", "query": "...", "result_chars": 2326}],
   "synth_forced": false,
   "output_path": "C:\\Users\\nicho\\Desktop\\harness-engineering\\...",
-  "output_lines": 13,
-  "output_bytes": 1264,
-  "wiggum_rounds": 2,
-  "wiggum_scores": [5, 9],
+  "output_lines": 56,
+  "output_bytes": 1856,
+  "wiggum_rounds": 1,
+  "wiggum_scores": [8.8],
+  "wiggum_dims": [{"relevance": 10, "completeness": 8, "depth": 9, "specificity": 8, "structure": 9}],
   "final": "PASS"
 }
 ```
+
+`inspect_run.py` — pretty-printer for `runs.jsonl`: `python inspect_run.py` (last run), `python inspect_run.py 3`, `python inspect_run.py --all`.
 
 Followed by:
 - try/finally in `run()` — DONE. Failed runs now always log with `"final": "ERROR"`.
@@ -154,45 +165,70 @@ Use Python (Pillow, pytesseract, markitdown) to preprocess images before the mod
 
 ---
 
-## Stage 3 - Orchestrator + Specialized Subagents — DONE (sequential, research agents)
+## Stage 3 - Orchestrator + Specialized Subagents — DONE
 
 *Objective: decompose complex tasks across multiple specialized agents.*
 
 ### What's implemented
 
-`orchestrator.py` — sequential orchestration of research subtasks with cross-referencing assembly.
+`orchestrator.py` — parallel orchestration of research subtasks with cross-referencing assembly.
 
 ```
 orchestrate(task)
   memory + planning  →  if no subtasks: delegate to agent.run()
   assign _sub_N.md paths
-  agent.run(subtask) × N   (full pipeline, no per-subtask wiggum)
-  assemble()               (cross-referencing synthesis from all subtask outputs)
-  write + wiggum + memory store + cleanup
+  ThreadPoolExecutor: agent.py --no-wiggum × N  (subprocess isolation, SUBTASK_MAX_WORKERS=4)
+  assemble()                                    (cross-referencing synthesis from all subtask outputs)
+  count check + write + wiggum + memory store + cleanup
 ```
 
 **Transparent passthrough:** single-focus tasks hit the same code path as before — no regression.
 
-**Shared memory works automatically:** subtask 2 sees subtask 1's memory observations because they execute sequentially through `agent.run()`, which writes to `memory.db` after every run.
+**Subprocess isolation:** each subtask is a separate Python interpreter. Avoids shared stdout, `sys.exit()` propagation, and memory write conflicts. SQLite WAL mode handles concurrent writes.
 
-**Validated:** compound task (failure modes + context engineering) → 2 subtasks → 57-line cross-referencing guide. 3 memory observations stored (2 subtasks + orchestrated run).
+**Validated (Stage 4a):** 2-subtask orchestrated run completes in ~35s wall time (was ~65s sequential). ~1.9× speedup.
 
 ### Architecture (current)
 
 ```
 orchestrator.py
     |
-    +-- agent.run() × N    (pi-qwen: web search, read_file, run_python)
-    +-- assemble()         (pi-qwen: cross-referencing synthesis)
-    +-- wiggum.loop()      (glm4:9b: single verification pass on final output)
+    +-- subprocess(agent.py) × N   (pi-qwen: web search, read_file, run_python)
+    +-- assemble()                 (pi-qwen: cross-referencing synthesis)
+    +-- wiggum.loop()              (Qwen3-Coder:30b: evaluate → revise → verify)
 ```
 
 ### Remaining gaps
 
-- **Sequential only** — parallel subtask execution (threading) would reduce wall time by ~N×
-- **Research agents only** — no specialised code agent, vision agent, or write agent yet; all subtasks run through the same `agent.run()` pipeline
+- **Research agents only** — no specialised code agent, vision agent, or write agent yet; all subtasks run through the same `agent.py` pipeline
 - **No inter-subtask scope coordination** — subtasks don't know each other's scope at planning time; they discover shared context only via memory after the fact
 - **Assembly quality bounded by producer** — pi-qwen cross-references but doesn't synthesise at the depth a 72B model would
+
+### 4a: Parallel execution — DONE
+
+`ThreadPoolExecutor` with subprocess workers. SUBTASK_MAX_RETRIES=1, SUBTASK_MAX_WORKERS=4. Wall time ~1.9× improvement on 2-subtask runs. Output captured per-subtask and printed sequentially after all complete.
+
+### 4c: Producer upgrade — CONFIRMED, PENDING DEFAULT SWAP
+
+Experiment-03 exposed the 7B producer ceiling: depth=6, specificity=6 on enumerated tasks regardless of revision. The evaluator is working; the producer is the bottleneck.
+
+**`--producer` flag added to `agent.py`** — both synthesis and wiggum revision now use the specified model. Enables per-run producer swaps without changing defaults.
+
+**32B confirmed:** `--producer pi-qwen-32b` on T_A: round 1 = 7.0, round 2 = **8.1 PASS** (depth=8, spc=8). The 7B regressed on the same task; the 32B responds to depth feedback. T_B and T_C pass round 1 at 8.6+.
+
+**Models pulled:**
+
+| Model | Size | Status |
+|-------|------|--------|
+| `qwen2.5:32b-instruct-q4_K_M` | ~20GB | `pi-qwen-32b` created — **confirmed upgrade** |
+| `mistral-small3.1:24b` | ~15GB | Pulled, Modelfile pending |
+| `phi4:14b` | ~9GB | Pulled, needs template override for tool-calling |
+
+**Next:** make `pi-qwen-32b` the default producer (update `MODEL` in `agent.py` and `PRODUCER_MODEL` in `wiggum.py`). Run experiment-04 CRD to get clean comparison data.
+
+### 4b: Evaluator upgrade — DONE
+
+`Qwen3-Coder:30b` replaces `glm4:9b` as evaluator. 30B vs 9B — evaluator is now the most capable model in the stack. Revision loop now activates on genuinely weak outputs (7.0→8.8 on a minimal agent failure modes document). Prompt updated with calibration anchors, per-dimension issue requirement, and strict-bias instruction.
 
 ### Shared harness layer (in place)
 - Shared memory (`memory.db` — all agents read/write across the session)
@@ -226,6 +262,8 @@ orchestrator.py
 ### The hardware question
 A swarm of 7B models running in parallel is feasible on a single GPU with 24GB VRAM. Four simultaneous 7B agents use approximately the same memory as one 32B agent, with potentially higher throughput on parallelizable tasks. The coordination overhead is the cost.
 
+With a 32B producer the single-agent pipeline consumes the full 24GB budget — parallelism is no longer free. The architectural choice becomes: one high-quality agent or multiple lower-quality agents in parallel. Experiment-03 suggests the 7B producer is the quality bottleneck, not the harness, which shifts the calculus toward the single high-quality agent path.
+
 ---
 
 ## Guiding Principles
@@ -250,3 +288,6 @@ If the evaluator prompt doesn't explicitly reward depth and implementation detai
 
 **7. The harness is the product.**
 The model is a commodity input. The harness -- how it is constrained, informed, verified, and corrected -- is where reliability lives and where durable engineering value accumulates.
+
+**8. The evaluator reveals the producer ceiling; it does not set it.**
+A strong evaluator exposes quality gaps the producer cannot close. When revision regresses or stagnates, the evaluator is working correctly — the producer is the bottleneck. Fix the producer, not the threshold.

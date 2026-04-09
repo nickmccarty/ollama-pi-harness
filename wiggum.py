@@ -40,7 +40,7 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 PRODUCER_MODEL = "pi-qwen"
-EVALUATOR_MODEL = "glm4:9b"
+EVALUATOR_MODEL = "Qwen3-Coder:30b"
 MAX_ROUNDS = 3
 PASS_THRESHOLD = 8.0
 
@@ -106,11 +106,17 @@ Score each dimension 0-10 as an integer:
 - structure (weight 0.10): Is the document clearly organized and readable?
 
 Dimension score guide (apply to each dimension independently):
-- 9-10: excellent — no meaningful gaps on this dimension
-- 7-8: good — minor gaps but solid overall
-- 5-6: surface-level — present but shallow or incomplete
-- 3-4: weak — significant problems on this dimension
+- 9-10: exceptional — no meaningful gaps; content a domain expert would be satisfied with
+- 7-8: good — addresses the dimension but has at least one concrete gap you can name
+- 5-6: surface-level — present but shallow, generic, or missing key parts
+- 3-4: weak — significant problems; a practitioner could not act on this
 - 1-2: failing — this dimension is essentially absent
+
+Calibration anchors:
+- A document that correctly lists N items but gives only one-line descriptions per item: depth=5, specificity=5
+- A document where every section has a code snippet or step-by-step example: depth may reach 8-9
+- A document that covers the topic broadly but omits 2+ major subtopics an expert would expect: completeness=6
+- Do not score 9+ on any dimension unless you cannot identify a single concrete improvement
 
 Task-type criteria:
 {task_criteria}
@@ -134,7 +140,9 @@ Universal rules:
 - A bullet list of one-liners with no implementation detail: depth <= 5.
 - issues must name the specific section and what is missing (e.g. "Section 2 has no implementation note")
 - feedback must tell the producer exactly what to add or change, not just that improvement is possible
-- Do not give 10 on any dimension unless it is genuinely exceptional — find at least one thing that could be improved"""
+- Do not give 10 on any dimension unless it is genuinely exceptional — find at least one thing that could be improved
+- For every dimension you scored 8 or below, include at least one specific issue describing exactly what would raise the score
+- Be a strict grader. When in doubt, score lower rather than higher."""
 
 
 # Task-type-specific criteria injected into EVAL_PROMPT
@@ -170,7 +178,7 @@ def detect_task_type(task: str) -> str:
     return "research"
 
 
-def evaluate(task: str, content: str, prior_issues: list[str] = None) -> dict:
+def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=None) -> dict:
     """Call the evaluator model. Returns parsed result dict."""
     task_type = detect_task_type(task)
     print(f"  [evaluate] task_type={task_type}  scoring output...")
@@ -186,6 +194,8 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None) -> dict:
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.0},
     )
+    if _trace is not None:
+        _trace.log_usage(response, stage="wiggum_eval")
 
     raw = response["message"]["content"].strip()
 
@@ -236,7 +246,7 @@ Evaluator feedback:
 Produce a corrected version. Output ONLY the revised markdown starting with # — no preamble, no commentary."""
 
 
-def revise(task: str, content: str, eval_result: dict) -> str:
+def revise(task: str, content: str, eval_result: dict, _trace=None) -> str:
     """Ask the producer model to revise the output given evaluator feedback."""
     print("  [revise] asking producer to fix issues...")
 
@@ -253,6 +263,8 @@ def revise(task: str, content: str, eval_result: dict) -> str:
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.1},
     )
+    if _trace is not None:
+        _trace.log_usage(response, stage="wiggum_revise")
 
     return response["message"]["content"].strip()
 
@@ -265,14 +277,21 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
     """
     Run the Wiggum verification loop on an existing output file.
 
-    Returns a trace dict with round-by-round results and final status.
+    Returns a trace dict with round-by-round results, final status, and token stats.
     """
+    import time as _time
+    from logger import RunTrace as _RunTrace
+
     global PRODUCER_MODEL, EVALUATOR_MODEL
     PRODUCER_MODEL = producer_model
     EVALUATOR_MODEL = evaluator_model
 
     expanded = os.path.expanduser(output_path)
     task_type = detect_task_type(task)
+
+    # Lightweight local trace just for token accumulation — not written to disk
+    _local_trace = _RunTrace(task=task, producer_model=producer_model, evaluator_model=evaluator_model)
+
     trace = {"task": task, "task_type": task_type, "output_path": expanded, "rounds": [], "final": None}
 
     print(f"\n[wiggum] starting verification loop")
@@ -288,7 +307,7 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         content = normalize(expanded)
 
         # 2. Evaluate
-        result = evaluate(task, content)
+        result = evaluate(task, content, _trace=_local_trace)
         score = result.get("score", 0.0)
         passed = result.get("passed", False)
         issues = [i for i in result.get("issues", []) if i and str(i).strip().lower() not in ("none", "n/a", "")]
@@ -315,15 +334,17 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         if passed:
             print(f"\n[wiggum] PASS on round {round_num} (score {score}/10)")
             trace["final"] = "PASS"
+            _attach_token_stats(trace, _local_trace)
             return trace
 
         if round_num == MAX_ROUNDS:
             print(f"\n[wiggum] FAIL — max rounds reached without passing")
             trace["final"] = "FAIL"
+            _attach_token_stats(trace, _local_trace)
             return trace
 
         # 3. Revise
-        revised_content = revise(task, content, result)
+        revised_content = revise(task, content, result, _trace=_local_trace)
 
         if not revised_content.strip():
             print("  [warn] producer returned empty revision, stopping loop")
@@ -336,7 +357,15 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         print(f"  [write] revision saved to {expanded}")
 
     trace["final"] = "FAIL"
+    _attach_token_stats(trace, _local_trace)
     return trace
+
+
+def _attach_token_stats(trace: dict, local_trace):
+    """Copy accumulated token stats from local_trace into the wiggum trace dict."""
+    trace["input_tokens"]    = local_trace.data["input_tokens"]
+    trace["output_tokens"]   = local_trace.data["output_tokens"]
+    trace["tokens_by_stage"] = local_trace.data["tokens_by_stage"]
 
 
 # ---------------------------------------------------------------------------
