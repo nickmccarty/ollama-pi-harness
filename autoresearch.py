@@ -57,7 +57,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 PROPOSER_MODEL      = "Qwen3-Coder:30b"   # stronger than producer — proposes improvements
-EVAL_TASKS          = ["T_A", "T_B"]      # subset for speed; T_A (enumerated) + T_B (open)
+EVAL_TASKS          = ["T_D", "T_E"]      # T_D (enumerated, context window) + T_E (open, prompt injection)
 DELTA_THRESHOLD     = 0.1                  # minimum score improvement to keep a change
 TSV_PATH            = "autoresearch.tsv"
 AGENT_PATH          = "agent.py"
@@ -202,7 +202,7 @@ def get_recent_eval_feedback(task_ids: list[str], n_before: int) -> str:
         "T_A": "top 5 context engineering",
         "T_B": "cost envelope management",
         "T_C": "3 most common failure modes",
-        "T_D": "context window management strategies",
+        "T_D": "top 3 context window management",
         "T_E": "prompt injection defense",
     }
     try:
