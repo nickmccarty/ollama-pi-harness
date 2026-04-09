@@ -19,7 +19,18 @@ import re
 import os
 import subprocess
 import textwrap
-import ollama
+import ollama as _ollama_raw
+
+# Keep models hot between calls — avoids 30-60s cold reload between pipeline stages.
+# OLLAMA_KEEP_ALIVE env var overrides the default; -1 means keep loaded forever.
+_KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
+
+def _ollama_chat(*args, **kwargs):
+    kwargs.setdefault("keep_alive", _KEEP_ALIVE)
+    return _ollama_raw.chat(*args, **kwargs)
+
+ollama = type("_OllamaShim", (), {"chat": staticmethod(_ollama_chat)})()
+
 from ddgs import DDGS
 from wiggum import loop as wiggum_loop
 from logger import RunTrace
@@ -45,13 +56,13 @@ MODEL = "pi-qwen-32b"
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "Output ONLY the markdown starting with #. For each section, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges (e.g., handling chunk overlap, detecting behavioral anomalies, or preventing prompt injection)."
+    "Output ONLY the markdown starting with #. For each section, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges, and explicitly mention at least one production-ready library or framework (e.g., LangChain, HuggingFace Transformers, Prometheus, ELK stack) where relevant to improve depth and specificity."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "Output ONLY the markdown starting with #. For each of the 5 sections, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges (e.g., handling chunk overlap, detecting behavioral anomalies, or preventing prompt injection)."
+    "Output ONLY the markdown starting with #. For each of the 5 sections, include 'What', 'Why', 'How' with specific tool names, versions, and code examples. Require at least one working code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges, and explicitly mention at least one production-ready library or framework (e.g., LangChain, HuggingFace Transformers, Prometheus, ELK stack) where relevant to improve depth and specificity."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 SEARCHES_PER_TASK = 2       # always run this many searches before synthesizing
