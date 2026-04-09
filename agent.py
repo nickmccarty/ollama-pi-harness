@@ -45,13 +45,13 @@ MODEL = "pi-qwen-32b"
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "Using the findings above, output ONLY the markdown document starting with # — no preamble, no commentary, no file path references, no explanation. Each item must include a concrete implementation note or example. Do not mention where the file will be saved."
+    "Using the findings above, output ONLY the markdown document starting with # — no preamble, no commentary, no file path references, no explanation. Each item must include a concrete implementation note or example, such as specific tools, versions, code snippets, configuration steps, or measurable outcomes. Do not mention where the file will be saved."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "Output ONLY the markdown document starting with # — no preamble, no commentary, no file path references, no explanation. Each item must include a concrete implementation note or example. Do not mention where the file will be saved."
+    "Output ONLY the markdown document starting with # — no preamble, no commentary, no file path references, no explanation. Each item must include a concrete implementation note or example, such as specific tools, versions, code snippets, configuration steps, or measurable outcomes. Do not mention where the file will be saved."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 SEARCHES_PER_TASK = 2       # always run this many searches before synthesizing
