@@ -32,6 +32,27 @@ tags: [experiments, results, producer, eval]
 
 See also: [Eval Framework](eval-framework.md) · [Synthesis Instructions](synthesis-instructions.md) · [Architecture](architecture.md)
 
+## Autoresearch session 2 — results (T_D + T_E, in progress)
+
+Eval tasks switched from T_A+T_B to T_D+T_E after T_A structural failure (producer
+knowledge gap on LangChain APIs) and T_B extreme latency (4000s+ from model
+attempting file writes via run_python).
+
+Infrastructure fixes applied before session 2:
+- `WIGGUM_MAX_ROUNDS=1` in eval subprocess — eliminated revision rounds 2+3 (~600s savings/exp)
+- `OLLAMA_KEEP_ALIVE=-1` baked into ollama.chat shim — prevents model unload between stages
+- ChromaDB semantic memory replacing FTS5 keyword retrieval in memory.py
+
+Session 2 baseline (T_D=8.1, T_E=8.1 → avg 8.1):
+
+| Exp | Instruction change | Score | Status |
+|-----|-------------------|-------|--------|
+| 1 | Added numbered steps + inline code blocks in How sections | 8.315 | KEEP |
+| 2 | Added concrete implementation notes for edge cases (chunk overlap, anomaly detection) | 8.420 | KEEP |
+| 3+ | Running... | — | — |
+
+Session 2 running score: **8.420** (exp 2, +0.135 above baseline).
+
 ## Autoresearch session 1 — results
 
 Loop fixed after two bugs:

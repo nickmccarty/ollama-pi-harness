@@ -43,3 +43,12 @@ test-vision.png
 # Autoresearch
 autoresearch.tsv
 wiggum_test_output.md
+
+# ChromaDB vector store (rebuilt automatically from memory.db)
+chroma_memory/
+
+# llama.cpp source + build (large, not project code)
+llama.cpp/
+
+# Knowledge graph outputs (generated artifacts)
+graphs/*.html

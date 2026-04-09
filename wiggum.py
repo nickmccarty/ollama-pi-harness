@@ -25,7 +25,16 @@ import os
 import json
 import subprocess
 import re
-import ollama
+import ollama as _ollama_raw
+
+_KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
+
+def _ollama_chat(*args, **kwargs):
+    kwargs.setdefault("keep_alive", _KEEP_ALIVE)
+    return _ollama_raw.chat(*args, **kwargs)
+
+ollama = type("_OllamaShim", (), {"chat": staticmethod(_ollama_chat)})()
+
 
 try:
     from markitdown import MarkItDown
@@ -286,6 +295,7 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
     Run the Wiggum verification loop on an existing output file.
 
     Returns a trace dict with round-by-round results, final status, and token stats.
+    Respects WIGGUM_MAX_ROUNDS env var to cap rounds (e.g. set to 1 for autoresearch eval).
     """
     import time as _time
     from logger import RunTrace as _RunTrace
@@ -297,6 +307,15 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
     expanded = os.path.expanduser(output_path)
     task_type = detect_task_type(task)
 
+    # Allow env override of max rounds (autoresearch sets WIGGUM_MAX_ROUNDS=1 to save time)
+    max_rounds = MAX_ROUNDS
+    env_cap = os.environ.get("WIGGUM_MAX_ROUNDS")
+    if env_cap is not None:
+        try:
+            max_rounds = max(1, int(env_cap))
+        except ValueError:
+            pass
+
     # Lightweight local trace just for token accumulation — not written to disk
     _local_trace = _RunTrace(task=task, producer_model=producer_model, evaluator_model=evaluator_model)
 
@@ -306,9 +325,9 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
     print(f"  file:  {expanded}")
     print(f"  task_type: {task_type}")
     print(f"  model: evaluator={evaluator_model} producer={producer_model}")
-    print(f"  max rounds: {MAX_ROUNDS}\n")
+    print(f"  max rounds: {max_rounds}\n")
 
-    for round_num in range(1, MAX_ROUNDS + 1):
+    for round_num in range(1, max_rounds + 1):
         print(f"--- round {round_num} ---")
 
         # 1. Normalize

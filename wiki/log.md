@@ -10,3 +10,9 @@ Grep recent: `grep "^## \[" wiki/log.md | tail -10`
 Initial wiki directory, index, and seed pages created from experiments 01–04 and project context.
 
 ## [2026-04-09] ingest | autoresearch session 1 — 13 experiments, best 8.845 (exp 3)
+
+## [2026-04-09] ingest | marginal-value-search spec added
+
+## [2026-04-09] ingest | chromadb-memory-migration spec added
+
+## [2026-04-09] update | session 2 progress + ChromaDB migration + kg_gen added

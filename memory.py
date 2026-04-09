@@ -2,17 +2,22 @@
 memory.py — persistent observation store for the agent pipeline.
 
 Inspired by claude-mem's architecture but runs fully locally via Ollama.
-Uses SQLite + FTS5 for storage and retrieval; glm4:9b for compression.
+Storage:   SQLite + FTS5 (source of truth, metadata, fallback retrieval)
+Retrieval: ChromaDB + sentence-transformers (semantic cosine similarity)
+Compression: glm4:9b
 
 Lifecycle:
   1. run() start  → get_context(task)       → inject into synthesize()
-  2. run() end    → compress_and_store(...)  → write to SQLite
+  2. run() end    → compress_and_store(...)  → write to SQLite + ChromaDB
 
 Usage:
-    from memory import MemoryStore
-    store = MemoryStore()
+    from memory import MemoryStore, assess_novelty
+    store   = MemoryStore()
     context = store.get_context(task)           # call before synthesis
     store.compress_and_store(task, ...)         # call after run completes
+
+    # For gather_research novelty gating:
+    score = assess_novelty(new_results, knowledge_state)   # 0–10
 """
 
 import json
@@ -23,10 +28,14 @@ from datetime import datetime, timezone
 
 import ollama
 
-COMPRESSION_MODEL = "glm4:9b"
-DB_PATH = os.path.join(os.path.dirname(__file__), "memory.db")
+COMPRESSION_MODEL   = "glm4:9b"
+DB_PATH             = os.path.join(os.path.dirname(__file__), "memory.db")
+CHROMA_PATH         = os.path.join(os.path.dirname(__file__), "chroma_memory")
+CHROMA_COLLECTION   = "observations_vec"
+EMBED_MODEL         = "all-MiniLM-L6-v2"   # ~22MB, local, no API key
 MAX_CONTEXT_OBSERVATIONS = 4    # observations injected per run
-MAX_EXCERPT_CHARS = 600         # output excerpt sent to compression model
+MAX_EXCERPT_CHARS   = 600       # output excerpt sent to compression model
+SEMANTIC_CANDIDATES = 12        # over-fetch from ChromaDB before re-ranking
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +128,6 @@ def compress(task: str, task_type: str, queries: list[str], output_content: str,
         text = response["message"]["content"].strip()
         return _parse_compression(text)
     except Exception as e:
-        # Fallback: store task as title, no narrative/facts
         return {
             "title": task[:80],
             "narrative": f"[compression failed: {e}]",
@@ -144,12 +152,9 @@ def _parse_compression(text: str) -> dict:
         try:
             result["facts"] = json.loads(facts_m.group(1))
         except json.JSONDecodeError:
-            # Fall back to line-by-line parsing
-            raw = facts_m.group(1)
-            items = re.findall(r'"([^"]+)"', raw)
+            items = re.findall(r'"([^"]+)"', facts_m.group(1))
             result["facts"] = items
 
-    # If parsing failed, use the raw text as narrative
     if not result["title"]:
         result["title"] = text.splitlines()[0][:80] if text else "unknown"
     if not result["narrative"]:
@@ -159,12 +164,46 @@ def _parse_compression(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# ChromaDB helpers
+# ---------------------------------------------------------------------------
+
+def _get_chroma_ef():
+    from chromadb.utils import embedding_functions
+    return embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name=EMBED_MODEL,
+        device="cuda" if _cuda_available() else "cpu",
+    )
+
+
+def _cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+def _obs_embed_text(row) -> str:
+    """Build the text that gets embedded for a single observation row."""
+    parts = [row["title"] or "", row["narrative"] or ""]
+    if row["facts"]:
+        try:
+            facts = json.loads(row["facts"])
+            parts.extend(str(f) for f in facts)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return " ".join(p for p in parts if p)
+
+
+# ---------------------------------------------------------------------------
 # MemoryStore
 # ---------------------------------------------------------------------------
 
 class MemoryStore:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
+        self._chroma_client = None
+        self._chroma_col = None
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -174,8 +213,61 @@ class MemoryStore:
 
     def _init_db(self):
         with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")  # safe for concurrent multi-process writes
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+
+    # ------------------------------------------------------------------
+    # ChromaDB init + migration
+    # ------------------------------------------------------------------
+
+    def _get_chroma(self):
+        """Lazy-init ChromaDB client and collection. Auto-migrates if needed."""
+        if self._chroma_col is not None:
+            return self._chroma_col
+        try:
+            import chromadb
+            client = chromadb.PersistentClient(path=CHROMA_PATH)
+            ef = _get_chroma_ef()
+            col = client.get_or_create_collection(
+                name=CHROMA_COLLECTION,
+                embedding_function=ef,
+                metadata={"hnsw:space": "cosine"},
+            )
+            # Auto-migrate any observations not yet in ChromaDB
+            sqlite_count = self.count()
+            chroma_count = col.count()
+            if chroma_count < sqlite_count:
+                self._migrate_to_chroma(col)
+            self._chroma_client = client
+            self._chroma_col = col
+            return col
+        except Exception as e:
+            print(f"  [memory] ChromaDB unavailable: {e} — using FTS5 fallback")
+            return None
+
+    def _migrate_to_chroma(self, col):
+        """Backfill ChromaDB from existing SQLite observations."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, title, narrative, facts FROM observations ORDER BY id"
+            ).fetchall()
+
+        existing = set(col.get(include=[])["ids"])
+        to_add = [r for r in rows if str(r["id"]) not in existing]
+        if not to_add:
+            return
+
+        print(f"  [memory] migrating {len(to_add)} observation(s) to ChromaDB...")
+        batch_size = 50
+        for i in range(0, len(to_add), batch_size):
+            batch = to_add[i:i + batch_size]
+            col.upsert(
+                ids=[str(r["id"]) for r in batch],
+                documents=[_obs_embed_text(r) for r in batch],
+                metadatas=[{"task_type": "unknown", "final_score": 0.0,
+                            "timestamp": ""} for r in batch],
+            )
+        print(f"  [memory] migration done")
 
     # ------------------------------------------------------------------
     # Write path
@@ -212,8 +304,9 @@ class MemoryStore:
         score = wiggum_scores[-1] if wiggum_scores else None
         facts_json = json.dumps(obs["facts"]) if obs["facts"] else None
 
+        # Write to SQLite
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """INSERT INTO observations
                    (timestamp, task, task_type, title, narrative, facts, output_path, final_score, final)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -229,6 +322,28 @@ class MemoryStore:
                     final,
                 ),
             )
+            rowid = cursor.lastrowid
+
+        # Index in ChromaDB
+        col = self._get_chroma()
+        if col is not None:
+            try:
+                embed_text = _obs_embed_text({
+                    "title": obs["title"],
+                    "narrative": obs["narrative"],
+                    "facts": facts_json,
+                })
+                col.upsert(
+                    ids=[str(rowid)],
+                    documents=[embed_text],
+                    metadatas=[{
+                        "task_type": task_type or "unknown",
+                        "final_score": score or 0.0,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }],
+                )
+            except Exception as e:
+                print(f"  [memory] ChromaDB upsert failed (non-fatal): {e}")
 
         return obs
 
@@ -265,14 +380,61 @@ class MemoryStore:
         return "\n".join(lines).strip()
 
     def _search(self, task: str, n: int) -> list[sqlite3.Row]:
-        """FTS5 search with recency tie-breaking. Falls back to recency-only if no FTS matches."""
-        query_terms = _fts_query(task)
+        """
+        Semantic retrieval via ChromaDB with SQLite metadata join.
+        Re-ranks by blending similarity + quality score.
+        Falls back to FTS5 if ChromaDB unavailable.
+        """
+        col = self._get_chroma()
+        if col is not None and col.count() > 0:
+            try:
+                results = col.query(
+                    query_texts=[task],
+                    n_results=min(SEMANTIC_CANDIDATES, col.count()),
+                    include=["distances", "metadatas"],
+                )
+                ids       = results["ids"][0]
+                distances = results["distances"][0]
 
+                if ids:
+                    rowids = [int(i) for i in ids]
+                    placeholders = ",".join("?" * len(rowids))
+                    with self._connect() as conn:
+                        rows_by_id = {
+                            row["id"]: row
+                            for row in conn.execute(
+                                f"SELECT id, timestamp, task, task_type, title, "
+                                f"narrative, facts, final_score "
+                                f"FROM observations WHERE id IN ({placeholders})",
+                                rowids,
+                            ).fetchall()
+                        }
+
+                    scored = []
+                    for rowid, dist in zip(rowids, distances):
+                        row = rows_by_id.get(rowid)
+                        if not row:
+                            continue
+                        sim   = 1.0 - (dist / 2.0)          # cosine sim [0, 1]
+                        qual  = (row["final_score"] or 5.0) / 10.0
+                        rank  = 0.7 * sim + 0.3 * qual
+                        scored.append((rank, row))
+
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    return [row for _, row in scored[:n]]
+            except Exception as e:
+                print(f"  [memory] semantic search error ({e}) — falling back to FTS5")
+
+        return self._search_fts(task, n)
+
+    def _search_fts(self, task: str, n: int) -> list[sqlite3.Row]:
+        """FTS5 keyword search with recency tie-breaking. Fallback only."""
+        query_terms = _fts_query(task)
         with self._connect() as conn:
             if query_terms:
                 try:
                     rows = conn.execute(
-                        """SELECT o.timestamp, o.task, o.task_type, o.title,
+                        """SELECT o.id, o.timestamp, o.task, o.task_type, o.title,
                                   o.narrative, o.facts, o.final_score
                            FROM observations_fts f
                            JOIN observations o ON o.id = f.rowid
@@ -284,11 +446,10 @@ class MemoryStore:
                     if rows:
                         return rows
                 except sqlite3.OperationalError:
-                    pass  # malformed FTS query — fall through to recency
+                    pass
 
-            # Fallback: most recent N observations
             return conn.execute(
-                """SELECT timestamp, task, task_type, title, narrative, facts, final_score
+                """SELECT id, timestamp, task, task_type, title, narrative, facts, final_score
                    FROM observations
                    ORDER BY timestamp DESC
                    LIMIT ?""",
@@ -301,14 +462,81 @@ class MemoryStore:
 
 
 # ---------------------------------------------------------------------------
+# Novelty scoring — for gather_research() marginal value search
+# ---------------------------------------------------------------------------
+
+def assess_novelty(new_results: list[dict], knowledge_state: str) -> int:
+    """
+    Score 0–10 how much new_results adds beyond knowledge_state.
+    10 = entirely new information, 0 = completely redundant.
+
+    Uses ChromaDB ephemeral collection + sentence-transformers cosine similarity.
+    Falls back to word-overlap heuristic if ChromaDB unavailable.
+    """
+    if not knowledge_state or not new_results:
+        return 10
+
+    try:
+        import chromadb
+        ef = _get_chroma_ef()
+        client = chromadb.EphemeralClient()
+        col = client.get_or_create_collection(
+            name="novelty_session",
+            embedding_function=ef,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+        # Index knowledge state as sentence-level chunks
+        chunks = [s.strip() for s in re.split(r'[.\n]', knowledge_state)
+                  if len(s.strip()) > 20]
+        if not chunks:
+            return 10
+
+        col.upsert(
+            ids=[f"k{i}" for i in range(len(chunks))],
+            documents=chunks,
+        )
+
+        # Query with each new result body; find minimum distance to known chunks
+        new_bodies = [r.get("body", "") for r in new_results if r.get("body", "").strip()]
+        if not new_bodies:
+            return 10
+
+        results = col.query(
+            query_texts=new_bodies,
+            n_results=1,
+            include=["distances"],
+        )
+        min_distances = [r[0] for r in results["distances"] if r]
+        if not min_distances:
+            return 10
+
+        # cosine distance: 0.0 = identical → novelty 0
+        #                  1.0 = orthogonal → novelty 5
+        #                  2.0 = opposite   → novelty 10
+        avg_dist = sum(min_distances) / len(min_distances)
+        return min(10, round(avg_dist * 5))
+
+    except Exception as e:
+        print(f"  [novelty] chroma unavailable ({e}) — using heuristic")
+        return _novelty_heuristic(new_results, knowledge_state)
+
+
+def _novelty_heuristic(new_results: list[dict], knowledge_state: str) -> int:
+    """Word overlap fallback."""
+    new_words   = set(w for r in new_results for w in r.get("body", "").lower().split())
+    known_words = set(knowledge_state.lower().split())
+    if not new_words:
+        return 0
+    return round(len(new_words - known_words) / len(new_words) * 10)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _fts_query(task: str) -> str:
-    """
-    Build a safe FTS5 MATCH query from a task string.
-    Extracts meaningful words, strips FTS5 special characters.
-    """
+    """Build a safe FTS5 MATCH query from a task string."""
     STOP = {
         "the", "a", "an", "and", "or", "for", "to", "of", "in", "on",
         "at", "by", "is", "are", "was", "be", "with", "from", "that",
@@ -317,9 +545,7 @@ def _fts_query(task: str) -> str:
     }
     words = re.findall(r'\b[a-zA-Z]{3,}\b', task)
     terms = [w.lower() for w in words if w.lower() not in STOP]
-    # Deduplicate, keep order
-    seen = set()
-    unique = []
+    seen, unique = set(), []
     for t in terms:
         if t not in seen:
             seen.add(t)
@@ -335,20 +561,32 @@ if __name__ == "__main__":
     import sys
 
     store = MemoryStore()
-    print(f"Memory store: {store.db_path}")
-    print(f"Observations: {store.count()}\n")
+    device = "GPU" if _cuda_available() else "CPU"
+    print(f"Memory store:  {store.db_path}")
+    print(f"Observations:  {store.count()}")
+    print(f"Embed device:  {device} ({EMBED_MODEL})")
+
+    col = store._get_chroma()
+    if col:
+        print(f"ChromaDB:      {col.count()} vectors  ({CHROMA_PATH})")
+    else:
+        print("ChromaDB:      unavailable — FTS5 fallback active")
+
+    print()
 
     if "--search" in sys.argv:
-        idx = sys.argv.index("--search")
+        idx   = sys.argv.index("--search")
         query = " ".join(sys.argv[idx + 1:])
+        print(f"Query: {query!r}\n")
         ctx = store.get_context(query)
         print(ctx if ctx else "(no matches)")
     else:
-        # Show most recent observations
         with store._connect() as conn:
             rows = conn.execute(
-                "SELECT timestamp, title, task_type, final_score, final FROM observations ORDER BY timestamp DESC LIMIT 10"
+                "SELECT timestamp, title, task_type, final_score, final "
+                "FROM observations ORDER BY timestamp DESC LIMIT 10"
             ).fetchall()
         for r in rows:
-            score = f"{r['final_score']:.1f}" if r['final_score'] else "n/a"
-            print(f"  [{r['timestamp'][:10]}] {r['title']!r}  ({r['task_type']}, {score}/10, {r['final']})")
+            score = f"{r['final_score']:.1f}" if r["final_score"] else "n/a"
+            print(f"  [{r['timestamp'][:10]}] {r['title']!r}  "
+                  f"({r['task_type']}, {score}/10, {r['final']})")

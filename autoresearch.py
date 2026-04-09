@@ -36,7 +36,16 @@ import subprocess
 import sys
 import time
 
-import ollama
+import ollama as _ollama_raw
+
+_KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
+
+def _ollama_chat(*args, **kwargs):
+    kwargs.setdefault("keep_alive", _KEEP_ALIVE)
+    return _ollama_raw.chat(*args, **kwargs)
+
+ollama = type("_OllamaShim", (), {"chat": staticmethod(_ollama_chat)})()
+
 
 try:
     from ddgs import DDGS
@@ -450,7 +459,7 @@ def run_eval(task_ids: list[str]) -> float:
     """Run eval_suite --score --tasks <tasks> and return composite float."""
     tasks_arg = ",".join(task_ids)
     print(f"  [eval] running eval_suite on {tasks_arg}...")
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "WIGGUM_MAX_ROUNDS": "1", "OLLAMA_KEEP_ALIVE": "-1"}
     result = subprocess.run(
         [PYTHON, "eval_suite.py", "--score", "--tasks", tasks_arg],
         capture_output=True,

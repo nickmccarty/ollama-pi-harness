@@ -2,23 +2,49 @@
 
 This file tells your LLM agent how to maintain the project wiki.
 
+## Environment
+
+```
+conda activate ollama-pi
+```
+
+Key dependencies: `ollama`, `ddgs`, `markitdown`, `jinja2`, `chromadb`,
+`sentence-transformers`, `torch` (cu118), `graphviz`, `requests`, `Pillow`.
+
 ## Directory layout
 
 ```
 harness-engineering/
-├── wiki/               ← LLM-maintained knowledge base (agent writes this)
-│   ├── index.md        ← content catalog; updated by wiki_tools.py
-│   ├── log.md          ← append-only operations log
+├── wiki/                    ← LLM-maintained knowledge base (agent writes this)
+│   ├── index.md             ← content catalog; updated by wiki_tools.py
+│   ├── log.md               ← append-only operations log
 │   ├── architecture.md
 │   ├── eval-framework.md
 │   ├── experiments.md
-│   └── synthesis-instructions.md
-├── experiment-*.md     ← raw experiment records (immutable — never edit)
-├── runs.jsonl          ← agent run log (immutable — never edit)
-├── journal.md          ← dev journal (narrative; append-only)
-├── roadmap.md          ← planning and stage tracking
-└── README.md           ← public-facing overview
+│   ├── synthesis-instructions.md
+│   ├── marginal-value-search.md   ← design spec: saturation-based search loop
+│   └── chromadb-memory-migration.md  ← design spec: semantic memory retrieval
+├── graphs/                  ← knowledge graph HTML outputs (gitignored)
+├── experiment-*.md          ← raw experiment records (immutable — never edit)
+├── runs.jsonl               ← agent run log (immutable — never edit)
+├── journal.md               ← dev journal (narrative; append-only)
+├── roadmap.md               ← planning and stage tracking
+└── README.md                ← public-facing overview
 ```
+
+## Key modules
+
+| File | Purpose |
+|------|---------|
+| `agent.py` | Main research + write + verify pipeline |
+| `wiggum.py` | Verification loop (WIGGUM_MAX_ROUNDS env var caps rounds) |
+| `memory.py` | Observation store — SQLite + ChromaDB semantic retrieval + `assess_novelty()` |
+| `autoresearch.py` | Autonomous synthesis instruction improvement loop |
+| `search_cache.py` | SQLite TTL cache for DDGS queries |
+| `kg_gen.py` | Knowledge graph generator — Ollama → D3.js HTML via Jinja2 |
+| `kg_template.html.j2` | D3.js force-directed graph template |
+| `eval_suite.py` | Regression harness — `--score --tasks T_D,T_E` for autoresearch |
+| `wiki_tools.py` | Python-deterministic wiki maintenance (index / log / lint) |
 
 ## Python-for-determinism rule
 
