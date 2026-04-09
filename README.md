@@ -17,7 +17,8 @@ orchestrator.py          ← compound tasks: decompose → run subtasks → asse
         ├── memory.py        retrieve relevant past observations (SQLite FTS5)
         ├── wiggum.py        evaluate → revise → verify loop
         ├── vision.py        image-to-text preprocessing (llama3.2-vision)
-        └── security.py      code scanner, path sandbox, injection scanner
+        ├── security.py      code scanner, path sandbox, injection scanner
+        └── markitdown       rich document conversion + URL enrichment (optional)
 
 shared: logger.py / runs.jsonl, memory.py / memory.db
 ```
@@ -28,9 +29,10 @@ memory.get_context()
   → make_plan()                   glm4:9b analyses task + memory
     → gather_research()           2 planned web searches + quality floor fallback
       → vision preprocessing      llama3.2-vision if image paths detected
-      → read_file injection        text file contents if file paths detected
+      → read_file injection        text/rich-doc contents if file paths detected
+      → markitdown URL enrich      full page content for top 2 search result URLs
       → run_python tool loop       optional pre-synthesis code execution
-        → synthesize()             pi-qwen produces markdown document
+        → synthesize()             pi-qwen-32b produces markdown document
           → count check + retry   harness-enforced section count
             → write output
               → wiggum loop        evaluate → revise → verify (up to 3 rounds)
@@ -64,7 +66,7 @@ ollama create pi-qwen-32b -f Modelfile.32b  # 32B producer (requires Modelfile.3
 ```bash
 conda create -n ollama-pi python=3.11
 conda activate ollama-pi
-pip install ollama ddgs
+pip install ollama ddgs "markitdown[all]"
 ```
 
 ---
@@ -88,6 +90,16 @@ python orchestrator.py "Research agent failure modes and context engineering, sy
 python eval_suite.py              # run all tasks then check criteria
 python eval_suite.py --fast       # check existing output files only
 python eval_suite.py --no-wiggum  # run tasks, skip verification
+python eval_suite.py --generated  # include synthetic tasks from tinytroupe_tasks.py
+```
+
+**Autoresearch (autonomous synthesis-instruction optimizer):**
+```bash
+python autoresearch.py                    # loop indefinitely on T_A + T_B
+python autoresearch.py --tasks T_A,T_B   # explicit task subset
+python autoresearch.py --delta 0.2       # stricter keep threshold
+
+python tinytroupe_tasks.py               # generate synthetic eval tasks from 8 personas
 ```
 
 **Inspect memory:**
@@ -120,8 +132,8 @@ python inspect_run.py --all    # summary table of all runs
 
 | Role | Model | Notes |
 |------|-------|-------|
-| Producer (default) | `pi-qwen` (qwen2.5:7b) | Custom Modelfile — task-completion focus, tool-capable |
-| Producer (upgrade) | `pi-qwen-32b` (qwen2.5:32b Q4_K_M) | 4.5× parameters; same family, same Modelfile format; ~20GB |
+| Producer (default) | `pi-qwen-32b` (qwen2.5:32b Q4_K_M) | Custom Modelfile — ~20GB; confirmed upgrade over 7B on depth+specificity |
+| Producer (fallback) | `pi-qwen` (qwen2.5:7b) | Faster, lower quality; use with `--producer pi-qwen` |
 | Evaluator | `Qwen3-Coder:30b` | Must be larger/different than producer — drives revision loop |
 | Planner / Compressor | `glm4:9b` | Different architecture from producer; fast enough for planning and memory compression |
 | Vision | `llama3.2-vision` | Image-to-text preprocessing only; does not replace producer |
@@ -148,15 +160,19 @@ python inspect_run.py --all    # summary table of all runs
 | `vision.py` | llama3.2-vision routing for image inputs |
 | `security.py` | Code scanner, path sandbox, prompt injection scanner |
 | `logger.py` | Structured per-run trace — appends to `runs.jsonl` |
-| `eval_suite.py` | Regression harness — 5 tasks × 6 criteria |
+| `eval_suite.py` | Regression harness — 5 fixed tasks + optional generated tasks |
+| `autoresearch.py` | Autonomous synthesis-instruction optimizer (Karpathy-style loop) |
+| `autoresearch_program.md` | Autoresearch scope, metric, keep rule, and dimension weights |
+| `tinytroupe_tasks.py` | Synthetic eval task generator — 8 practitioner personas |
 | `analytics.py` | Cross-run analysis from `runs.jsonl` |
 | `inspect_run.py` | Pretty-print last N runs with token/stage breakdown |
 | `analyze_exp01.py` | Experiment-01 analysis script |
 | `analyze_exp02.py` | Experiment-02 analysis script |
+| `analyze_exp03.py` | Experiment-03 analysis — model-filtered, cross-experiment comparison |
+| `run_exp04.py` | Experiment-04 runner — 9-run CRD for producer upgrade impact |
+| `analyze_exp04.py` | Experiment-04 analysis script |
 | `Modelfile` | Ollama Modelfile for `pi-qwen` (qwen2.5:7b) |
 | `Modelfile.32b` | Ollama Modelfile for `pi-qwen-32b` (qwen2.5:32b Q4_K_M) |
-| `run_exp03.py` | Experiment-03 runner — 9-run CRD for evaluator upgrade impact |
-| `analyze_exp03.py` | Experiment-03 analysis — model-filtered, cross-experiment comparison |
 | `eval.sh` | Original filesystem-level eval (superseded by `eval_suite.py`) |
 
 **Runtime files (gitignored):**
@@ -185,6 +201,7 @@ All tool execution passes through `security.py` before running:
 - [`experiment-01.md`](experiment-01.md) — 9-run CRD: baseline pipeline characterisation
 - [`experiment-02.md`](experiment-02.md) — 9-run CRD: harness upgrade impact (count constraint, rubric, task-type criteria)
 - [`experiment-03.md`](experiment-03.md) — 9-run CRD: evaluator upgrade impact (glm4:9b → Qwen3-Coder:30b)
+- [`experiment-04.md`](experiment-04.md) — 9-run CRD: producer upgrade impact (pi-qwen → pi-qwen-32b) — in progress
 
 ---
 

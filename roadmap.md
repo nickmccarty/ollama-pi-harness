@@ -101,6 +101,16 @@ Task-type-specific criteria added: `detect_task_type()` classifies each task as 
 - **Path sandbox:** `read_file` restricted to `~/Desktop` and `~/Documents`. Blocklist for `.env`, SSH keys, `.pem`, `secrets`, `credentials`, etc.
 - **Prompt injection scanner:** Web search results and file contents scanned for injection patterns before entering synthesis prompt. Suspicious lines stripped (not just flagged). `injection_stripped` count logged per run.
 
+**MarkItDown integration — DONE.**
+
+`markitdown` added as a document-conversion backend with graceful fallback if not installed.
+
+1. **Rich document reading:** `RICH_EXTENSIONS = {.pdf, .docx, .xlsx, .pptx, .epub, ...}` — task-referenced rich documents are routed through `MarkItDown.convert()` instead of plain `open()`. Markdown output injected as file context alongside plain-text files.
+
+2. **URL enrichment:** after merging search snippets, `enrich_with_page_content` fetches full HTML for the top `URL_ENRICH_COUNT = 2` search result URLs and appends them to the research context (capped at 8k chars each). Observed: 3.4k snippet context → 19.7k after enrichment on experiment-04 run 4.
+
+Install: `pip install "markitdown[all]"`
+
 Remaining additional tools:
 - `list_files(directory)` - model can inspect the workspace
 - `playwright` / `chrome-devtools-mcp` - browser interaction and page content extraction
@@ -208,7 +218,7 @@ orchestrator.py
 
 `ThreadPoolExecutor` with subprocess workers. SUBTASK_MAX_RETRIES=1, SUBTASK_MAX_WORKERS=4. Wall time ~1.9× improvement on 2-subtask runs. Output captured per-subtask and printed sequentially after all complete.
 
-### 4c: Producer upgrade — CONFIRMED, PENDING DEFAULT SWAP
+### 4c: Producer upgrade — DONE (pi-qwen-32b is now default)
 
 Experiment-03 exposed the 7B producer ceiling: depth=6, specificity=6 on enumerated tasks regardless of revision. The evaluator is working; the producer is the bottleneck.
 
@@ -224,11 +234,27 @@ Experiment-03 exposed the 7B producer ceiling: depth=6, specificity=6 on enumera
 | `mistral-small3.1:24b` | ~15GB | Pulled, Modelfile pending |
 | `phi4:14b` | ~9GB | Pulled, needs template override for tool-calling |
 
-**Next:** make `pi-qwen-32b` the default producer (update `MODEL` in `agent.py` and `PRODUCER_MODEL` in `wiggum.py`). Run experiment-04 CRD to get clean comparison data.
+**Default swapped:** `MODEL = "pi-qwen-32b"` in `agent.py` and `PRODUCER_MODEL = "pi-qwen-32b"` in `wiggum.py`. **Experiment-04 in progress** — 9-run CRD (T_B, T_A, T_C × 3 replications each) to collect clean comparison data. Full design in `experiment-04.md`.
 
 ### 4b: Evaluator upgrade — DONE
 
 `Qwen3-Coder:30b` replaces `glm4:9b` as evaluator. 30B vs 9B — evaluator is now the most capable model in the stack. Revision loop now activates on genuinely weak outputs (7.0→8.8 on a minimal agent failure modes document). Prompt updated with calibration anchors, per-dimension issue requirement, and strict-bias instruction.
+
+### 4d: Autoresearch loop — DONE
+
+`autoresearch.py` — autonomous synthesis-instruction optimizer. Runs indefinitely, proposing modifications to `SYNTH_INSTRUCTION` and `SYNTH_INSTRUCTION_COUNT` in `agent.py`, testing them against the eval metric, and keeping improvements via git commit.
+
+**Metric:** `composite = 0.7 * mean_wiggum_r1 + 0.3 * criteria_rate * 10` — continuous float, comparable across experiments. Bottleneck dimensions: depth (0.30) and specificity (0.15).
+
+**Keep rule:** `new_score - baseline > 0.1` → keep + commit. Otherwise `git reset HEAD~1 --soft`.
+
+`autoresearch_program.md` defines the full scope, mutable boundaries, and what good looks like.
+
+### 4e: Synthetic eval tasks (TinyTroupe) — DONE
+
+`tinytroupe_tasks.py` — 8 practitioner personas generate diverse research task requests, saved to `generated_tasks.json`. Extends the autoresearch eval surface beyond 5 fixed tasks. `eval_suite.py --generated` loads and runs them.
+
+Install TinyTroupe: `pip install git+https://github.com/microsoft/TinyTroupe.git@main`
 
 ### Shared harness layer (in place)
 - Shared memory (`memory.db` — all agents read/write across the session)

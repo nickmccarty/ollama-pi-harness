@@ -758,3 +758,119 @@ Prints: timestamp, models, final status, duration, token totals, per-stage break
 ### `extract_path()` fix
 
 Also fixed a latent bug: the regex in `extract_path()` required a path prefix (`~/`, drive letter, `/`) — bare filenames like `output.md` would fail with "no .md output path found". Added a fallback branch to match bare filenames. Backwards-compatible — prefixed paths still match first.
+
+---
+
+## CoT / Evaluator Reasoning Capture
+
+The Qwen3-Coder:30b evaluator does not support `think=True` (the code-variant model returns HTTP 400 on that flag). However, the evaluator's `feedback` field — the prose explanation of why a score was assigned — is the functional equivalent of chain-of-thought for scoring decisions.
+
+The `wiggum_eval_log` field was added to every run record in `runs.jsonl`:
+
+```json
+"wiggum_eval_log": [
+  {
+    "round": 1,
+    "score": 7.0,
+    "dims": {"relevance": 8, "completeness": 7, "depth": 6, "specificity": 6, "structure": 9},
+    "issues": ["Section 2 lacks concrete implementation steps", "..."],
+    "feedback": "The output covers all required items but each is described in one to two sentences without a code snippet or step-by-step procedure..."
+  }
+]
+```
+
+The `thinking` key is also extracted and stored if the model ever returns it (non-empty `response.message.thinking`) — forward-compatible for when a thinking-capable evaluator is used.
+
+---
+
+## Autoresearch Loop
+
+Built `autoresearch.py` — an autonomous synthesis-instruction optimizer in the style of Karpathy's self-improvement loop.
+
+### What it does
+
+Runs indefinitely. Each iteration:
+1. Reads the current `SYNTH_INSTRUCTION` and `SYNTH_INSTRUCTION_COUNT` from `agent.py` (between `AUTORESEARCH:*:BEGIN/END` sentinel markers)
+2. Asks Qwen3-Coder:30b to propose a modification, given current instructions + experiment history + the last failed run's evaluator feedback
+3. Writes the proposal to `agent.py` and commits it
+4. Runs `eval_suite.py --score --tasks T_A,T_B` to get the composite score
+5. If `new_score - baseline > 0.1`: keeps the commit, updates the baseline
+6. Otherwise: `git reset HEAD~1 --soft && git checkout -- agent.py`, baseline unchanged
+7. Logs to `autoresearch.tsv` (untracked) and loops
+
+### Metric
+
+```
+composite = 0.7 * mean_wiggum_r1 + 0.3 * criteria_rate * 10
+```
+
+Continuous float — comparable across experiments. Bottleneck dimensions: **depth** (weight 0.30) and **specificity** (weight 0.15). The evaluator consistently penalises outputs where each item is described in 1-2 sentences without a code snippet, named tool, or step-by-step procedure.
+
+### Mutable scope
+
+Only `SYNTH_INSTRUCTION` and `SYNTH_INSTRUCTION_COUNT` in `agent.py` — the strings between the sentinel markers. Everything else is off-limits. Both constants must stay under ~300 characters combined.
+
+### Usage
+
+```bash
+python autoresearch.py                    # default: T_A + T_B, delta=0.1
+python autoresearch.py --tasks T_A,T_B   # explicit task subset
+python autoresearch.py --delta 0.2       # stricter keep threshold
+```
+
+`autoresearch.tsv` is untracked by git. Full specification in `autoresearch_program.md`.
+
+---
+
+## TinyTroupe Synthetic Task Generation
+
+Built `tinytroupe_tasks.py` — generates diverse eval tasks from 8 practitioner persona archetypes (DevOps, Data Scientist, Backend Engineer, Product Manager, Security Engineer, ML Infrastructure Engineer, Startup Founder, Tech Lead).
+
+Each persona is prompted to request a research task from an AI agent. The response is parsed, a filename is inferred, and criteria are auto-generated (exact_sections(N) for "top N" tasks, min_sections(3) for open-ended). Output saved to `generated_tasks.json`.
+
+Uses TinyTroupe persona simulation if `tinytroupe` is installed; falls back to raw `ollama.chat` with persona descriptions if not.
+
+`eval_suite.py` updated with:
+- `load_generated_suite(path)` — loads `generated_tasks.json` and converts serialisable `criteria_specs` to callable criterion functions
+- `--generated [path]` CLI flag — appends generated tasks to any run mode
+- `score_suite(..., extra_tasks=)` — generated tasks count toward the composite metric for autoresearch
+
+```bash
+python tinytroupe_tasks.py                    # generate from all 8 personas
+python eval_suite.py --generated              # run eval suite + generated tasks
+python eval_suite.py --score --generated      # include generated tasks in autoresearch score
+```
+
+---
+
+## MarkItDown Integration
+
+Added `markitdown` as a document-conversion backend throughout the research pipeline.
+
+### 1. Rich document reading
+
+`detect_text_files` now also matches `RICH_EXTENSIONS = {.pdf, .docx, .doc, .xlsx, .xls, .pptx, .ppt, .epub, .htm}`. When a task references one of these files, `read_file_context` routes it through `MarkItDown.convert()` instead of plain `open()`. The resulting markdown is injected into the synthesis prompt the same way plain-text file context is. All converted content still passes through the injection scanner before synthesis.
+
+```python
+result = _md_converter.convert(path)   # returns MarkItDownResult
+content = result.text_content          # markdown string
+```
+
+### 2. URL enrichment
+
+After merging search results, `enrich_with_page_content` fetches full page content for the top `URL_ENRICH_COUNT = 2` search result URLs via `MarkItDown.convert(url)`. Each is capped at `URL_ENRICH_MAX_CHARS = 8000` characters and appended as a `## Full page content` block before synthesis.
+
+**Observed impact (run 4/9, experiment-04):**
+- Search snippet context: 3,368 chars
+- After URL enrichment: +16,312 chars (2 pages fetched, 1 failed on Wikipedia robots block)
+- Nearly 6× more synthesis context
+
+**Side effect observed:** the larger context (19k chars) occasionally causes the model to produce a flat numbered list on first synthesis pass instead of H2 headers, triggering `count_check_retry`. This is caught and corrected by the existing retry path — not a functional regression.
+
+### 3. Graceful fallback
+
+`try/except ImportError` at startup. If `markitdown` is not installed, both paths are silently skipped and the agent runs exactly as before.
+
+```bash
+pip install "markitdown[all]"
+```
