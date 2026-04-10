@@ -538,6 +538,36 @@ def extract_count_constraint(task: str) -> int | None:
     return None
 
 
+def clean_synthesis_output(content: str) -> str:
+    """
+    Strip artefacts that models sometimes wrap around markdown output:
+      - Leading ```markdown / ```md / ``` fence + matching closing ```
+      - Trailing verification/commentary epilogue (file-write confirmation, bash snippets)
+      - Leading and trailing blank lines
+    """
+    content = content.strip()
+
+    # Strip outer markdown code fence (```markdown ... ```)
+    fence_match = re.match(r'^```(?:markdown|md)?\s*\n', content, re.IGNORECASE)
+    if fence_match:
+        content = content[fence_match.end():]
+        # Remove the last ``` that closes the outer fence
+        last_fence = content.rfind('\n```')
+        if last_fence != -1:
+            content = content[:last_fence]
+
+    # Strip trailing verification / file-write commentary the model sometimes appends
+    epilogue_re = re.compile(
+        r'\n+(?:#{1,4}\s*)?(?:Verification|Verify)[:\s].*$'
+        r'|\n+The (?:markdown )?file .{0,120} (?:was created|has been).*$'
+        r'|\n+This command will (?:display|show|confirm).*$',
+        re.DOTALL | re.IGNORECASE,
+    )
+    content = epilogue_re.sub('', content)
+
+    return content.strip()
+
+
 def count_output_items(content: str) -> int:
     """Count H2-level content sections in markdown, ignoring structural headers."""
     structural = {"introduction", "conclusion", "summary", "overview", "background", "references"}
@@ -723,6 +753,9 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
         with trace.span("synthesize", model=producer_model):
             content = synthesize(task, context, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
 
+        # Clean fences and trailing epilogues before any downstream processing
+        content = clean_synthesis_output(content)
+
         # Count constraint: planner takes precedence over regex
         expected_count = plan.expected_sections or extract_count_constraint(task)
         if expected_count is not None:
@@ -731,6 +764,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
                 print(f"\n[count check] expected {expected_count} items, got {actual_count} — retrying synthesis")
                 trace.log_count_retry()
                 content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
+                content = clean_synthesis_output(content)
                 actual_count = count_output_items(content)
                 if actual_count == expected_count:
                     print(f"  [count check] OK — {actual_count} items after retry")

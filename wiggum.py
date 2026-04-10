@@ -411,6 +411,13 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
             trace["final"] = "FAIL"
             return trace
 
+        # Strip fences/epilogues before writing
+        try:
+            from agent import clean_synthesis_output
+            revised_content = clean_synthesis_output(revised_content)
+        except Exception:
+            revised_content = revised_content.strip()
+
         # Write revised content back to disk
         with open(expanded, "w", encoding="utf-8") as f:
             f.write(revised_content)
