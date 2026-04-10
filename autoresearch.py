@@ -65,7 +65,7 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 
-PROPOSER_MODEL      = "Qwen3-Coder:30b"   # stronger than producer — proposes improvements
+PROPOSER_MODEL      = os.environ.get("PROPOSER_MODEL", "Qwen3-Coder:30b")  # override: PROPOSER_MODEL=kimi-k2.5:cloud
 EVAL_TASKS          = ["T_D", "T_E"]      # T_D (enumerated, context window) + T_E (open, prompt injection)
 DELTA_THRESHOLD     = 0.1                  # minimum score improvement to keep a change
 TSV_PATH            = "autoresearch.tsv"
