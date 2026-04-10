@@ -44,31 +44,53 @@ DEFAULT_TTL = 86_400   # 24 hours in seconds
 # DB init
 # ---------------------------------------------------------------------------
 
+def _migrate(conn: sqlite3.Connection, table: str, col_defs: list[str]):
+    """Add any missing columns to table. Safe to call on fresh or existing tables."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for col_def in col_defs:
+        col_name = col_def.split()[0]
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+    conn.commit()
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
+
+    # Create tables (columns may be missing on old DBs — migration runs next)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS search_cache (
             key        TEXT PRIMARY KEY,
             query      TEXT NOT NULL,
             results    TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            expires_at REAL NOT NULL
+            created_at REAL NOT NULL DEFAULT 0,
+            expires_at REAL NOT NULL DEFAULT 0
         )
     """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON search_cache(expires_at)")
-    # Research context cache — full gather_research() output keyed by task + task_type
     conn.execute("""
         CREATE TABLE IF NOT EXISTS research_cache (
-            key           TEXT PRIMARY KEY,
-            task          TEXT NOT NULL,
-            task_type     TEXT NOT NULL,
-            context       TEXT NOT NULL,
-            search_rounds INTEGER NOT NULL,
-            novelty_scores TEXT NOT NULL,
-            created_at    REAL NOT NULL,
-            expires_at    REAL NOT NULL
+            key            TEXT PRIMARY KEY,
+            task           TEXT NOT NULL,
+            task_type      TEXT NOT NULL,
+            context        TEXT NOT NULL,
+            search_rounds  INTEGER NOT NULL DEFAULT 0,
+            novelty_scores TEXT NOT NULL DEFAULT '[]',
+            created_at     REAL NOT NULL DEFAULT 0,
+            expires_at     REAL NOT NULL DEFAULT 0
         )
     """)
+    conn.commit()
+
+    # Migrate any missing columns before creating indexes that reference them
+    _migrate(conn, "search_cache",   ["created_at REAL NOT NULL DEFAULT 0",
+                                      "expires_at REAL NOT NULL DEFAULT 0"])
+    _migrate(conn, "research_cache", ["created_at REAL NOT NULL DEFAULT 0",
+                                      "expires_at REAL NOT NULL DEFAULT 0",
+                                      "search_rounds INTEGER NOT NULL DEFAULT 0",
+                                      "novelty_scores TEXT NOT NULL DEFAULT '[]'"])
+
+    # Indexes (safe now that all columns exist)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_expires    ON search_cache(expires_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rc_expires ON research_cache(expires_at)")
     conn.commit()
     return conn
