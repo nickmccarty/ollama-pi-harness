@@ -27,6 +27,37 @@ STAGE_COLORS = {
     "tool_loop":          "#fbbf24",
 }
 
+# Stage → model role (determines which cloud tier to apply for cost comparison)
+STAGE_ROLE = {
+    "synth":              "producer",
+    "synth_count":        "producer",
+    "tool_loop":          "producer",
+    "wiggum_eval":        "evaluator",
+    "wiggum_revise":      "evaluator",
+    "compress_knowledge": "planner",
+    "search_query":       "planner",
+}
+
+# Cloud pricing per 1M tokens (input, output) — edit to taste
+# Roles map to the cloud model you'd realistically substitute
+CLOUD_TIERS = [
+    # (display name,  input $/1M,  output $/1M,  applies_to_roles)
+    ("GPT-4o",        2.50,  10.00, {"producer", "evaluator", "planner"}),
+    ("GPT-4o mini",   0.15,   0.60, {"producer", "evaluator", "planner"}),
+    ("Claude Sonnet", 3.00,  15.00, {"producer", "evaluator", "planner"}),
+    ("Claude Haiku",  0.25,   1.25, {"producer", "evaluator", "planner"}),
+    ("Gemini 1.5 Pro",1.25,   5.00, {"producer", "evaluator", "planner"}),
+    ("Gemini Flash",  0.075,  0.30, {"producer", "evaluator", "planner"}),
+]
+
+# Embedding cost (OpenAI text-embedding-3-small equivalent): $/1M tokens
+EMBED_COST_PER_1M = 0.02
+
+# Local electricity config — edit to match your hardware
+GPU_WATTS        = 300    # RTX 3090/4090 range under load
+SYSTEM_WATTS     = 100    # CPU + rest of system
+ELECTRICITY_RATE = 0.12   # USD per kWh (US average)
+
 # ---------------------------------------------------------------------------
 # Data loading + transformation
 # ---------------------------------------------------------------------------
@@ -149,6 +180,8 @@ def build_payload(runs):
         })
     recent.reverse()
 
+    cost = build_cost_data(runs)
+
     return {
         "kpi": {
             "total": total, "passed": passed, "failed": failed, "errors": errors,
@@ -163,6 +196,94 @@ def build_payload(runs):
         "model_split":   {"names": model_names, "values": model_values},
         "hour_dist":     {"labels": hour_labels, "values": hour_values},
         "recent_runs":   recent,
+        "cost":          cost,
+    }
+
+
+def build_cost_data(runs: list[dict]) -> dict:
+    """Compute cloud-equivalent cost estimates and local electricity cost."""
+
+    # --- Aggregate tokens by role (producer / evaluator / planner / unknown) ---
+    role_tokens: dict[str, dict] = defaultdict(lambda: {"input": 0, "output": 0})
+    for r in runs:
+        for stage, vals in (r.get("tokens_by_stage") or {}).items():
+            role = STAGE_ROLE.get(stage, "unknown")
+            role_tokens[role]["input"]  += vals.get("input", 0)
+            role_tokens[role]["output"] += vals.get("output", 0)
+
+    total_in  = sum(v["input"]  for v in role_tokens.values())
+    total_out = sum(v["output"] for v in role_tokens.values())
+
+    # --- Cloud tier comparison ---
+    # Each tier applies one rate to all tokens regardless of role
+    # (realistic: you'd use the same cloud model for everything)
+    tier_rows = []
+    for name, price_in, price_out, _ in CLOUD_TIERS:
+        cost = (total_in / 1_000_000 * price_in) + (total_out / 1_000_000 * price_out)
+        tier_rows.append({
+            "name":       name,
+            "price_in":   price_in,
+            "price_out":  price_out,
+            "cost":       round(cost, 4),
+        })
+    tier_rows.sort(key=lambda x: x["cost"])
+
+    # --- Local electricity cost ---
+    total_runtime_s   = sum(r.get("run_duration_s", 0) or 0 for r in runs)
+    total_runtime_h   = total_runtime_s / 3600
+    total_watts       = GPU_WATTS + SYSTEM_WATTS
+    electricity_cost  = round((total_watts / 1000) * total_runtime_h * ELECTRICITY_RATE, 4)
+
+    # --- Savings vs each tier ---
+    for row in tier_rows:
+        row["savings"] = round(row["cost"] - electricity_cost, 4)
+
+    # --- Cumulative cost over time (cheapest cloud tier vs electricity) ---
+    cheapest_in  = min(t[1] for t in CLOUD_TIERS)
+    cheapest_out = min(t[2] for t in CLOUD_TIERS)
+    cumulative_labels     = []
+    cumulative_cloud      = []   # cheapest tier
+    cumulative_electric   = []
+    cum_in = cum_out = cum_s = 0.0
+    for r in runs:
+        ts = (r.get("timestamp") or "")[:19].replace("T", " ")
+        cum_in  += r.get("input_tokens",  0) or 0
+        cum_out += r.get("output_tokens", 0) or 0
+        cum_s   += r.get("run_duration_s", 0) or 0
+        cumulative_labels.append(ts)
+        cumulative_cloud.append(round(
+            cum_in / 1_000_000 * cheapest_in + cum_out / 1_000_000 * cheapest_out, 4
+        ))
+        cumulative_electric.append(round(
+            (total_watts / 1000) * (cum_s / 3600) * ELECTRICITY_RATE, 4
+        ))
+
+    # --- Role breakdown for stacked bar ---
+    role_order  = ["producer", "evaluator", "planner", "unknown"]
+    role_colors = {"producer": "#4f8ef7", "evaluator": "#a78bfa", "planner": "#fb923c", "unknown": "#8b949e"}
+    role_data = [
+        {
+            "role":   role,
+            "input":  role_tokens[role]["input"],
+            "output": role_tokens[role]["output"],
+            "color":  role_colors[role],
+        }
+        for role in role_order if role_tokens[role]["input"] + role_tokens[role]["output"] > 0
+    ]
+
+    return {
+        "tier_rows":           tier_rows,
+        "electricity_cost":    electricity_cost,
+        "total_runtime_h":     round(total_runtime_h, 2),
+        "gpu_watts":           total_watts,
+        "electricity_rate":    ELECTRICITY_RATE,
+        "cumulative_labels":   cumulative_labels,
+        "cumulative_cloud":    cumulative_cloud,
+        "cumulative_electric": cumulative_electric,
+        "cheapest_tier":       tier_rows[0]["name"] if tier_rows else "",
+        "role_data":           role_data,
+        "total_in":            total_in,
+        "total_out":           total_out,
     }
 
 
@@ -283,6 +404,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .score-fill { height: 100%; border-radius: 3px; background: var(--blue); }
 
+  .section-heading {
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    margin: 28px 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .saving-pos { color: var(--green); }
+  .saving-neg { color: var(--red); }
+
   @media (max-width: 900px) {
     .col-2, .col-3 { grid-template-columns: 1fr; }
   }
@@ -348,6 +480,36 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 </div>
+
+<h2 class="section-heading">Cost analysis — local vs cloud equivalent</h2>
+
+<div class="kpi-grid" id="cost-kpi-grid"></div>
+
+<div class="chart-grid col-2">
+  <div class="card">
+    <div class="card-title">Cloud equivalent cost comparison</div>
+    <div class="table-wrap">
+      <table id="costTable"></table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Tokens by model role</div>
+    <div class="chart-wrap" style="height:220px">
+      <canvas id="roleChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="chart-grid col-1">
+  <div class="card">
+    <div class="card-title">Cumulative cost over time — cheapest cloud tier vs local electricity</div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="cumulCostChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<h2 class="section-heading">Runs</h2>
 
 <div class="chart-grid col-1">
   <div class="card">
@@ -623,6 +785,129 @@ DATA.recent_runs.forEach(r => {
     `<td>${badge}</td>`,
   ];
   tbl.innerHTML += `<tr>${row.join('')}</tr>`;
+});
+
+// ---------------------------------------------------------------------------
+// Cost analysis
+// ---------------------------------------------------------------------------
+const C = DATA.cost;
+const fmt$ = n => '$' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 4});
+
+// KPI cards
+const cheapestCloud = C.tier_rows[0];
+const savings       = cheapestCloud ? cheapestCloud.savings : 0;
+const costCards = [
+  { label: 'Local electricity',  value: fmt$(C.electricity_cost),
+    sub: `${C.total_runtime_h}h × ${C.gpu_watts}W @ $${C.electricity_rate}/kWh`, cls: 'green' },
+  { label: 'Cheapest cloud equiv', value: fmt$(cheapestCloud?.cost ?? 0),
+    sub: cheapestCloud?.name ?? '', cls: 'orange' },
+  { label: 'Savings vs cheapest',  value: fmt$(savings),
+    sub: savings > 0 ? 'kept in your pocket' : 'cloud cheaper', cls: savings > 0 ? 'green' : 'red' },
+  { label: 'Most expensive equiv', value: fmt$(C.tier_rows[C.tier_rows.length-1]?.cost ?? 0),
+    sub: C.tier_rows[C.tier_rows.length-1]?.name ?? '', cls: 'purple' },
+  { label: 'Input tokens',  value: fmtK(C.total_in),  sub: 'across all stages', cls: 'blue' },
+  { label: 'Output tokens', value: fmtK(C.total_out), sub: 'across all stages', cls: 'blue' },
+];
+$('cost-kpi-grid').innerHTML = costCards.map(c => `
+  <div class="kpi ${c.cls}">
+    <div class="kpi-label">${c.label}</div>
+    <div class="kpi-value">${c.value}</div>
+    ${c.sub ? `<div class="kpi-sub">${c.sub}</div>` : ''}
+  </div>`).join('');
+
+// Cloud tier comparison table
+const ctbl = $('costTable');
+ctbl.innerHTML = `<tr>
+  <th>Provider</th>
+  <th>$/1M in</th>
+  <th>$/1M out</th>
+  <th>Est. total cost</th>
+  <th>Savings vs local</th>
+</tr>`;
+C.tier_rows.forEach(row => {
+  const savCls = row.savings > 0 ? 'saving-pos' : 'saving-neg';
+  const savStr = (row.savings > 0 ? '+' : '') + fmt$(row.savings);
+  ctbl.innerHTML += `<tr>
+    <td>${row.name}</td>
+    <td style="color:var(--muted)">${fmt$(row.price_in)}</td>
+    <td style="color:var(--muted)">${fmt$(row.price_out)}</td>
+    <td style="color:var(--yellow);font-weight:600">${fmt$(row.cost)}</td>
+    <td class="${savCls}">${savStr}</td>
+  </tr>`;
+});
+// Electricity row at bottom
+ctbl.innerHTML += `<tr style="border-top:1px solid var(--border)">
+  <td style="color:var(--green);font-weight:600">Local (electricity)</td>
+  <td colspan="2" style="color:var(--muted);font-size:11px">${C.gpu_watts}W × ${C.total_runtime_h}h</td>
+  <td style="color:var(--green);font-weight:600">${fmt$(C.electricity_cost)}</td>
+  <td style="color:var(--muted)">baseline</td>
+</tr>`;
+
+// Tokens by role (horizontal stacked bar)
+const roleLabels = C.role_data.map(d => d.role);
+new Chart($('roleChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Input', 'Output'],
+    datasets: C.role_data.map(d => ({
+      label:           d.role,
+      data:            [d.input, d.output],
+      backgroundColor: d.color,
+      borderRadius:    3,
+    })),
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    plugins: {
+      legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } },
+    },
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, stacked: true },
+      y: { ...CHART_DEFAULTS.scales.y, stacked: true,
+           ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: v => fmtK(v) } },
+    },
+  },
+});
+
+// Cumulative cost chart
+// Downsample to at most 200 points so the line renders cleanly
+const stride = Math.max(1, Math.floor(C.cumulative_labels.length / 200));
+const cumL  = C.cumulative_labels.filter((_,i)  => i % stride === 0);
+const cumCl = C.cumulative_cloud.filter((_,i)   => i % stride === 0);
+const cumEl = C.cumulative_electric.filter((_,i) => i % stride === 0);
+
+new Chart($('cumulCostChart'), {
+  type: 'line',
+  data: {
+    labels: cumL,
+    datasets: [
+      {
+        label:           C.cheapest_tier,
+        data:            cumCl,
+        borderColor:     '#fb923c',
+        backgroundColor: 'rgba(251,146,60,0.07)',
+        borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: true,
+      },
+      {
+        label:           'Local electricity',
+        data:            cumEl,
+        borderColor:     '#4ade80',
+        backgroundColor: 'rgba(74,222,128,0.07)',
+        borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: true,
+      },
+    ],
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    plugins: {
+      legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } },
+      tooltip: { callbacks: { label: ctx => ` ${fmt$(ctx.raw)}` } },
+    },
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, ticks: { ...CHART_DEFAULTS.scales.x.ticks, maxTicksLimit: 10 } },
+      y: { ...CHART_DEFAULTS.scales.y, ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: v => fmt$(v) } },
+    },
+  },
 });
 </script>
 </body>
