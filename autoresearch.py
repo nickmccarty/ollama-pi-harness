@@ -544,6 +544,7 @@ def git_discard():
 # ---------------------------------------------------------------------------
 
 def main():
+    global PROPOSER_MODEL
     # Parse args
     args = sys.argv[1:]
     task_ids = EVAL_TASKS[:]
@@ -556,6 +557,10 @@ def main():
         idx = args.index("--delta")
         if idx + 1 < len(args):
             delta_threshold = float(args[idx + 1])
+    if "--proposer" in args:
+        idx = args.index("--proposer")
+        if idx + 1 < len(args):
+            PROPOSER_MODEL = args[idx + 1]
 
     print("\n" + "=" * 60)
     print(" autoresearch — autonomous synthesis instruction improvement")
