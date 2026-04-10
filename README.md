@@ -14,30 +14,39 @@ orchestrator.py          ← compound tasks: decompose → run subtasks → asse
     agent.py             ← single-focus tasks: plan → search → synthesize → write
         |
         ├── planner.py       search queries, synthesis notes, subtask decomposition
-        ├── memory.py        retrieve relevant past observations (SQLite FTS5)
-        ├── wiggum.py        evaluate → revise → verify loop
+        ├── memory.py        retrieve relevant past observations (ChromaDB + SQLite)
+        ├── wiggum.py        evaluate → revise → verify loop (parallel panel)
+        ├── skills.py        skill registry — /annotate /cite /kg /deep /panel
+        ├── chunker.py       large-doc context extraction with provenance metadata
         ├── vision.py        image-to-text preprocessing (llama3.2-vision)
         ├── security.py      code scanner, path sandbox, injection scanner
         └── markitdown       rich document conversion + URL enrichment (optional)
 
-shared: logger.py / runs.jsonl, memory.py / memory.db
+shared: logger.py / runs.jsonl + traces/, memory.py / memory.db
 ```
 
 **Run lifecycle (single-focus task):**
 ```
-memory.get_context()
-  → make_plan()                   glm4:9b analyses task + memory
-    → gather_research()           2 planned web searches + quality floor fallback
-      → vision preprocessing      llama3.2-vision if image paths detected
-      → read_file injection        text/rich-doc contents if file paths detected
-      → markitdown URL enrich      full page content for top 2 search result URLs
-      → run_python tool loop       optional pre-synthesis code execution
-        → synthesize()             pi-qwen-32b produces markdown document
-          → count check + retry   harness-enforced section count
-            → write output
-              → wiggum loop        evaluate → revise → verify (up to 3 rounds)
-                → compress_and_store()   glm4:9b compresses run into memory
+parse_skills()                    strip /skill tokens, collect explicit activations
+  → memory.get_context()
+    → make_plan()                 glm4:9b analyses task + memory
+      → auto_activate()           trigger skills by task keywords / plan.complexity
+        → gather_research()       saturation loop: search → novelty gate → compress
+          → vision preprocessing  llama3.2-vision if image paths detected
+          → read_file injection    text/rich-doc contents; chunker extracts context
+            (chunker: section extraction or ChromaDB chunk retrieval + provenance tags)
+          → markitdown URL enrich  full page content for top-N novel URLs
+          → run_python tool loop   skipped for research/best_practices task types
+            → synthesize()         pi-qwen-32b + skill prompt injections (pre_synthesis)
+              → count check + retry
+                → write output
+                  → wiggum loop    evaluate → revise → verify (up to 3 rounds)
+                    → panel        3-persona parallel eval (post_wiggum skills)
+                      → post_synthesis skills   kg graph generation etc.
+                        → compress_and_store()  glm4:9b compresses run into memory
 ```
+
+**Perfetto tracing:** every run writes `traces/<timestamp>_<slug>.json` — load at `ui.perfetto.dev` to visualise stage latencies and panel parallelism.
 
 ---
 
@@ -80,6 +89,26 @@ python agent.py --no-wiggum "..."                  # skip verification loop
 python agent.py --producer pi-qwen-32b "..."       # use alternative producer model
 ```
 
+**Skills — prefix task with /skill tokens:**
+```bash
+python agent.py "/annotate Search for RAG papers and save to output.md"   # Nanda 8-move framework
+python agent.py "/cite /deep Comprehensive survey of LoRA fine-tuning techniques..."
+python agent.py "/kg Explain transformer attention mechanisms..."           # D3.js knowledge graph
+
+# Auto-triggered (no prefix needed):
+#   /annotate  — task mentions "paper", "abstract", "survey", "review"
+#   /deep      — task mentions "comprehensive", "exhaustive", "deep dive"
+#   /panel     — plan.complexity == "high"
+#   /kg        — task mentions "knowledge graph", "visualize"
+```
+
+**Annotated abstracts (batch):**
+```bash
+python annotate_abstracts.py papers.csv
+python annotate_abstracts.py papers.csv --model Qwen3-Coder:30b --out annotated/
+python annotate_abstracts.py papers.csv --reprocess   # redo failed/incomplete
+```
+
 **Compound task (orchestrated):**
 ```bash
 python orchestrator.py "Research agent failure modes and context engineering, synthesize into a unified guide and save to ~/Desktop/guide.md"
@@ -119,6 +148,27 @@ python analytics.py         # cross-run stats
 python analytics.py --full  # per-run detail
 ```
 
+**Skills registry:**
+```bash
+python skills.py            # list all skills with hook, trigger mode, description
+```
+
+**List available skills:**
+```
+/annotate   [pre_synthesis ] [auto]    Inject Nanda Annotated Abstract framework
+/kg         [post_synthesis] [auto]    Generate D3.js knowledge graph
+/panel      [post_wiggum  ] [auto]    3-persona evaluation panel
+/deep       [pre_research  ] [auto]    Force MAX_SEARCH_ROUNDS, disable novelty gate
+/cite       [pre_synthesis ] [explicit] Require source attribution for each claim
+```
+
+**Perfetto traces:**
+```bash
+# After any run, open the newest trace:
+ls traces/
+# Drag the .json file to ui.perfetto.dev  → per-stage waterfall + panel parallelism
+```
+
 **Inspect runs:**
 ```bash
 python inspect_run.py          # last run (full detail with token breakdown)
@@ -155,11 +205,15 @@ python inspect_run.py --all    # summary table of all runs
 | `agent.py` | Single-agent research + write pipeline |
 | `orchestrator.py` | Multi-subtask coordination and assembly |
 | `planner.py` | Pre-execution task analysis — search queries, subtask decomposition |
-| `memory.py` | SQLite + FTS5 persistent observation store |
+| `memory.py` | ChromaDB + SQLite persistent observation store |
 | `wiggum.py` | Evaluate → revise → verify loop (decimalized rubric, task-type criteria) |
+| `panel.py` | 3-persona parallel evaluation panel (ThreadPoolExecutor) |
+| `skills.py` | Skill registry — /annotate /cite /kg /deep /panel; auto-trigger predicates |
+| `chunker.py` | Large-doc context extraction: section extraction or ChromaDB chunk retrieval; provenance metadata |
+| `annotate_abstracts.py` | Batch annotated abstract generator — Nanda 8-move framework over CSV of papers |
 | `vision.py` | llama3.2-vision routing for image inputs |
 | `security.py` | Code scanner, path sandbox, prompt injection scanner |
-| `logger.py` | Structured per-run trace — appends to `runs.jsonl` |
+| `logger.py` | Structured per-run trace → `runs.jsonl`; Chrome Trace Events → `traces/` |
 | `eval_suite.py` | Regression harness — 5 fixed tasks + optional generated tasks |
 | `autoresearch.py` | Autonomous synthesis-instruction optimizer (Karpathy-style loop) |
 | `autoresearch_program.md` | Autoresearch scope, metric, keep rule, and dimension weights |
@@ -181,6 +235,7 @@ python inspect_run.py --all    # summary table of all runs
 |------|---------|
 | `runs.jsonl` | Structured run logs |
 | `memory.db` | SQLite observation store |
+| `traces/` | Chrome Trace Event JSON files — drag to `ui.perfetto.dev` |
 
 ---
 

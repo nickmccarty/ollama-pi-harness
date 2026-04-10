@@ -38,6 +38,7 @@ from vision import extract_image_context, detect_image_paths
 from security import check_python_code, check_file_path, scan_for_injection, strip_injection_candidates
 from memory import MemoryStore, assess_novelty
 from planner import make_plan, Plan
+from skills import parse_skills, auto_activate, merge_skills, get_prompt_injections, skills_at_hook, run_post_synthesis
 
 try:
     from markitdown import MarkItDown
@@ -47,6 +48,7 @@ except ImportError:
     MARKITDOWN_AVAILABLE = False
 
 MODEL = "pi-qwen-32b"
+COMPRESS_MODEL = os.environ.get("COMPRESS_MODEL", MODEL)  # lighter model for compress_knowledge / plan_query
 
 # ---------------------------------------------------------------------------
 # Synthesis instruction — the text appended to every synthesis prompt.
@@ -56,13 +58,13 @@ MODEL = "pi-qwen-32b"
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "Output ONLY the markdown starting with #. For each section, include 'What', 'Why', 'How' with specific tool names, versions, and working code examples. Require at least one complete, executable code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges, and explicitly mention at least one production-ready library or framework (e.g., LangChain, HuggingFace Transformers, Prometheus, ELK stack) where relevant. Ensure all sections include a practical example or implementation detail that demonstrates how the concept would be applied in a real-world system, especially for areas like chunk overlap, prompt templating, anomaly detection, and response verification. Add a clear trade-off discussion where multiple approaches are possible."
+    "Output ONLY the markdown starting with #. For each section, include 'What', 'Why', 'How' with specific tool names, versions, and working code examples. Require at least one complete, executable code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges, and explicitly mention at least one production-ready library or framework (e.g., LangChain, HuggingFace Transformers, Prometheus, ELK stack) where relevant. Ensure all sections include a practical example or implementation detail that demonstrates how the concept would be applied in a real-world system, especially for areas like chunk overlap, prompt templating, anomaly detection, and response verification. Add a clear trade-off discussion where multiple approaches are possible. **Explicitly list the top 3 context window management strategies as a numbered list in the first section, and for each strategy, include a working code example that handles token boundaries properly.**"
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "Output ONLY the markdown starting with #. For each of the 5 sections, include 'What', 'Why', 'How' with specific tool names, versions, and working code examples. Require at least one complete, executable code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges, and explicitly mention at least one production-ready library or framework (e.g., LangChain, HuggingFace Transformers, Prometheus, ELK stack) where relevant. Ensure all sections include a practical example or implementation detail that demonstrates how the concept would be applied in a real-world system, especially for areas like chunk overlap, prompt templating, anomaly detection, and response verification. Add a clear trade-off discussion where multiple approaches are possible."
+    "Output ONLY the markdown starting with #. For each of the 5 sections, include 'What', 'Why', 'How' with specific tool names, versions, and working code examples. Require at least one complete, executable code snippet or step-by-step process per section. Explicitly structure each 'How' section with numbered steps and inline code blocks where applicable. For each strategy, include a concrete implementation note that addresses potential edge cases or practical challenges, and explicitly mention at least one production-ready library or framework (e.g., LangChain, HuggingFace Transformers, Prometheus, ELK stack) where relevant. Ensure all sections include a practical example or implementation detail that demonstrates how the concept would be applied in a real-world system, especially for areas like chunk overlap, prompt templating, anomaly detection, and response verification. Add a clear trade-off discussion where multiple approaches are possible. **Explicitly list the top 3 context window management strategies as a numbered list in the first section, and for each strategy, include a working code example that handles token boundaries properly.**"
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 SEARCHES_PER_TASK = 2        # minimum searches before novelty gating kicks in
@@ -132,10 +134,12 @@ def detect_text_files(task: str, exclude_path: str = None) -> list[str]:
     return found
 
 
-def read_file_context(paths: list[str]) -> str:
+def read_file_context(paths: list[str], task: str = "") -> str:
     """Read files and return concatenated content blocks.
     Rich documents (PDF, DOCX, XLSX, etc.) are converted to markdown via MarkItDown.
-    Plain text files are read directly."""
+    Plain text files are read directly.
+    Large files (> LARGE_FILE_THRESHOLD chars) are context-extracted via chunker."""
+    from chunker import extract_paper_context, LARGE_FILE_THRESHOLD
     blocks = []
     for p in paths:
         ok, reason = check_file_path(p)
@@ -165,6 +169,9 @@ def read_file_context(paths: list[str]) -> str:
             print(f"  [security] injection pattern in {os.path.basename(p)} ({len(matches)} match(es)) — stripping")
             content, removed = strip_injection_candidates(content)
             print(f"  [security] removed {removed} line(s) from file")
+        # Large file: extract most relevant context within budget
+        if len(content) > LARGE_FILE_THRESHOLD:
+            content = extract_paper_context(content, task=task, source=os.path.basename(p))
         blocks.append(f"--- {os.path.basename(p)} ---\n{content}")
     return "\n\n".join(blocks)
 
@@ -249,10 +256,13 @@ def fetch_url_content(url: str) -> str:
         return ""
 
 
-def enrich_with_page_content(results: list[dict], count: int) -> str:
-    """Fetch full page content for the top `count` search results. Returns a context block."""
+def enrich_with_page_content(results: list[dict], count: int, knowledge_state: str = "") -> str:
+    """Fetch full page content for the top `count` search results.
+    Skips URLs whose snippet is already well-covered in knowledge_state (>60% word overlap).
+    Returns a context block."""
     if not MARKITDOWN_AVAILABLE or count == 0:
         return ""
+    known_words = set(knowledge_state.lower().split()) if knowledge_state else set()
     blocks = []
     fetched = 0
     for r in results:
@@ -261,6 +271,12 @@ def enrich_with_page_content(results: list[dict], count: int) -> str:
         url = r.get("href", "")
         if not url.startswith("http"):
             continue
+        if known_words:
+            snippet_words = set(r.get("body", "").lower().split())
+            overlap = len(snippet_words & known_words) / max(len(snippet_words), 1)
+            if overlap > 0.6:
+                print(f"  [markitdown] skipping {url[:50]} — {overlap:.0%} covered")
+                continue
         print(f"  [markitdown] fetching {url[:60]}...")
         content = fetch_url_content(url)
         if content:
@@ -316,7 +332,7 @@ def compress_knowledge(current_state: str, new_results: list[dict],
         max_chars=KNOWLEDGE_MAX_CHARS,
     )
     response = ollama.chat(
-        model=producer_model,
+        model=COMPRESS_MODEL,
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.1, "num_predict": 400},
     )
@@ -342,7 +358,7 @@ def plan_query(task: str, knowledge_state: str, round_num: int, producer_model: 
         "Output ONLY the query string, nothing else."
     )
     response = ollama.chat(
-        model=producer_model,
+        model=COMPRESS_MODEL,
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.3},
     )
@@ -351,19 +367,21 @@ def plan_query(task: str, knowledge_state: str, round_num: int, producer_model: 
     return response["message"]["content"].strip().strip('"')
 
 
-def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL) -> str:
+def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL, force_deep: bool = False) -> str:
     """
     Saturation-based search loop: runs up to MAX_SEARCH_ROUNDS searches, stopping
     early when new results score below NOVELTY_THRESHOLD against the accumulated
     knowledge state. Minimum SEARCHES_PER_TASK rounds always run before gating.
 
+    force_deep=True (set by /deep skill) disables novelty gating and runs all rounds.
     planned_queries are used for rounds 1–N before switching to plan_query().
     Returns a merged context string ready for synthesis.
     """
-    all_result_sets = []
-    queries_used    = []
-    knowledge_state = ""
-    novelty_scores  = []
+    all_result_sets  = []
+    queries_used     = []
+    knowledge_state  = ""
+    novelty_scores   = []
+    novelty_gate     = NOVELTY_THRESHOLD if not force_deep else -1   # -1 = never gate
 
     for round_num in range(1, MAX_SEARCH_ROUNDS + 1):
         # Query selection: planned first, then gap-targeted model call
@@ -378,12 +396,13 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
         results = web_search_raw(query)
         trace.log_tool_call("web_search", query, len(format_results(results)))
 
-        # Novelty gate — only after minimum rounds have run
+        # Novelty gate — only after minimum rounds have run (skipped when force_deep)
         if round_num > SEARCHES_PER_TASK:
             novelty = assess_novelty(results, knowledge_state)
             novelty_scores.append(novelty)
-            print(f"  [novelty] round {round_num}: {novelty}/10")
-            if novelty < NOVELTY_THRESHOLD:
+            gate_label = " (deep — no gate)" if force_deep else ""
+            print(f"  [novelty] round {round_num}: {novelty}/10{gate_label}")
+            if novelty < novelty_gate:
                 print(f"  [novelty] saturation — stopping search")
                 break
         elif round_num > 1:
@@ -424,7 +443,7 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
     # URL enrichment — fetch full page content for top results via MarkItDown
     if URL_ENRICH_COUNT > 0 and MARKITDOWN_AVAILABLE:
         print(f"  [markitdown] enriching top {URL_ENRICH_COUNT} URL(s)...")
-        page_content = enrich_with_page_content(merged, URL_ENRICH_COUNT)
+        page_content = enrich_with_page_content(merged, URL_ENRICH_COUNT, knowledge_state=knowledge_state)
         if page_content:
             merged_text = merged_text + "\n\n## Full page content\n\n" + page_content
             print(f"  [markitdown] added {len(page_content)} chars of page content")
@@ -442,22 +461,23 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
     return merged_text
 
 
-def synthesize(task: str, research_context: str, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "", producer_model: str = MODEL, trace=None) -> str:
+def synthesize(task: str, research_context: str, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "", skill_context: str = "", producer_model: str = MODEL, trace=None) -> str:
     """Ask the model to synthesize research (and optional contexts) into a markdown document."""
     vision_block = f"\nImage analysis:\n{vision_context}\n" if vision_context else ""
     file_block = f"\nFile contents:\n{file_context}\n" if file_context else ""
     code_block = f"\nCode execution results:\n{code_context}\n" if code_context else ""
     memory_block = f"\n{memory_context}\n" if memory_context else ""
+    skill_block  = f"\nAdditional requirements:\n{skill_context}\n" if skill_context else ""
     prompt = (
         f"Task: {task}\n\n"
         f"Research findings:\n{research_context}\n"
-        f"{vision_block}{file_block}{code_block}{memory_block}\n"
+        f"{vision_block}{file_block}{code_block}{memory_block}{skill_block}\n"
         f"{SYNTH_INSTRUCTION}"
     )
     response = ollama.chat(
         model=producer_model,
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.1},
+        options={"temperature": 0.1, "num_predict": 8192},
     )
     if trace is not None:
         trace.log_usage(response, stage="synth")
@@ -493,16 +513,17 @@ def count_output_items(content: str) -> int:
     )
 
 
-def synthesize_with_count(task: str, research_context: str, expected_count: int, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "", producer_model: str = MODEL, trace=None) -> str:
+def synthesize_with_count(task: str, research_context: str, expected_count: int, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "", skill_context: str = "", producer_model: str = MODEL, trace=None) -> str:
     """Re-synthesize with an explicit count constraint injected into the prompt."""
     vision_block = f"\nImage analysis:\n{vision_context}\n" if vision_context else ""
     file_block = f"\nFile contents:\n{file_context}\n" if file_context else ""
     code_block = f"\nCode execution results:\n{code_context}\n" if code_context else ""
     memory_block = f"\n{memory_context}\n" if memory_context else ""
+    skill_block  = f"\nAdditional requirements:\n{skill_context}\n" if skill_context else ""
     prompt = (
         f"Task: {task}\n\n"
         f"Research findings:\n{research_context}\n"
-        f"{vision_block}{file_block}{code_block}{memory_block}\n"
+        f"{vision_block}{file_block}{code_block}{memory_block}{skill_block}\n"
         f"IMPORTANT: You must produce EXACTLY {expected_count} numbered sections "
         f"(## 1. ... through ## {expected_count}. ...) — no more, no fewer. "
         f"{SYNTH_INSTRUCTION_COUNT}"
@@ -510,7 +531,7 @@ def synthesize_with_count(task: str, research_context: str, expected_count: int,
     response = ollama.chat(
         model=producer_model,
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.1},
+        options={"temperature": 0.1, "num_predict": 8192},
     )
     if trace is not None:
         trace.log_usage(response, stage="synth_count")
@@ -573,6 +594,11 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
     memory = MemoryStore()
 
     try:
+        # Skill parsing — extract /skill tokens before anything else touches the task
+        task, explicit_skills = parse_skills(task)
+        if explicit_skills:
+            print(f"[skills] explicit: {explicit_skills}")
+
         path = extract_path(task)
         if not path:
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -597,11 +623,12 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
         if text_files:
             print(f"\n[read_file] {len(text_files)} file(s) detected — reading...")
             trace.log_files_read(text_files)
-            file_context = read_file_context(text_files)
+            file_context = read_file_context(text_files, task=task)
             print(f"  [read_file] injecting {len(file_context)} chars of file context")
 
         # Memory retrieval — before planning so the planner can use prior context
-        memory_context = memory.get_context(task)
+        with trace.span("memory_retrieval"):
+            memory_context = memory.get_context(task)
         if memory_context:
             memory_hits = memory_context.count("**[")
             print(f"\n  [memory] injecting {memory_hits} past observation(s)")
@@ -611,30 +638,55 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
 
         # Planning — analyse task + memory; produces search queries and synthesis notes
         print("  [planner] generating plan...")
-        plan = make_plan(task, memory_context)
+        with trace.span("planner"):
+            plan = make_plan(task, memory_context)
         trace.log_plan(plan.to_dict())
         print(f"  [planner] {plan.task_type} / {plan.complexity}"
               + (f" / {plan.expected_sections} sections" if plan.expected_sections else "")
               + (f"\n  [planner] note: {plan.notes}" if plan.notes else ""))
+
+        # Skill activation — merge explicit + auto-triggered
+        auto_skills    = auto_activate(task, plan)
+        active_skills  = merge_skills(explicit_skills, auto_skills)
+        if auto_skills:
+            print(f"  [skills] auto-activated: {auto_skills}")
+        if active_skills:
+            print(f"  [skills] active: {active_skills}")
 
         # Combined synthesis context: memory observations + planner notes
         plan_ctx = plan.synthesis_context()
         full_memory_context = "\n\n".join(filter(None, [memory_context, plan_ctx]))
 
         print("\n[turn 1] researching...\n")
-        context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model)
+        trace.name_thread("main")
+        force_deep = "deep" in active_skills
+        if force_deep:
+            print("  [skill:deep] novelty gate disabled — running all search rounds")
+        with trace.span("gather_research"):
+            context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model, force_deep=force_deep)
 
-        # run_python tool loop — optional pre-synthesis code execution
+        # run_python tool loop — skip for pure research tasks (never use code)
         code_context = ""
-        print("\n  [tool loop] checking for code execution needs...")
-        code_context = run_tool_loop(task, context, trace, producer_model=producer_model)
-        if code_context:
-            print(f"  [tool loop] {len(code_context)} chars of execution output")
+        if plan.task_type in ("research", "best_practices"):
+            print("\n  [tool loop] skipped for research task")
         else:
-            print("  [tool loop] no code needed")
+            print("\n  [tool loop] checking for code execution needs...")
+            with trace.span("tool_loop"):
+                code_context = run_tool_loop(task, context, trace, producer_model=producer_model)
+            if code_context:
+                print(f"  [tool loop] {len(code_context)} chars of execution output")
+            else:
+                print("  [tool loop] no code needed")
+
+        # Pre-synthesis skill injections
+        skill_context = get_prompt_injections(active_skills, "pre_synthesis")
+        if skill_context:
+            skill_names = [s for s in active_skills if s in ("annotate", "cite")]
+            print(f"  [skills] injecting pre_synthesis prompts: {skill_names}")
 
         print("\n  [synth] synthesizing from merged results...")
-        content = synthesize(task, context, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, producer_model=producer_model, trace=trace)
+        with trace.span("synthesize", model=producer_model):
+            content = synthesize(task, context, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
 
         # Count constraint: planner takes precedence over regex
         expected_count = plan.expected_sections or extract_count_constraint(task)
@@ -643,7 +695,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
             if actual_count != expected_count:
                 print(f"\n[count check] expected {expected_count} items, got {actual_count} — retrying synthesis")
                 trace.log_count_retry()
-                content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, producer_model=producer_model, trace=trace)
+                content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
                 actual_count = count_output_items(content)
                 if actual_count == expected_count:
                     print(f"  [count check] OK — {actual_count} items after retry")
@@ -660,8 +712,18 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
         print("\n" + content + "\n")
         write_output(content, path, trace)
 
+        # Post-synthesis skill handlers (e.g. /kg)
+        if skills_at_hook(active_skills, "post_synthesis"):
+            with trace.span("post_synthesis_skills"):
+                run_post_synthesis(active_skills, content, task, path, producer_model)
+
         if use_wiggum:
-            wiggum_trace = wiggum_loop(task, path, producer_model=producer_model)
+            # /panel skill activates the 3-persona panel inside wiggum
+            if "panel" in active_skills:
+                os.environ["WIGGUM_PANEL"] = "1"
+                print("  [skill:panel] panel evaluation enabled")
+            with trace.span("wiggum"):
+                wiggum_trace = wiggum_loop(task, path, producer_model=producer_model, parent_trace=trace)
             trace.log_wiggum(wiggum_trace)
             print(f"\n[wiggum] {wiggum_trace['final']} after {len(wiggum_trace['rounds'])} round(s)")
             for r in wiggum_trace["rounds"]:

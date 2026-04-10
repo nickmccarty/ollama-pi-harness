@@ -367,8 +367,14 @@ Current SYNTH_INSTRUCTION:
 Current SYNTH_INSTRUCTION_COUNT (used when task has a count constraint like "top 5"):
 {synth_count}
 
+ALREADY IN THE INSTRUCTION — do not re-propose any of these, they are already present:
+{already_present}
+
 Experiment history (tab-separated: experiment, score, baseline, delta, status, description):
 {history}
+
+PREVIOUSLY TRIED AND FAILED — do not repeat any of these approaches:
+{discarded_list}
 
 Latest evaluator feedback from the most recent eval run:
 {eval_feedback}
@@ -377,19 +383,22 @@ External research context (prompt engineering literature and best practices):
 {research_context}
 
 Your task: propose ONE specific change to the synthesis instruction(s) that might improve
-the composite eval score (0.7 * mean_wiggum_r1 + 0.3 * criteria_rate * 10).
+the composite eval score. The change must be genuinely NEW — not a variation of anything
+already present or previously discarded.
 
-Focus on the weakest dimensions (depth, specificity). Common effective changes:
-  - Adding explicit requirements for code snippets or step-by-step examples
-  - Requiring a specific sub-structure within each item (e.g. "what / why / how")
-  - Asking the model to name specific tools, versions, or libraries
-  - Requiring a comparison or trade-off where relevant
+Unexplored angles to consider (pick one if it fits the evaluator feedback):
+  - Constraining output length or density (e.g. minimum words per section)
+  - Requiring the model to address a specific reader persona (e.g. "a practitioner who will implement this tomorrow")
+  - Requiring failure modes or anti-patterns to be named alongside each practice
+  - Requiring explicit "when NOT to use this" caveats
+  - Requiring output to include measurable success criteria for each practice
+  - Requiring the model to state confidence or known limitations for each claim
+  - Structural changes: different section ordering, summary box, decision tree
 
 Rules:
   - Output complete replacement strings — not patches
   - Both instructions must still say "output ONLY the markdown starting with #"
   - Make one focused change; don't try to fix everything at once
-  - If history shows a change was DISCARDed, don't repeat it
   - CRITICAL: the instruction is a SHORT directive (1-4 sentences, under 600 chars). Do NOT output an example document, markdown content, or code — only the instruction text that tells the model how to write its output.
 
 Output ONLY valid JSON (no preamble, no markdown fences):
@@ -400,11 +409,46 @@ Output ONLY valid JSON (no preamble, no markdown fences):
 }}"""
 
 
+def _extract_already_present(synth: str) -> str:
+    """Extract key requirements already in the instruction as a bullet list."""
+    keywords = [
+        ("What/Why/How structure", r"\bwhat\b.*\bwhy\b.*\bhow\b"),
+        ("numbered steps", r"numbered steps"),
+        ("inline code blocks", r"inline code blocks"),
+        ("specific tool names/versions", r"tool names|versions"),
+        ("working code examples / executable snippets", r"code (snippet|example)|executable"),
+        ("production-ready library mentions", r"production.ready|LangChain|HuggingFace|Prometheus"),
+        ("implementation notes for edge cases", r"edge cases?|chunk overlap|anomaly detection"),
+        ("trade-off discussion", r"trade.off"),
+        ("real-world examples", r"real.world"),
+    ]
+    found = []
+    import re as _re
+    for label, pattern in keywords:
+        if _re.search(pattern, synth, _re.IGNORECASE):
+            found.append(f"- {label}")
+    return "\n".join(found) if found else "(none detected)"
+
+
+def _extract_discarded(history: str) -> str:
+    """Extract descriptions of discarded experiments as a bullet list."""
+    lines = []
+    for row in history.splitlines():
+        parts = row.split("\t")
+        if len(parts) >= 5 and parts[4].strip().lower() == "discard":
+            desc = parts[5].strip() if len(parts) > 5 else ""
+            if desc:
+                lines.append(f"- {desc}")
+    return "\n".join(lines) if lines else "(none yet)"
+
+
 def propose_instructions(current: dict, history: str, eval_feedback: str, research_context: str = "") -> dict | None:
     """Ask proposer model to suggest new synthesis instructions. Returns dict or None on failure."""
     prompt = PROPOSE_PROMPT.format(
         synth=current["synth"],
         synth_count=current["synth_count"],
+        already_present=_extract_already_present(current["synth"]),
+        discarded_list=_extract_discarded(history),
         history=history,
         eval_feedback=eval_feedback,
         research_context=research_context or "(none gathered)",

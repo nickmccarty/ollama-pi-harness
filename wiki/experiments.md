@@ -1,6 +1,6 @@
 ---
 title: Experiments
-updated: 2026-04-09
+updated: 2026-04-10
 sources: [experiment-01.md, experiment-02.md, experiment-03.md, experiment-04.md]
 tags: [experiments, results, producer, eval]
 ---
@@ -32,7 +32,7 @@ tags: [experiments, results, producer, eval]
 
 See also: [Eval Framework](eval-framework.md) · [Synthesis Instructions](synthesis-instructions.md) · [Architecture](architecture.md)
 
-## Autoresearch session 2 — results (T_D + T_E, in progress)
+## Autoresearch session 2 — results (T_D + T_E, final)
 
 Eval tasks switched from T_A+T_B to T_D+T_E after T_A structural failure (producer
 knowledge gap on LangChain APIs) and T_B extreme latency (4000s+ from model
@@ -49,9 +49,9 @@ Session 2 baseline (T_D=8.1, T_E=8.1 → avg 8.1):
 |-----|-------------------|-------|--------|
 | 1 | Added numbered steps + inline code blocks in How sections | 8.315 | KEEP |
 | 2 | Added concrete implementation notes for edge cases (chunk overlap, anomaly detection) | 8.420 | KEEP |
-| 3+ | Running... | — | — |
+| 3 | Added practical examples/implementation details for all sections | 8.315 | DISCARD (-0.105) |
 
-Session 2 running score: **8.420** (exp 2, +0.135 above baseline).
+Session 2 final: **8.420** (exp 2, +0.320 above baseline). 3 experiments total.
 
 ## Autoresearch session 1 — results
 
@@ -67,3 +67,25 @@ Session 1 results (13 experiments):
 - Session terminated; exp 3 instructions restored as canonical
 
 See [Synthesis Instructions](synthesis-instructions.md) for full discard table.
+
+## Autoresearch session 3 — setup (T_D + T_E)
+
+Infrastructure changes applied before session 3:
+
+- `num_predict=8192` added to all `synthesize()` calls — fixes T_E output truncation (Section 5 was cut off mid-sentence, capping score at ~8.1 regardless of instruction quality)
+- Proposer anti-stuck improvements in `autoresearch.py`:
+  - `{already_present}` section: regex-detects 9 instruction features already in the active prompt; listed explicitly so proposer doesn't re-propose them
+  - `{discarded_list}` section: lists descriptions of all previously-discarded experiments; proposer instructed to avoid retreading discarded ground
+  - Removed "Common effective changes" list from PROPOSE_PROMPT — was anchoring proposer to a narrow cluster
+  - Added "Unexplored angles" list — broadens search space
+- Skills system (`skills.py`) added — `/annotate`, `/cite`, `/kg`, `/deep`, `/panel`
+- `chunker.py` added — large-doc context extraction with provenance metadata
+- Perfetto tracing in `logger.py` — per-stage waterfall available via `traces/`
+- Panel parallelism in `panel.py` — 3 personas run via ThreadPoolExecutor
+
+Session 3 baseline: T_D=8.420 (best from session 2), T_E=TBD (truncation fix may shift baseline).
+
+Start session 3:
+```bash
+python autoresearch.py --tasks T_D,T_E
+```

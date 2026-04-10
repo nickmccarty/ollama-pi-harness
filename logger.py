@@ -2,15 +2,20 @@
 logger.py — structured run tracing for the agent pipeline.
 
 Appends one JSON record per run to runs.jsonl.
+Writes a Chrome Trace Event JSON to traces/ for each run — load in ui.perfetto.dev.
 Import and use RunTrace in agent.py and wiggum.py.
 """
 
 import json
 import os
+import re
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
-LOG_PATH = os.path.join(os.path.dirname(__file__), "runs.jsonl")
+LOG_PATH  = os.path.join(os.path.dirname(__file__), "runs.jsonl")
+TRACE_DIR = os.path.join(os.path.dirname(__file__), "traces")
 
 
 def _extract_usage(response) -> dict:
@@ -33,7 +38,11 @@ def _extract_usage(response) -> dict:
 
 class RunTrace:
     def __init__(self, task: str, producer_model: str, evaluator_model: str):
-        self._run_start = time.monotonic()
+        self._run_start  = time.monotonic()
+        self._t0_us      = time.monotonic_ns() // 1000   # anchor for Chrome Trace timestamps
+        self._pid        = os.getpid()
+        self._events     = []                             # Chrome Trace Event list
+        self._task       = task
         self.data = {
             "timestamp":        datetime.now(timezone.utc).isoformat(),
             "task":             task,
@@ -84,15 +93,78 @@ class RunTrace:
         }
 
     # ------------------------------------------------------------------
+    # Chrome Trace Event instrumentation
+    # ------------------------------------------------------------------
+
+    def _record(self, name: str, start_us: int, dur_us: int, tid: int, args: dict = None):
+        """Append one complete (X) Chrome Trace event."""
+        event = {
+            "name": name,
+            "ph":   "X",
+            "ts":   start_us - self._t0_us,
+            "dur":  max(dur_us, 1),
+            "pid":  self._pid,
+            "tid":  tid,
+        }
+        if args:
+            event["args"] = args
+        self._events.append(event)
+
+    def name_thread(self, name: str):
+        """Emit a thread_name metadata event for the calling thread (shows in Perfetto lane labels)."""
+        self._events.append({
+            "name": "thread_name",
+            "ph":   "M",
+            "pid":  self._pid,
+            "tid":  threading.get_ident(),
+            "args": {"name": name},
+        })
+
+    @contextmanager
+    def span(self, name: str, **args):
+        """
+        Context manager — records a Chrome Trace 'X' event for the enclosed block.
+
+        Usage:
+            with trace.span("synthesize", model="pi-qwen-32b"):
+                content = synthesize(...)
+        """
+        tid      = threading.get_ident()
+        start_us = time.monotonic_ns() // 1000
+        try:
+            yield
+        finally:
+            dur_us = (time.monotonic_ns() // 1000) - start_us
+            self._record(name, start_us, dur_us, tid, args or None)
+
+    def _write_trace(self):
+        """Write Chrome Trace JSON to traces/<timestamp>_<slug>.json."""
+        if not self._events:
+            return
+        os.makedirs(TRACE_DIR, exist_ok=True)
+        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = re.sub(r"[^\w]+", "_", self._task[:50]).strip("_")
+        path = os.path.join(TRACE_DIR, f"{ts}_{slug}.json")
+        payload = {
+            "traceEvents":     self._events,
+            "displayTimeUnit": "ms",
+            "otherData":       {"task": self._task},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        print(f"  [trace] {path}")
+
+    # ------------------------------------------------------------------
     # Token / timing tracking
     # ------------------------------------------------------------------
 
     def log_usage(self, response, stage: str = "other"):
         """
         Accumulate token counts, latency, and thinking chars from one ollama.chat response.
-        Call immediately after every ollama.chat() call.
+        Also emits a Chrome Trace event using Ollama's own reported total_duration.
+
         stage: "search_query" | "synth" | "synth_count" | "tool_loop" |
-               "wiggum_eval" | "wiggum_revise" | "planner" | "memory" | "other"
+               "wiggum_eval" | "wiggum_revise" | "planner" | "memory" | "compress_knowledge" | "other"
         """
         u = _extract_usage(response)
         self.data["input_tokens"]  += u["input_tokens"]
@@ -106,6 +178,19 @@ class RunTrace:
         s["thinking_chars"] += u["thinking_chars"]
         s["calls"]          += 1
         s["total_ms"]       += u["total_ms"]
+
+        # Emit trace event using Ollama's reported timing (more accurate than wall-clock wrap)
+        if u["total_ms"] > 0:
+            now_us   = time.monotonic_ns() // 1000
+            start_us = now_us - int(u["total_ms"] * 1000)
+            self._record(
+                f"llm:{stage}",
+                start_us,
+                int(u["total_ms"] * 1000),
+                threading.get_ident(),
+                {"in_tok": u["input_tokens"], "out_tok": u["output_tokens"],
+                 "prompt_ms": u["prompt_ms"], "eval_ms": u["eval_ms"]},
+            )
 
     # ------------------------------------------------------------------
     # Existing log methods
@@ -187,3 +272,4 @@ class RunTrace:
         tok_out = self.data["output_tokens"]
         dur     = self.data["run_duration_s"]
         print(f"  [log] {dur}s  in={tok_in} out={tok_out} tok  → {LOG_PATH}")
+        self._write_trace()

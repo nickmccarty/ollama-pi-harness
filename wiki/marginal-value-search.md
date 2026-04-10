@@ -2,10 +2,13 @@
 title: Marginal Value Search
 updated: 2026-04-09
 sources: []
-tags: [research, gather_research, search, design, roadmap]
+tags: [research, gather_research, search, implemented]
 ---
 
 # Marginal Value Search
+
+**Status: implemented** in `agent.py`. See `gather_research()`, `compress_knowledge()`, `plan_query()`, `enrich_with_page_content()`.
+First autoresearch session with this enabled is session 3 (2026-04-10+).
 
 Design spec for replacing the fixed N-search loop in `gather_research()` with a
 saturation-based loop that stops when new results contribute below a novelty threshold.

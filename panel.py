@@ -23,8 +23,15 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 
 import ollama as _ollama_raw
+
+
+@contextmanager
+def _nullctx():
+    yield
 
 _KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
 
@@ -132,18 +139,22 @@ def _parse_response(raw: str, persona_name: str) -> dict:
     }
 
 
-def run_panel(task: str, content: str, model: str) -> list[dict]:
+def run_panel(task: str, content: str, model: str, trace=None) -> list[dict]:
     """
-    Run the three-persona evaluation panel on a document.
+    Run the three-persona evaluation panel on a document in parallel.
 
-    Returns a list of review dicts, one per persona:
+    Returns a list of review dicts, one per persona (order matches PANEL_PERSONAS):
         [{"persona", "score", "issues", "strengths", "raw"}, ...]
+
+    If trace (a RunTrace) is provided, each persona records its own span — they will
+    appear as separate lanes in the Perfetto timeline, confirming actual parallelism.
     """
-    reviews = []
     content_excerpt = content[:5000]
 
-    for persona in PANEL_PERSONAS:
+    def _run_persona(persona):
         name = persona["name"]
+        if trace is not None:
+            trace.name_thread(f"panel/{name}")
         print(f"  [panel] {name}...")
         try:
             prompt = PANEL_PROMPT.format(
@@ -151,21 +162,39 @@ def run_panel(task: str, content: str, model: str) -> list[dict]:
                 content=content_excerpt,
                 focus=persona["focus"],
             )
-            response = _chat(
-                model=model,
-                messages=[
-                    {"role": "system", "content": persona["system"]},
-                    {"role": "user",   "content": prompt},
-                ],
-                options={"temperature": 0.3},
-            )
+            ctx = trace.span(f"panel/{name}") if trace is not None else _nullctx()
+            with ctx:
+                response = _chat(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": persona["system"]},
+                        {"role": "user",   "content": prompt},
+                    ],
+                    options={"temperature": 0.3},
+                )
             raw = response["message"]["content"].strip()
             review = _parse_response(raw, name)
-            print(f"    score={review['score']}/10  issues={len(review['issues'])}")
-            reviews.append(review)
+            print(f"    [{name}] score={review['score']}/10  issues={len(review['issues'])}")
+            return review
         except Exception as e:
             print(f"  [panel] {name} failed ({e}) — skipping")
+            return None
 
+    reviews = []
+    with ThreadPoolExecutor(max_workers=len(PANEL_PERSONAS)) as pool:
+        futures = {pool.submit(_run_persona, p): p["name"] for p in PANEL_PERSONAS}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    reviews.append(result)
+            except Exception as e:
+                print(f"  [panel] {name} failed ({e}) — skipping")
+
+    # Restore deterministic order (as_completed is non-deterministic)
+    order = {p["name"]: i for i, p in enumerate(PANEL_PERSONAS)}
+    reviews.sort(key=lambda r: order.get(r["persona"], 99))
     return reviews
 
 

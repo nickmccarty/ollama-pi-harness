@@ -25,7 +25,14 @@ import os
 import json
 import subprocess
 import re
+from contextlib import contextmanager
 import ollama as _ollama_raw
+
+
+@contextmanager
+def _nullspan():
+    """No-op context manager used when no parent_trace is available."""
+    yield
 
 _KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
 
@@ -294,7 +301,7 @@ def revise(task: str, content: str, eval_result: dict, _trace=None) -> str:
 # Main loop
 # ---------------------------------------------------------------------------
 
-def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, evaluator_model: str = EVALUATOR_MODEL) -> dict:
+def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, evaluator_model: str = EVALUATOR_MODEL, parent_trace=None) -> dict:
     """
     Run the Wiggum verification loop on an existing output file.
 
@@ -335,10 +342,12 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         print(f"--- round {round_num} ---")
 
         # 1. Normalize
-        content = normalize(expanded)
+        with (parent_trace.span("normalize") if parent_trace else _nullspan()):
+            content = normalize(expanded)
 
         # 2. Evaluate
-        result = evaluate(task, content, _trace=_local_trace)
+        with (parent_trace.span("wiggum_eval", round=round_num) if parent_trace else _nullspan()):
+            result = evaluate(task, content, _trace=_local_trace)
         score = result.get("score", 0.0)
         passed = result.get("passed", False)
         issues = [i for i in result.get("issues", []) if i and str(i).strip().lower() not in ("none", "n/a", "")]
@@ -349,7 +358,8 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         if _PANEL_ENABLED:
             from panel import run_panel, panel_issues
             print(f"\n  [panel] running 3-persona evaluation panel...")
-            panel_reviews = run_panel(task, content, evaluator_model)
+            with (parent_trace.span("panel") if parent_trace else _nullspan()):
+                panel_reviews = run_panel(task, content, evaluator_model, trace=parent_trace)
             panel_issue_list = panel_issues(panel_reviews)
             if panel_issue_list:
                 # Merge panel issues: deduplicate against wiggum issues
@@ -393,7 +403,8 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
             return trace
 
         # 3. Revise
-        revised_content = revise(task, content, result, _trace=_local_trace)
+        with (parent_trace.span("wiggum_revise", round=round_num) if parent_trace else _nullspan()):
+            revised_content = revise(task, content, result, _trace=_local_trace)
 
         if not revised_content.strip():
             print("  [warn] producer returned empty revision, stopping loop")
