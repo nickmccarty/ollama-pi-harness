@@ -1,119 +1,208 @@
 """
-search_cache.py — SQLite-backed cache for DDGS search results.
+search_cache.py — SQLite-backed TTL cache for DDGS web search results.
 
-Keyed by normalized query fingerprint. TTL-based expiry (default 24h).
-Zero external dependencies — same SQLite process as memory.db.
+Schema:
+    key        TEXT PRIMARY KEY   SHA-256 of normalised query
+    query      TEXT               original query string
+    results    TEXT               JSON-encoded list[dict]
+    created_at REAL               unix timestamp
+    expires_at REAL               unix timestamp (created_at + ttl)
 
-Usage (transparent — called by agent.py):
+Usage:
     from search_cache import cached_search
-    results = cached_search(query, fallback_fn, ttl_hours=24)
+
+    results = cached_search(
+        query="best practices for RAG pipelines",
+        search_fn=lambda q, n: list(DDGS().text(q, max_results=n)),
+        ttl=86400,
+        max_results=10,
+    )
+
+CLI:
+    python search_cache.py            # print stats
+    python search_cache.py --clear    # delete all cached entries
+    python search_cache.py --expired  # delete only expired entries
 """
 
+import hashlib
 import json
-import re
+import os
 import sqlite3
+import sys
 import time
-from pathlib import Path
+from typing import Callable
 
-CACHE_PATH = Path(__file__).parent / "search_cache.db"
-DEFAULT_TTL_HOURS = 24
-
-
-def _fingerprint(query: str) -> str:
-    """Normalize query to a stable cache key."""
-    return re.sub(r"\s+", " ", query.lower().strip())
+DB_PATH   = os.path.join(os.path.dirname(__file__), "search_cache.db")
+DEFAULT_TTL = 86_400   # 24 hours in seconds
 
 
-def _get_db() -> sqlite3.Connection:
-    db = sqlite3.connect(CACHE_PATH)
-    db.execute("""
+# ---------------------------------------------------------------------------
+# DB init
+# ---------------------------------------------------------------------------
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS search_cache (
-            fingerprint TEXT PRIMARY KEY,
-            query       TEXT NOT NULL,
-            results_json TEXT NOT NULL,
-            created_at  REAL NOT NULL,
-            ttl_seconds REAL NOT NULL
+            key        TEXT PRIMARY KEY,
+            query      TEXT NOT NULL,
+            results    TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL
         )
     """)
-    db.commit()
-    return db
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON search_cache(expires_at)")
+    conn.commit()
+    return conn
 
+
+# ---------------------------------------------------------------------------
+# Core operations
+# ---------------------------------------------------------------------------
+
+def _cache_key(query: str) -> str:
+    """SHA-256 of lower-cased, whitespace-normalised query."""
+    normalised = " ".join(query.lower().split())
+    return hashlib.sha256(normalised.encode()).hexdigest()
+
+
+def get(query: str) -> list[dict] | None:
+    """Return cached results for query, or None if missing/expired."""
+    key  = _cache_key(query)
+    now  = time.time()
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT results, expires_at FROM search_cache WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        results_json, expires_at = row
+        if expires_at < now:
+            conn.execute("DELETE FROM search_cache WHERE key = ?", (key,))
+            conn.commit()
+            return None
+        return json.loads(results_json)
+    finally:
+        conn.close()
+
+
+def put(query: str, results: list[dict], ttl: int = DEFAULT_TTL) -> None:
+    """Store results for query with given TTL; also evict expired rows."""
+    key  = _cache_key(query)
+    now  = time.time()
+    conn = _connect()
+    try:
+        # Upsert
+        conn.execute(
+            """
+            INSERT INTO search_cache (key, query, results, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                results    = excluded.results,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at
+            """,
+            (key, query, json.dumps(results, ensure_ascii=False), now, now + ttl),
+        )
+        # Lazy eviction of expired entries (cheap: uses index)
+        conn.execute("DELETE FROM search_cache WHERE expires_at < ?", (now,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# High-level helper
+# ---------------------------------------------------------------------------
 
 def cached_search(
     query: str,
-    fallback_fn,
-    ttl_hours: float = DEFAULT_TTL_HOURS,
-    max_results: int = 5,
+    search_fn: Callable[[str, int], list[dict]],
+    ttl: int = DEFAULT_TTL,
+    max_results: int = 10,
 ) -> list[dict]:
     """
-    Return cached results for `query` if fresh, else call fallback_fn(query, max_results)
-    and cache the result.
+    Return cached results for query if available, otherwise call search_fn,
+    store the results, and return them.
 
-    fallback_fn signature: (query: str, max_results: int) -> list[dict]
+    Args:
+        query:       search query string
+        search_fn:   callable(query, max_results) -> list[dict]
+        ttl:         cache lifetime in seconds (default 24 h)
+        max_results: passed to search_fn on cache miss
+
+    Returns:
+        list of result dicts (same shape as DDGS().text() output)
     """
-    fp = _fingerprint(query)
-    ttl_seconds = ttl_hours * 3600
-    now = time.time()
+    cached = get(query)
+    if cached is not None:
+        print(f"[cache HIT ] {query[:60]}")
+        return cached
 
-    db = _get_db()
+    print(f"[cache MISS] {query[:60]}")
+    results = search_fn(query, max_results)
+    if results:
+        put(query, results, ttl=ttl)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Management helpers
+# ---------------------------------------------------------------------------
+
+def stats() -> dict:
+    """Return cache statistics."""
+    now  = time.time()
+    conn = _connect()
     try:
-        row = db.execute(
-            "SELECT results_json, created_at, ttl_seconds FROM search_cache WHERE fingerprint = ?",
-            (fp,),
-        ).fetchone()
-
-        if row is not None:
-            results_json, created_at, stored_ttl = row
-            if now - created_at < stored_ttl:
-                print(f"  [search_cache] HIT  {query[:60]!r}")
-                return json.loads(results_json)
-            else:
-                print(f"  [search_cache] STALE {query[:60]!r} — refetching")
-                db.execute("DELETE FROM search_cache WHERE fingerprint = ?", (fp,))
-                db.commit()
-        else:
-            print(f"  [search_cache] MISS  {query[:60]!r}")
-
-        results = fallback_fn(query, max_results)
-
-        if results:
-            db.execute(
-                """INSERT OR REPLACE INTO search_cache
-                   (fingerprint, query, results_json, created_at, ttl_seconds)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (fp, query, json.dumps(results), now, ttl_seconds),
-            )
-            db.commit()
-
-        return results
-    finally:
-        db.close()
-
-
-def cache_stats() -> dict:
-    """Return basic cache stats."""
-    db = _get_db()
-    try:
-        total = db.execute("SELECT COUNT(*) FROM search_cache").fetchone()[0]
-        now = time.time()
-        fresh = db.execute(
-            "SELECT COUNT(*) FROM search_cache WHERE ? - created_at < ttl_seconds", (now,)
+        total   = conn.execute("SELECT COUNT(*) FROM search_cache").fetchone()[0]
+        expired = conn.execute(
+            "SELECT COUNT(*) FROM search_cache WHERE expires_at < ?", (now,)
         ).fetchone()[0]
-        return {"total": total, "fresh": fresh, "stale": total - fresh}
+        size_kb = os.path.getsize(DB_PATH) // 1024 if os.path.exists(DB_PATH) else 0
+        return {"total": total, "expired": expired, "live": total - expired, "size_kb": size_kb}
     finally:
-        db.close()
+        conn.close()
 
 
-def clear_cache():
-    """Delete all cached entries."""
-    db = _get_db()
-    db.execute("DELETE FROM search_cache")
-    db.commit()
-    db.close()
-    print("[search_cache] cleared")
+def clear_all() -> int:
+    """Delete all cached entries. Returns count deleted."""
+    conn = _connect()
+    try:
+        n = conn.execute("DELETE FROM search_cache").rowcount
+        conn.commit()
+        return n
+    finally:
+        conn.close()
 
+
+def clear_expired() -> int:
+    """Delete only expired entries. Returns count deleted."""
+    now  = time.time()
+    conn = _connect()
+    try:
+        n = conn.execute(
+            "DELETE FROM search_cache WHERE expires_at < ?", (now,)
+        ).rowcount
+        conn.commit()
+        return n
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    stats = cache_stats()
-    print(f"search_cache: {stats['fresh']} fresh, {stats['stale']} stale, {stats['total']} total entries")
-    print(f"cache path: {CACHE_PATH}")
+    args = sys.argv[1:]
+    if "--clear" in args:
+        n = clear_all()
+        print(f"[search_cache] cleared {n} entries")
+    elif "--expired" in args:
+        n = clear_expired()
+        print(f"[search_cache] cleared {n} expired entries")
+    else:
+        s = stats()
+        print(f"[search_cache] {s['live']} live / {s['expired']} expired / {s['total']} total  ({s['size_kb']} KB)")

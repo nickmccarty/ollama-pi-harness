@@ -1052,3 +1052,29 @@ compress_knowledge is as expensive as the search itself — scales with search r
 
 **4. Panel threads not visible — `WIGGUM_PANEL` not set in autoresearch subprocess**
 All 10 traces show only a `main` thread. The parallel panel is not running during autoresearch eval runs. The env var isn't being passed through the subprocess call.
+
+---
+
+## Search Cache (SQLite TTL)
+
+Autoresearch runs the same search queries repeatedly across experiments — proposer converges on similar instructions, so the underlying research questions are nearly identical. Without a cache, every experiment pays full DDGS latency + `compress_knowledge` cost for queries already answered.
+
+**Design:** SQLite, SHA-256 keyed on normalised query, 24 h TTL, lazy expiration eviction on every `put()`. Schema lives in `search_cache.db` (gitignored). `cached_search()` is the only public interface agent.py needs to call.
+
+```
+web_search_raw(query)
+  -> cached_search(query, _ddgs, max_results=n)
+       -> HIT:  return from DB          (< 1 ms)
+       -> MISS: call DDGS, store, return (~300-600 ms per result set)
+```
+
+**Integration:** `web_search_raw()` in agent.py now wraps `cached_search` with a local `_ddgs` lambda. The cache import is lazy (inside the function) so the rest of agent.py has no hard dependency.
+
+**Expected savings in autoresearch:** Within a session, the first experiment cold-populates the cache for a given task. Subsequent experiments on the same task (same proposer queries) are served from cache. This cuts DDGS + compress_knowledge time — the two stages that dominate `gather_research` wall time.
+
+**Cache management:**
+```bash
+python search_cache.py            # stats
+python search_cache.py --expired  # evict expired rows
+python search_cache.py --clear    # wipe all
+```

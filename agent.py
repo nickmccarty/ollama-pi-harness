@@ -100,10 +100,13 @@ PYTHON_TOOLS = [
 
 
 def web_search_raw(query: str, max_results: int = MAX_RESULTS_PER_SEARCH) -> list[dict]:
-    """Return raw result dicts from DDGS."""
+    """Return raw result dicts from DDGS, using SQLite cache (24 h TTL)."""
     try:
-        with DDGS() as ddgs:
-            return list(ddgs.text(query, max_results=max_results))
+        from search_cache import cached_search
+        def _ddgs(q: str, n: int) -> list[dict]:
+            with DDGS() as ddgs:
+                return list(ddgs.text(q, max_results=n))
+        return cached_search(query, _ddgs, max_results=max_results)
     except Exception as e:
         print(f"  [web_search error] {e}")
         return []

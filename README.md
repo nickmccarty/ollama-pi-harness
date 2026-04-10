@@ -139,6 +139,13 @@ python memory.py                           # list recent observations
 python memory.py --search "context window" # test retrieval
 ```
 
+**Search cache:**
+```bash
+python search_cache.py            # stats: live / expired / total entries + size
+python search_cache.py --expired  # evict only expired entries
+python search_cache.py --clear    # wipe entire cache
+```
+
 **Test the planner:**
 ```bash
 python planner.py "Your task string here"
@@ -227,7 +234,8 @@ python inspect_run.py --all    # summary table of all runs
 | `annotate_abstracts.py` | Batch annotated abstract generator — Nanda 8-move framework over CSV of papers |
 | `vision.py` | llama3.2-vision routing for image inputs |
 | `security.py` | Code scanner, path sandbox, prompt injection scanner |
-| `logger.py` | Structured per-run trace → `runs.jsonl`; Chrome Trace Events → `traces/` |
+| `search_cache.py` | SQLite TTL cache for DDGS search results (24 h, SHA-256 keyed) |
+| `logger.py` | Structured per-run trace -> `runs.jsonl`; Chrome Trace Events -> `traces/` |
 | `eval_suite.py` | Regression harness — 5 fixed tasks + optional generated tasks |
 | `autoresearch.py` | Autonomous synthesis-instruction optimizer (Karpathy-style loop) |
 | `autoresearch_program.md` | Autoresearch scope, metric, keep rule, and dimension weights |
@@ -251,6 +259,7 @@ python inspect_run.py --all    # summary table of all runs
 |------|---------|
 | `runs.jsonl` | Structured run logs |
 | `memory.db` | SQLite observation store |
+| `search_cache.db` | SQLite search result cache (24 h TTL; auto-created) |
 | `traces/` | Chrome Trace Event JSON files — drag to `ui.perfetto.dev` |
 
 ---
