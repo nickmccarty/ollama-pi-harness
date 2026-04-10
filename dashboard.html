@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Harness Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d1117;
+    --card:     #161b22;
+    --border:   #30363d;
+    --text:     #e6edf3;
+    --muted:    #8b949e;
+    --blue:     #4f8ef7;
+    --green:    #3fb950;
+    --orange:   #fb923c;
+    --red:      #f85149;
+    --purple:   #a78bfa;
+    --pink:     #f472b6;
+    --yellow:   #e3b341;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 24px;
+  }
+
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+
+  /* KPI cards */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .kpi {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+  }
+  .kpi-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .kpi-value { font-size: 26px; font-weight: 700; line-height: 1; }
+  .kpi-sub   { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .kpi.blue   .kpi-value { color: var(--blue); }
+  .kpi.green  .kpi-value { color: var(--green); }
+  .kpi.orange .kpi-value { color: var(--orange); }
+  .kpi.purple .kpi-value { color: var(--purple); }
+  .kpi.red    .kpi-value { color: var(--red); }
+  .kpi.yellow .kpi-value { color: var(--yellow); }
+
+  /* Chart grid */
+  .chart-grid {
+    display: grid;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .col-2 { grid-template-columns: 1fr 1fr; }
+  .col-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .col-1 { grid-template-columns: 1fr; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 14px;
+  }
+  .chart-wrap { position: relative; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th {
+    text-align: left; padding: 8px 10px;
+    color: var(--muted); font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.03); }
+
+  .badge {
+    display: inline-block; padding: 2px 7px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; line-height: 1.6;
+  }
+  .badge-pass  { background: rgba(63,185,80,.18);  color: var(--green); }
+  .badge-fail  { background: rgba(248,81,73,.18);  color: var(--red); }
+  .badge-error { background: rgba(139,148,158,.18); color: var(--muted); }
+
+  .score-bar {
+    display: inline-block; width: 60px; height: 6px;
+    background: var(--border); border-radius: 3px; vertical-align: middle; margin-right: 6px;
+  }
+  .score-fill { height: 100%; border-radius: 3px; background: var(--blue); }
+
+  @media (max-width: 900px) {
+    .col-2, .col-3 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Harness Engineering — Run Dashboard</h1>
+<p class="subtitle" id="subtitle">Loading...</p>
+
+<div class="kpi-grid" id="kpi-grid"></div>
+
+<div class="chart-grid col-1">
+  <div class="card">
+    <div class="card-title">Wiggum Score — run history</div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="scoreChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="chart-grid col-1">
+  <div class="card">
+    <div class="card-title">Token usage by date</div>
+    <div class="chart-wrap" style="height:180px">
+      <canvas id="tokenDateChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="chart-grid col-3">
+  <div class="card">
+    <div class="card-title">Tokens by stage</div>
+    <div class="chart-wrap" style="height:220px">
+      <canvas id="stageChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Wiggum dimensions (avg)</div>
+    <div class="chart-wrap" style="height:220px">
+      <canvas id="radarChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Pass / Fail / Error</div>
+    <div class="chart-wrap" style="height:220px">
+      <canvas id="finalChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="chart-grid col-2">
+  <div class="card">
+    <div class="card-title">Run duration (minutes)</div>
+    <div class="chart-wrap" style="height:180px">
+      <canvas id="durationChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Activity by hour of day</div>
+    <div class="chart-wrap" style="height:180px">
+      <canvas id="hourChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="chart-grid col-1">
+  <div class="card">
+    <div class="card-title">Recent runs (last 30)</div>
+    <div class="table-wrap">
+      <table id="runsTable"></table>
+    </div>
+  </div>
+</div>
+
+<script>
+const DATA = {"kpi": {"total": 174, "passed": 84, "failed": 37, "errors": 53, "total_input": 1176266, "total_output": 226668, "avg_score": 7.83, "avg_duration": 421.3}, "score_trend": {"labels": ["2026-04-07 18:13:15", "2026-04-07 18:16:54", "2026-04-07 18:21:45", "2026-04-07 18:26:07", "2026-04-07 18:27:32", "2026-04-07 18:28:55", "2026-04-07 18:38:54", "2026-04-07 18:39:19", "2026-04-07 18:39:39", "2026-04-07 18:40:02", "2026-04-07 18:40:28", "2026-04-07 18:40:47", "2026-04-07 18:41:09", "2026-04-07 18:41:29", "2026-04-07 18:41:51", "2026-04-07 18:51:37", "2026-04-07 18:52:02", "2026-04-07 18:56:22", "2026-04-07 18:56:43", "2026-04-07 18:57:04", "2026-04-07 19:00:08", "2026-04-07 19:00:33", "2026-04-07 19:00:59", "2026-04-07 19:01:35", "2026-04-07 19:01:50", "2026-04-07 19:02:25", "2026-04-07 19:02:35", "2026-04-07 19:02:46", "2026-04-07 19:03:07", "2026-04-07 21:08:17", "2026-04-07 21:11:22", "2026-04-07 21:13:11", "2026-04-07 21:17:32", "2026-04-07 21:21:51", "2026-04-07 21:23:21", "2026-04-07 21:24:55", "2026-04-07 21:30:37", "2026-04-07 21:37:15", "2026-04-07 21:38:31", "2026-04-07 21:38:55", "2026-04-07 21:39:23", "2026-04-07 21:39:45", "2026-04-08 17:18:06", "2026-04-08 17:19:44", "2026-04-08 17:23:47", "2026-04-08 17:26:07", "2026-04-08 17:29:51", "2026-04-08 17:33:11", "2026-04-08 17:34:16", "2026-04-08 17:36:24", "2026-04-08 17:38:35", "2026-04-08 18:05:46", "2026-04-08 21:07:18", "2026-04-08 21:17:03", "2026-04-08 21:27:23", "2026-04-08 21:17:03", "2026-04-08 21:46:35", "2026-04-08 22:10:51", "2026-04-08 22:15:10", "2026-04-09 00:43:36", "2026-04-09 00:49:44", "2026-04-09 01:04:00", "2026-04-09 01:49:01", "2026-04-09 01:58:52", "2026-04-09 02:05:41", "2026-04-09 02:12:16", "2026-04-09 02:20:36", "2026-04-09 02:31:28", "2026-04-09 02:37:54", "2026-04-09 02:44:38", "2026-04-09 03:39:04", "2026-04-09 04:09:33", "2026-04-09 04:24:24", "2026-04-09 04:45:55", "2026-04-09 05:22:32", "2026-04-09 06:01:50", "2026-04-09 06:15:53", "2026-04-09 06:32:51", "2026-04-09 06:56:38", "2026-04-09 07:20:50", "2026-04-09 07:29:24", "2026-04-09 07:53:55", "2026-04-09 08:03:56", "2026-04-09 08:27:45", "2026-04-09 09:09:07", "2026-04-09 09:38:49", "2026-04-09 09:52:04", "2026-04-09 10:16:29", "2026-04-09 10:31:47", "2026-04-09 10:49:43", "2026-04-09 11:17:54", "2026-04-09 11:44:43", "2026-04-09 11:55:50", "2026-04-09 12:31:30", "2026-04-09 13:43:02", "2026-04-09 14:09:48", "2026-04-09 15:25:02", "2026-04-09 16:21:38", "2026-04-09 18:02:49", "2026-04-09 18:20:17", "2026-04-09 19:06:11", "2026-04-09 22:34:36", "2026-04-09 22:55:08", "2026-04-09 23:20:48", "2026-04-09 23:37:09", "2026-04-09 23:37:52", "2026-04-10 00:19:07"], "values": [5, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 6, 5, 5, 5, 9, 8.3, 8.3, 8.0, 7.6, 8.1, 7.6, 8.3, 7.6, 7.0, 7.0, 7.0, 6.0, 7.0, 8.1, 7.0, 7.5, 7.0, 7.0, 7.0, 7.8, 7.9, 7.0, 7.0, 8.8, 8.8, 7.0, 6.8, 6.0, 8.1, 7.0, 8.1, 7.0, 7.2, 8.8, 8.8, 7.0, 7.0, 8.1, 7.8, 7.2, 7.9, 8.8, 7.0, 7.8, 6.0, 8.1, 7.0, 8.2, 6.8, 7.1, 7.0, 8.8, 6.8, 8.1, 7.0, 6.9, 6.8, 8.1, 7.0, 7.8, 6.8, 7.7, 6.9, 7.0, 8.1, 7.8, 8.1, 8.1, 7.8, 8.1, 8.1, 8.8, 8.1], "models": ["pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b", "pi-qwen-32b"]}, "token_by_date": {"dates": ["2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10"], "input": [0, 21529, 1140180, 14557], "output": [0, 5004, 219051, 2613]}, "token_by_stage": {"names": ["compress_knowledge", "search_query", "synth", "synth_count", "tool_loop", "wiggum_eval", "wiggum_revise"], "tokens": [7144, 4016, 350308, 127949, 501481, 220235, 191801], "colors": ["#fb923c", "#4ade80", "#4f8ef7", "#38bdf8", "#fbbf24", "#a78bfa", "#f472b6"], "ms": [522.5, 326.7, 21138.8, 5884.3, 15062.9, 3684.0, 24786.5]}, "wiggum_dims": {"labels": ["Relevance", "Completeness", "Depth", "Specificity", "Structure"], "values": [8.81, 7.19, 6.81, 6.51, 8.55]}, "duration_trend": {"labels": ["2026-04-08 22:01:11", "2026-04-08 22:10:51", "2026-04-08 22:15:10", "2026-04-09 00:43:36", "2026-04-09 00:49:44", "2026-04-09 01:04:00", "2026-04-09 01:49:01", "2026-04-09 01:58:52", "2026-04-09 02:05:41", "2026-04-09 02:12:16", "2026-04-09 02:20:36", "2026-04-09 02:31:28", "2026-04-09 02:37:54", "2026-04-09 02:44:38", "2026-04-09 03:09:56", "2026-04-09 03:10:17", "2026-04-09 03:11:27", "2026-04-09 03:11:58", "2026-04-09 03:13:35", "2026-04-09 03:13:55", "2026-04-09 03:14:41", "2026-04-09 03:15:02", "2026-04-09 03:15:35", "2026-04-09 03:15:44", "2026-04-09 03:16:18", "2026-04-09 03:16:30", "2026-04-09 03:17:06", "2026-04-09 03:17:18", "2026-04-09 03:17:58", "2026-04-09 03:18:11", "2026-04-09 03:18:53", "2026-04-09 03:19:04", "2026-04-09 03:19:48", "2026-04-09 03:19:57", "2026-04-09 03:20:42", "2026-04-09 03:20:52", "2026-04-09 03:21:38", "2026-04-09 03:21:47", "2026-04-09 03:22:38", "2026-04-09 03:22:49", "2026-04-09 03:23:46", "2026-04-09 03:23:55", "2026-04-09 03:25:35", "2026-04-09 03:25:45", "2026-04-09 03:26:40", "2026-04-09 03:26:50", "2026-04-09 03:27:34", "2026-04-09 03:27:44", "2026-04-09 03:28:32", "2026-04-09 03:28:44", "2026-04-09 03:29:36", "2026-04-09 03:29:47", "2026-04-09 03:30:36", "2026-04-09 03:30:47", "2026-04-09 03:31:36", "2026-04-09 03:31:46", "2026-04-09 03:32:37", "2026-04-09 03:32:48", "2026-04-09 03:33:32", "2026-04-09 03:33:43", "2026-04-09 03:35:09", "2026-04-09 03:35:19", "2026-04-09 03:37:06", "2026-04-09 03:37:17", "2026-04-09 03:39:04", "2026-04-09 04:09:33", "2026-04-09 04:24:24", "2026-04-09 04:45:55", "2026-04-09 05:22:32", "2026-04-09 06:01:50", "2026-04-09 06:15:53", "2026-04-09 06:32:51", "2026-04-09 06:56:38", "2026-04-09 07:20:50", "2026-04-09 07:29:24", "2026-04-09 07:53:55", "2026-04-09 08:03:56", "2026-04-09 08:27:45", "2026-04-09 09:09:07", "2026-04-09 09:38:49", "2026-04-09 09:52:04", "2026-04-09 10:16:29", "2026-04-09 10:31:47", "2026-04-09 10:49:43", "2026-04-09 11:17:54", "2026-04-09 11:44:43", "2026-04-09 11:55:50", "2026-04-09 12:31:30", "2026-04-09 13:43:02", "2026-04-09 14:09:48", "2026-04-09 15:25:02", "2026-04-09 16:21:38", "2026-04-09 18:02:49", "2026-04-09 18:20:17", "2026-04-09 18:52:00", "2026-04-09 19:06:11", "2026-04-09 22:34:36", "2026-04-09 22:55:08", "2026-04-09 23:20:48", "2026-04-09 23:37:09", "2026-04-09 23:37:52", "2026-04-10 00:19:07"], "values": [4.7, 6.0, 11.9, 34.6, 34.5, 39.6, 9.7, 6.7, 6.5, 8.2, 10.8, 6.3, 6.6, 14.2, 0.3, 0.5, 0.5, 0.7, 0.3, 0.3, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.1, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.1, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 30.3, 13.8, 21.4, 35.8, 39.1, 13.2, 16.9, 22.9, 24.1, 7.6, 24.4, 9.0, 23.7, 40.9, 29.6, 12.7, 24.3, 14.7, 17.8, 27.5, 26.7, 10.4, 35.6, 70.8, 26.7, 74.8, 23.1, 25.3, 17.4, 31.2, 14.2, 64.5, 20.4, 25.0, 16.1, 23.9, 40.7, 16.7]}, "model_split": {"names": ["pi-qwen", "pi-qwen-32b"], "values": [65, 109]}, "hour_dist": {"labels": ["00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00", "08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"], "values": [3, 3, 6, 55, 3, 1, 4, 3, 2, 3, 3, 3, 1, 1, 1, 1, 1, 9, 24, 10, 0, 20, 14, 3]}, "recent_runs": [{"ts": "2026-04-10 00:19:07", "task": "Search for best practices for prompt injection defense in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.1, "rounds": 1, "duration": 16.7, "tokens_in": 14557, "tokens_out": 2613, "final": "PASS", "searches": 5}, {"ts": "2026-04-09 23:37:52", "task": "Search for the top 3 context window management strategies for producti", "model": "pi-qwen-32b", "type": "enumerated", "score": 8.8, "rounds": 1, "duration": 40.7, "tokens_in": 31173, "tokens_out": 3989, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 23:37:09", "task": "Search for best practices for prompt injection defense in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.1, "rounds": 1, "duration": 23.9, "tokens_in": 16526, "tokens_out": 3216, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 23:20:48", "task": "Search for the top 3 context window management strategies for producti", "model": "pi-qwen-32b", "type": "enumerated", "score": 8.1, "rounds": 1, "duration": 16.1, "tokens_in": 22982, "tokens_out": 2908, "final": "PASS", "searches": 3}, {"ts": "2026-04-09 22:55:08", "task": "Search for best practices for prompt injection defense in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 7.8, "rounds": 1, "duration": 25.0, "tokens_in": 26584, "tokens_out": 4725, "final": "FAIL", "searches": 5}, {"ts": "2026-04-09 22:34:36", "task": "Search for the top 3 context window management strategies for producti", "model": "pi-qwen-32b", "type": "enumerated", "score": 8.1, "rounds": 1, "duration": 20.4, "tokens_in": 18924, "tokens_out": 3125, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 19:06:11", "task": "Search for best practices for prompt injection defense in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.1, "rounds": 1, "duration": 64.5, "tokens_in": 26995, "tokens_out": 4726, "final": "PASS", "searches": 4}, {"ts": "2026-04-09 18:52:00", "task": "Search for the top 3 context window management strategies for producti", "model": "pi-qwen-32b", "type": "?", "score": null, "rounds": 0, "duration": 14.2, "tokens_in": 10028, "tokens_out": 648, "final": "ERROR", "searches": 3}, {"ts": "2026-04-09 18:20:17", "task": "Search for best practices for prompt injection defense in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 7.8, "rounds": 3, "duration": 31.2, "tokens_in": 21725, "tokens_out": 5696, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 18:02:49", "task": "Search for the top 3 context window management strategies for producti", "model": "pi-qwen-32b", "type": "enumerated", "score": 8.1, "rounds": 1, "duration": 17.4, "tokens_in": 23621, "tokens_out": 3553, "final": "PASS", "searches": 3}, {"ts": "2026-04-09 16:21:38", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 7.0, "rounds": 3, "duration": 25.3, "tokens_in": 40398, "tokens_out": 5772, "final": "FAIL", "searches": 5}, {"ts": "2026-04-09 15:25:02", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 6.9, "rounds": 3, "duration": 23.1, "tokens_in": 26002, "tokens_out": 5543, "final": "FAIL", "searches": 2}, {"ts": "2026-04-09 14:09:48", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 7.7, "rounds": 3, "duration": 74.8, "tokens_in": 41674, "tokens_out": 14708, "final": "FAIL", "searches": 5}, {"ts": "2026-04-09 13:43:02", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 6.8, "rounds": 3, "duration": 26.7, "tokens_in": 32782, "tokens_out": 6062, "final": "FAIL", "searches": 5}, {"ts": "2026-04-09 12:31:30", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 7.8, "rounds": 3, "duration": 70.8, "tokens_in": 38046, "tokens_out": 13865, "final": "FAIL", "searches": 5}, {"ts": "2026-04-09 11:55:50", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 7.0, "rounds": 3, "duration": 35.6, "tokens_in": 33779, "tokens_out": 7714, "final": "FAIL", "searches": 3}, {"ts": "2026-04-09 11:44:43", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.1, "rounds": 1, "duration": 10.4, "tokens_in": 13835, "tokens_out": 2056, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 11:17:54", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 6.8, "rounds": 3, "duration": 26.7, "tokens_in": 31727, "tokens_out": 5898, "final": "FAIL", "searches": 3}, {"ts": "2026-04-09 10:49:43", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 6.9, "rounds": 3, "duration": 27.5, "tokens_in": 22829, "tokens_out": 5972, "final": "FAIL", "searches": 2}, {"ts": "2026-04-09 10:31:47", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 7.0, "rounds": 3, "duration": 17.8, "tokens_in": 21583, "tokens_out": 4257, "final": "FAIL", "searches": 2}, {"ts": "2026-04-09 10:16:29", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.1, "rounds": 1, "duration": 14.7, "tokens_in": 18741, "tokens_out": 2926, "final": "PASS", "searches": 3}, {"ts": "2026-04-09 09:52:04", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 6.8, "rounds": 3, "duration": 24.3, "tokens_in": 32252, "tokens_out": 5704, "final": "FAIL", "searches": 5}, {"ts": "2026-04-09 09:38:49", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.8, "rounds": 1, "duration": 12.7, "tokens_in": 14963, "tokens_out": 2404, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 09:09:07", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 7.0, "rounds": 3, "duration": 29.6, "tokens_in": 22359, "tokens_out": 6493, "final": "FAIL", "searches": 2}, {"ts": "2026-04-09 08:27:45", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 7.1, "rounds": 3, "duration": 40.9, "tokens_in": 36557, "tokens_out": 8449, "final": "FAIL", "searches": 4}, {"ts": "2026-04-09 08:03:56", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 6.8, "rounds": 3, "duration": 23.7, "tokens_in": 27039, "tokens_out": 5324, "final": "FAIL", "searches": 2}, {"ts": "2026-04-09 07:53:55", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.2, "rounds": 1, "duration": 9.0, "tokens_in": 16375, "tokens_out": 1692, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 07:29:24", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 7.0, "rounds": 3, "duration": 24.4, "tokens_in": 21604, "tokens_out": 5446, "final": "FAIL", "searches": 2}, {"ts": "2026-04-09 07:20:50", "task": "Search for best practices for cost envelope management in production A", "model": "pi-qwen-32b", "type": "best_practices", "score": 8.1, "rounds": 1, "duration": 7.6, "tokens_in": 13322, "tokens_out": 1503, "final": "PASS", "searches": 2}, {"ts": "2026-04-09 06:56:38", "task": "Search for the top 5 context engineering techniques used in production", "model": "pi-qwen-32b", "type": "enumerated", "score": 6.0, "rounds": 3, "duration": 24.1, "tokens_in": 37456, "tokens_out": 5377, "final": "FAIL", "searches": 4}]};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+const fmtK = n => n >= 1000000 ? (n/1000000).toFixed(1)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'K' : String(n);
+
+const CHART_DEFAULTS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: { ticks: { color: '#8b949e', font: { size: 10 }, maxRotation: 45 }, grid: { color: '#21262d' } },
+    y: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: '#21262d' } },
+  },
+};
+
+// ---------------------------------------------------------------------------
+// KPI cards
+// ---------------------------------------------------------------------------
+const kpi = DATA.kpi;
+const passRate = kpi.total ? Math.round(kpi.passed / kpi.total * 100) : 0;
+$('subtitle').textContent =
+  `${kpi.total} runs · updated ${new Date().toLocaleString()}`;
+
+const cards = [
+  { label: 'Total runs',      value: kpi.total,                           cls: 'blue'   },
+  { label: 'Pass rate',       value: passRate + '%',  sub: `${kpi.passed} passed`, cls: 'green'  },
+  { label: 'Avg score',       value: kpi.avg_score,   sub: 'first wiggum round',   cls: 'yellow' },
+  { label: 'Avg duration',    value: kpi.avg_duration + 'm',              cls: 'orange' },
+  { label: 'Total input tok', value: fmtK(kpi.total_input),               cls: 'purple' },
+  { label: 'Total output tok',value: fmtK(kpi.total_output),              cls: 'blue'   },
+  { label: 'Errors',          value: kpi.errors,                          cls: 'red'    },
+  { label: 'Failed',          value: kpi.failed,                          cls: 'orange' },
+];
+$('kpi-grid').innerHTML = cards.map(c => `
+  <div class="kpi ${c.cls}">
+    <div class="kpi-label">${c.label}</div>
+    <div class="kpi-value">${c.value}</div>
+    ${c.sub ? `<div class="kpi-sub">${c.sub}</div>` : ''}
+  </div>`).join('');
+
+// ---------------------------------------------------------------------------
+// Score trend
+// ---------------------------------------------------------------------------
+new Chart($('scoreChart'), {
+  type: 'line',
+  data: {
+    labels: DATA.score_trend.labels,
+    datasets: [{
+      data: DATA.score_trend.values,
+      borderColor: '#4f8ef7',
+      backgroundColor: 'rgba(79,142,247,0.08)',
+      pointRadius: 2,
+      pointHoverRadius: 5,
+      borderWidth: 1.5,
+      tension: 0.3,
+      fill: true,
+    }],
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          afterLabel: ctx => 'model: ' + (DATA.score_trend.models[ctx.dataIndex] || ''),
+        },
+      },
+    },
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, ticks: { ...CHART_DEFAULTS.scales.x.ticks, maxTicksLimit: 12 } },
+      y: { ...CHART_DEFAULTS.scales.y, min: 0, max: 10 },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Tokens by date (stacked bar)
+// ---------------------------------------------------------------------------
+new Chart($('tokenDateChart'), {
+  type: 'bar',
+  data: {
+    labels: DATA.token_by_date.dates,
+    datasets: [
+      { label: 'Input tokens',  data: DATA.token_by_date.input,  backgroundColor: 'rgba(79,142,247,0.7)',  stack: 'tok' },
+      { label: 'Output tokens', data: DATA.token_by_date.output, backgroundColor: 'rgba(167,139,250,0.7)', stack: 'tok' },
+    ],
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    plugins: { legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } } },
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, stacked: true },
+      y: { ...CHART_DEFAULTS.scales.y, stacked: true, ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: v => fmtK(v) } },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Tokens by stage (donut)
+// ---------------------------------------------------------------------------
+new Chart($('stageChart'), {
+  type: 'doughnut',
+  data: {
+    labels: DATA.token_by_stage.names,
+    datasets: [{
+      data:            DATA.token_by_stage.tokens,
+      backgroundColor: DATA.token_by_stage.colors,
+      borderColor:     '#161b22',
+      borderWidth: 2,
+    }],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: true, position: 'right', labels: { color: '#8b949e', font: { size: 11 }, padding: 10 } },
+      tooltip: {
+        callbacks: {
+          label: ctx => {
+            const total = ctx.dataset.data.reduce((a,b)=>a+b,0);
+            const pct = Math.round(ctx.raw / total * 100);
+            return ` ${fmtK(ctx.raw)} tok (${pct}%)`;
+          },
+        },
+      },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Wiggum dimensions radar
+// ---------------------------------------------------------------------------
+new Chart($('radarChart'), {
+  type: 'radar',
+  data: {
+    labels: DATA.wiggum_dims.labels,
+    datasets: [{
+      data:            DATA.wiggum_dims.values,
+      borderColor:     '#4f8ef7',
+      backgroundColor: 'rgba(79,142,247,0.15)',
+      pointBackgroundColor: '#4f8ef7',
+      borderWidth: 2,
+      pointRadius: 3,
+    }],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      r: {
+        min: 0, max: 10,
+        ticks:    { color: '#8b949e', font: { size: 10 }, stepSize: 2, backdropColor: 'transparent' },
+        grid:     { color: '#30363d' },
+        pointLabels: { color: '#e6edf3', font: { size: 12 } },
+        angleLines: { color: '#30363d' },
+      },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Pass / Fail / Error donut
+// ---------------------------------------------------------------------------
+new Chart($('finalChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Pass', 'Fail', 'Error'],
+    datasets: [{
+      data: [kpi.passed, kpi.failed, kpi.errors],
+      backgroundColor: ['rgba(63,185,80,0.8)', 'rgba(248,81,73,0.8)', 'rgba(139,148,158,0.5)'],
+      borderColor: '#161b22',
+      borderWidth: 2,
+    }],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: true, position: 'right', labels: { color: '#8b949e', font: { size: 11 }, padding: 12 } },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Duration trend
+// ---------------------------------------------------------------------------
+new Chart($('durationChart'), {
+  type: 'line',
+  data: {
+    labels: DATA.duration_trend.labels,
+    datasets: [{
+      data:            DATA.duration_trend.values,
+      borderColor:     '#fb923c',
+      backgroundColor: 'rgba(251,146,60,0.08)',
+      pointRadius: 1.5,
+      borderWidth: 1.5,
+      tension: 0.3,
+      fill: true,
+    }],
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, ticks: { ...CHART_DEFAULTS.scales.x.ticks, maxTicksLimit: 10 } },
+      y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'min', color: '#8b949e', font: { size: 10 } } },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Hour-of-day bar
+// ---------------------------------------------------------------------------
+new Chart($('hourChart'), {
+  type: 'bar',
+  data: {
+    labels: DATA.hour_dist.labels,
+    datasets: [{
+      data:            DATA.hour_dist.values,
+      backgroundColor: 'rgba(167,139,250,0.7)',
+      borderRadius: 3,
+    }],
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, ticks: { ...CHART_DEFAULTS.scales.x.ticks, maxTicksLimit: 12 } },
+      y: { ...CHART_DEFAULTS.scales.y },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Recent runs table
+// ---------------------------------------------------------------------------
+const tbl = $('runsTable');
+const cols = ['Timestamp','Task','Model','Type','Score','Rounds','Duration','In tok','Out tok','Searches','Result'];
+tbl.innerHTML = `<tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>`;
+
+DATA.recent_runs.forEach(r => {
+  const scoreBar = r.score != null
+    ? `<span class="score-bar"><span class="score-fill" style="width:${r.score*10}%"></span></span>${r.score}`
+    : '—';
+  const badge = r.final === 'PASS'  ? `<span class="badge badge-pass">PASS</span>`
+              : r.final === 'FAIL'  ? `<span class="badge badge-fail">FAIL</span>`
+              : r.final === 'ERROR' ? `<span class="badge badge-error">ERR</span>`
+              : r.final;
+  const row = [
+    `<td style="color:var(--muted);font-size:11px">${r.ts}</td>`,
+    `<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis" title="${r.task.replace(/"/g,'&quot;')}">${r.task}</td>`,
+    `<td style="color:var(--muted)">${r.model}</td>`,
+    `<td style="color:var(--muted)">${r.type}</td>`,
+    `<td>${scoreBar}</td>`,
+    `<td style="color:var(--muted);text-align:center">${r.rounds ?? '—'}</td>`,
+    `<td style="color:var(--orange)">${r.duration}m</td>`,
+    `<td style="color:var(--muted)">${fmtK(r.tokens_in)}</td>`,
+    `<td style="color:var(--muted)">${fmtK(r.tokens_out)}</td>`,
+    `<td style="text-align:center;color:var(--muted)">${r.searches}</td>`,
+    `<td>${badge}</td>`,
+  ];
+  tbl.innerHTML += `<tr>${row.join('')}</tr>`;
+});
+</script>
+</body>
+</html>
