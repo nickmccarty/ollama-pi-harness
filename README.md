@@ -1,5 +1,7 @@
 # harness-engineering
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nickmccarty/ollama-pi-harness)
+
 A local Ollama agent harness built incrementally from failure. Research, verify, remember, plan, orchestrate — all running on local models with no external API keys.
 
 The central question: can open-source models running locally approach the utility of frontier models through harness engineering alone? The premise is that the model is not the 80% factor. The harness is.
