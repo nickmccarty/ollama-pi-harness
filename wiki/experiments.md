@@ -83,9 +83,23 @@ Infrastructure changes applied before session 3:
 - Perfetto tracing in `logger.py` — per-stage waterfall available via `traces/`
 - Panel parallelism in `panel.py` — 3 personas run via ThreadPoolExecutor
 
-Session 3 baseline: T_D=8.420 (best from session 2), T_E=TBD (truncation fix may shift baseline).
+Session 3 baseline: T_D=8.420 (best from session 2). T_E truncation fix (`num_predict=8192`) may shift baseline.
 
-Start session 3:
+**Session 3 partial results (in progress):**
+
+| Exp | Change | Score | Status |
+|-----|--------|-------|--------|
+| 6 | Failure modes + detection/mitigation per strategy | 8.350 | DISCARD −0.233 |
+| **7** | **"When NOT to use" + input boundaries** | **8.915** | **KEEP +0.332** |
+| 8 | Measurable success criteria / validation tests | 8.915 | DISCARD +0.000 |
+| 9 | Confidence ratings (High/Med/Low) per library | 7.965 | DISCARD −0.950 |
+| 10+ | ongoing… | — | — |
+
+New best: **8.915** (exp 7) — largest single-experiment jump across all sessions (+0.332). Kimi found the "applicability constraint" framing (when NOT to use, input boundaries) in its first session; the local proposer had not explored this direction in 9 previous experiments.
+
+Strong negative signal: confidence/hedging annotations (exp 9, −0.950) are explicitly harmful — evaluator reads uncertainty markers as lack of authority and penalises depth. Added to `already_present` blocklist.
+
+Start session 3 (resume):
 ```bash
-python autoresearch.py --tasks T_D,T_E
+python autoresearch.py --tasks T_D,T_E --proposer kimi-k2.5:cloud
 ```

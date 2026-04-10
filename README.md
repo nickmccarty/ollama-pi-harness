@@ -77,7 +77,7 @@ ollama create pi-qwen-32b -f Modelfile.32b  # 32B producer (requires Modelfile.3
 ```bash
 conda create -n ollama-pi python=3.11
 conda activate ollama-pi
-pip install ollama ddgs "markitdown[all]"
+pip install ollama ddgs "markitdown[all]" datasets   # datasets required for --push in hf_export.py
 ```
 
 ---
@@ -155,6 +155,18 @@ python analytics.py --full  # per-run detail
 python skills.py            # list all skills with hook, trigger mode, description
 ```
 
+**HuggingFace dataset export:**
+```bash
+python hf_export.py                               # export to hf_datasets/ (sft, preference, reward, trajectory)
+python hf_export.py --sft-min-score 8.0           # stricter SFT quality filter
+python hf_export.py --push nickmccarty/ollama-pi-harness-datasets  # push to Hub (requires HF_TOKEN)
+```
+
+**Dashboard:**
+```bash
+python dashboard.py --open  # generate dashboard.html and open in browser
+```
+
 **List available skills:**
 ```
 /annotate   [pre_synthesis ] [auto]    Inject Nanda Annotated Abstract framework
@@ -227,6 +239,8 @@ python inspect_run.py --all    # summary table of all runs
 | `analyze_exp03.py` | Experiment-03 analysis — model-filtered, cross-experiment comparison |
 | `run_exp04.py` | Experiment-04 runner — 9-run CRD for producer upgrade impact |
 | `analyze_exp04.py` | Experiment-04 analysis script |
+| `hf_export.py` | Export `runs.jsonl` to HuggingFace-ready SFT / preference / reward / trajectory datasets |
+| `dashboard.py` | Generate self-contained HTML analytics dashboard from `runs.jsonl` |
 | `Modelfile` | Ollama Modelfile for `pi-qwen` (qwen2.5:7b) |
 | `Modelfile.32b` | Ollama Modelfile for `pi-qwen-32b` (qwen2.5:32b Q4_K_M) |
 | `eval.sh` | Original filesystem-level eval (superseded by `eval_suite.py`) |

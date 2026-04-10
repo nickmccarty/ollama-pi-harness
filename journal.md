@@ -918,3 +918,119 @@ The dimension data is decisive: T_B depth is unchanged despite a 4.5× parameter
 ### Decision
 
 Start autoresearch immediately. T_B depth/specificity is the target. T_A and T_C are stable baselines.
+
+---
+
+## Throughput Optimisations + Perfetto Tracing
+
+Several pipeline changes made to reduce wall-time per run:
+
+- **Panel parallelism:** `panel.py` now runs the 3 evaluator personas concurrently via `ThreadPoolExecutor`. Each thread calls `trace.name_thread()` so Perfetto traces show true parallelism.
+- **Tool loop skip:** `run_python` tool loop is skipped entirely for `task_type in ("research", "best_practices")` — saves ~30s on every eval task run.
+- **COMPRESS_MODEL env var:** `compress_knowledge()` and `plan_query()` can use a lighter model (e.g. `glm4:9b`) independent of the producer. Eliminates the VRAM swap cost when using a heavy producer.
+- **Novelty-gated URL enrichment:** `enrich_with_page_content()` skips URLs where >60% of snippet words already appear in the knowledge state. Prevents redundant full-page fetches.
+- **num_predict=8192:** added to all `synthesize()` calls. Fixed a latent truncation bug on T_E — Section 5 was being cut off mid-sentence on every run, capping wiggum scores at ~8.1 regardless of instruction quality. The bug had been active all of session 2.
+
+**Perfetto / Chrome Trace Event instrumentation added to `logger.py`:**
+
+`RunTrace` now emits `traceEvents` in Chrome Trace Event JSON format to `traces/<timestamp>_<slug>.json` at the end of every run. Load at `ui.perfetto.dev` for a per-stage waterfall and panel thread parallelism view. Key span types:
+- `trace.span("stage")` — wall-clock duration event
+- `trace.name_thread("panel/Reviewer")` — lane labels per thread
+- `trace.log_usage(response, stage=...)` — emits `llm:<stage>` event from Ollama's `total_duration`
+
+---
+
+## Skills System
+
+Added a skill registry and invocation layer (`skills.py`) that extends the pipeline at four hook points without modifying `agent.py` internals:
+
+| Hook | Fires | Skills |
+|------|-------|--------|
+| `pre_research` | before gather_research | `deep` — forces MAX_SEARCH_ROUNDS, disables novelty gate |
+| `pre_synthesis` | injected into synthesis prompt | `annotate`, `cite` |
+| `post_synthesis` | after output written | `kg` — D3.js knowledge graph |
+| `post_wiggum` | after verification loop | `panel` — 3-persona evaluation |
+
+Skills activate via `/skillname` prefix on the task string, or automatically via predicate functions (e.g. `panel` auto-triggers on `plan.complexity == "high"`; `annotate` auto-triggers when task mentions "paper", "abstract", "survey").
+
+`annotate_abstracts.py` added as a standalone batch tool: given a CSV of papers with `markdown_content` column, generates Nanda 8-move annotated abstracts via Ollama. Handles structured section extraction and /no_think suffix for Qwen3 models.
+
+---
+
+## Chunker + Provenance Metadata
+
+`chunker.py` added for large document context extraction. Called by `read_file_context()` for any file > 12,000 chars.
+
+**Strategy selection:**
+- ≥3 markdown headings → section extraction (Abstract, Conclusion, Introduction, Results, etc.) assembled in priority order within char budget
+- Otherwise → overlapping character windows embedded with `all-MiniLM-L6-v2` via ephemeral ChromaDB; top-K by cosine similarity re-sorted to reading order
+
+**`Chunk` dataclass** carries full provenance metadata: `source` (filename), `url`, `page` (estimated from `page_size` hint), `paragraph` (`\n\n` count before chunk start), `char_offset`, `section`. Tags are embedded inline in the assembled output so the model can cite specific passages:
+
+```
+=== Introduction [source:paper.pdf | p.3 | ¶12 | §Introduction | @4,200] ===
+```
+
+---
+
+## Autoresearch Session 3: Kimi as Cloud Proposer
+
+Session 2 best: **8.420** (2 experiments). Session 2 was bottlenecked by two factors: the proposer (Qwen3-Coder:30b) had to be loaded/unloaded from VRAM on each propose step, and T_E scores were capped at ~8.1 due to a latent truncation bug (`num_predict` not set in `synthesize()`).
+
+**Infrastructure changes before session 3:**
+- `num_predict=8192` in all `synthesize()` calls — fixes T_E truncation
+- Proposer now configurable: `python autoresearch.py --proposer kimi-k2.5:cloud`
+- Anti-stuck improvements to `PROPOSE_PROMPT`: explicit `{already_present}` and `{discarded_list}` sections; removed anchoring "Common effective changes" list; added "Unexplored angles" list
+
+**Session 3 results (in progress, eval tasks T_D + T_E):**
+
+| Exp | Change | Score | Status |
+|-----|--------|-------|--------|
+| 6 | Failure modes + detection/mitigation per strategy | 8.350 | DISCARD −0.233 |
+| **7** | **"When NOT to use" + input boundaries framing** | **8.915** | **KEEP +0.332** |
+| 8 | Measurable success criteria / validation tests | 8.915 | DISCARD +0.000 |
+| 9 | Confidence ratings (High/Med/Low) per library | 7.965 | DISCARD −0.950 |
+| 10+ | ongoing… | — | — |
+
+**New best: 8.915** (exp 7 — largest single jump in any session). Kimi found an angle the local proposer never tried: framing each section around applicability constraints ("when NOT to use") rather than adding more implementation density.
+
+**Key negative signal:** exp 9 (confidence ratings) produced a −0.950 regression — the largest single drop in any session. Hedging annotations actively hurt depth scores. The evaluator reads uncertainty markers as lack of authority. Added to `already_present` blocklist.
+
+**Observation on cloud proposer:** Kimi explores structurally different angles from Qwen3-Coder:30b. Sessions 1–2 converged on "add more code / implementation detail" variations. Session 3 immediately tried constraint framing, boundary conditions, and persona specification — approaches closer to rhetorical structure than content density.
+
+---
+
+## HuggingFace Dataset Export
+
+`hf_export.py` added: reads `runs.jsonl` and writes four Hugging Face-ready dataset files to `hf_datasets/`.
+
+| Dataset | Rows (182 runs) | Format | Use |
+|---------|-----------------|--------|-----|
+| `sft.jsonl` | 62 | chat messages (system/user/assistant) | SFT, distillation |
+| `preference.jsonl` | 158 | prompt + chosen + rejected | DPO, ORPO, CPO |
+| `reward.jsonl` | 113 | prompt + response + score + rubric | reward model training |
+| `trajectory.jsonl` | 182 | task + plan + stage trace | agent policy imitation |
+
+Preference pairs are generated by grouping runs on the same task text, ranking by wiggum score, and pairing top-third vs bottom-third with a minimum score delta (default 0.5). The 57 autoresearch runs on the T_D task alone yield dense preference signal where the only variable between chosen and rejected is synthesis instruction quality.
+
+`logger.py` updated: `final_content` field (up to 16k chars) stored inline in every run record. Future exports are self-contained regardless of whether output files are still on disk.
+
+**Training pipeline (TRL):**
+```bash
+trl sft --model <base> --dataset hf_datasets/sft.jsonl
+trl dpo --model <sft-model> --dataset hf_datasets/preference.jsonl
+python hf_export.py --push nickmccarty/ollama-pi-harness-datasets
+```
+
+---
+
+## Dashboard
+
+`dashboard.py` generates a self-contained `dashboard.html` (no server) with Chart.js charts:
+- Score trend over time, tokens by date (stacked input/output), tokens by stage (donut), wiggum dimension radar, pass/fail/error donut, run duration trend, activity by hour
+- **Cost analysis section:** cloud equivalent cost at 6 provider tiers (GPT-4o, GPT-4o mini, Claude Sonnet/Haiku, Gemini 1.5 Pro/Flash) vs local electricity estimate; cumulative cost-over-time chart; tokens by model role (producer/evaluator/planner)
+- Recent runs table with inline score bars and pass/fail badges
+
+```bash
+python dashboard.py --open
+```

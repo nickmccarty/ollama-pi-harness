@@ -349,56 +349,25 @@ blob = struct.pack(f"{len(embedding)}f", *embedding)   # sqlite-vec binary forma
 
 **When to build:** after 5a–5c are stable and vision use cases have multiplied beyond the current single-image-preprocessing pattern.
 
-### 5e: Perfetto trace instrumentation
+### 5e: Perfetto trace instrumentation — DONE
 
-**Problem:** `runs.jsonl` captures token counts and stage timing as aggregates, but gives no flame-graph view of wall time. It's hard to see whether a slow run is bottlenecked on Ollama inference, DDGS latency, MarkItDown URL fetching, or wiggum rounds — and impossible to compare the shape of runs across task types or producer sizes.
+`logger.RunTrace` now emits Chrome Trace Event JSON to `traces/<timestamp>_<slug>.json` at the end of every run. Load at `ui.perfetto.dev` — no install required.
 
-**Approach:** emit a Perfetto JSON trace file (`.perfetto-trace`) alongside `runs.jsonl` for every run. `logger.py` is the integration point — `RunTrace` already has monotonic start times and stage boundaries; it just needs to accumulate begin/end events and flush them at `finish()`.
+- `trace.span("stage")` — wall-clock duration events for every pipeline stage
+- `trace.name_thread("panel/Reviewer")` — thread lane labels for parallel panel
+- `trace.log_usage(response, stage=...)` — `llm:<stage>` events from Ollama `total_duration`
 
-**Trace format:** Perfetto's JSON trace event format (`"ph": "B"` / `"ph": "E"` slices, `"ph": "M"` metadata). Load at `ui.perfetto.dev` — no install required.
-
-```python
-# Slice with annotations
-{"ph": "B", "pid": 1, "tid": 1, "ts": t_us, "name": "wiggum_eval",
- "args": {"round": 2, "score": 7.0, "task_type": "enumerated", "model": "Qwen3-Coder:30b"}}
-{"ph": "E", "pid": 1, "tid": 1, "ts": t_us, "name": "wiggum_eval"}
-```
-
-**Annotations — embed at trace time, not post-hoc:**
-
-All the metadata needed for useful analysis already flows through `RunTrace`. Key annotations per span:
-
-| Span | Annotations |
-|------|------------|
-| `gather_research` | `total_search_chars`, `quality_floor_hit`, query strings |
-| `markitdown_fetch` | URL, chars returned, success/fail per URL |
-| `tool_loop` | round number, blocked/allowed, code length |
-| `synth` | `count_check_retry`, expected vs actual section count |
-| `wiggum_eval` (per round) | round, score, dims, `task_type` |
-| `wiggum_revise` (per round) | round, producer model |
-| `planner` | `task_type`, `complexity`, `expected_sections` |
-| run-level metadata | `producer_model`, `evaluator_model`, `memory_hits` |
-
-Annotations embedded at write time are worth far more than reconstructing context post-hoc. A trace without `task_type` and `score` on wiggum spans is just timing bars.
-
-**Views it unlocks:**
-- Flame graph of wall time — which stage actually dominates?
-- MarkItDown URL fetch cost vs inference time — is the 6× context gain worth it?
-- Wiggum round cost breakdown — evaluator vs producer in revision
-- Cross-run comparison filtered by `task_type` or `producer_model`
-- Flag every run where `quality_floor_hit=True` and see what that looks like in the trace
-
-**Trace file location:** `traces/<run_timestamp>.perfetto-trace` (gitignored).
+Panel parallelism now visible in traces: 3 personas run concurrently via `ThreadPoolExecutor`, each in a named lane.
 
 ### Priority order
 
-| Step | Dependency | Trigger |
-|------|-----------|---------|
-| 5a: Search cache | None | Autoresearch loop hitting DDGS repeatedly |
-| 5b: Embedding model + semantic memory | None | Memory recall misses on semantic overlap |
-| 5c: Chunked URL retrieval | 5b (embedding model) | MarkItDown truncation losing relevant content |
-| 5d: CLIP | 5b (shared infra) | Vision use cases multiply; image retrieval needed |
-| 5e: Perfetto traces | None | Need flame-graph view of run wall time and bottleneck identification |
+| Step | Dependency | Status |
+|------|-----------|--------|
+| 5a: Search cache | None | Not yet — DDGS rate limits still a bottleneck |
+| 5b: Embedding model + semantic memory | None | **DONE** — ChromaDB replaces FTS5 |
+| 5c: Chunked URL retrieval | 5b | **DONE** — `chunker.py` with provenance metadata |
+| 5d: CLIP multimodal embeddings | 5b | Future — when vision use cases multiply |
+| 5e: Perfetto traces | None | **DONE** — `traces/` dir, loadable at ui.perfetto.dev |
 
 ---
 
@@ -427,6 +396,67 @@ Annotations embedded at write time are worth far more than reconstructing contex
 A swarm of 7B models running in parallel is feasible on a single GPU with 24GB VRAM. Four simultaneous 7B agents use approximately the same memory as one 32B agent, with potentially higher throughput on parallelizable tasks. The coordination overhead is the cost.
 
 With a 32B producer the single-agent pipeline consumes the full 24GB budget — parallelism is no longer free. The architectural choice becomes: one high-quality agent or multiple lower-quality agents in parallel. Experiment-03 suggests the 7B producer is the quality bottleneck, not the harness, which shifts the calculus toward the single high-quality agent path.
+
+---
+
+---
+
+## Stage 5b - Skills System — DONE
+
+Extensible skill registry (`skills.py`) that hooks into the pipeline at four points without modifying `agent.py` core logic.
+
+**Implemented skills:**
+
+| Skill | Hook | Trigger | Description |
+|-------|------|---------|-------------|
+| `annotate` | pre_synthesis | task mentions "paper", "abstract", "survey" | Nanda 8-move annotated abstract framework |
+| `cite` | pre_synthesis | explicit only | Require source attribution per claim |
+| `kg` | post_synthesis | task mentions "knowledge graph" | Generate D3.js knowledge graph |
+| `deep` | pre_research | task mentions "comprehensive", "exhaustive" | Force MAX_SEARCH_ROUNDS, disable novelty gate |
+| `panel` | post_wiggum | plan.complexity == "high" | Run 3-persona evaluation panel |
+
+Usage: `python agent.py "/annotate /cite Search for RAG papers..."` or auto-triggered.
+
+`annotate_abstracts.py` — standalone batch annotated abstract generator for CSV inputs.
+
+---
+
+## Stage 6 - Training Data Pipeline — DONE (initial)
+
+The harness now produces structured training data as a byproduct of normal operation.
+
+### What's implemented
+
+`hf_export.py` — exports `runs.jsonl` to four Hugging Face-ready dataset formats:
+
+| Dataset | Shape | Use case |
+|---------|-------|----------|
+| `sft.jsonl` | system + user + assistant | SFT, distillation |
+| `preference.jsonl` | prompt + chosen + rejected | DPO, ORPO, CPO |
+| `reward.jsonl` | prompt + response + score + rubric | Reward model training |
+| `trajectory.jsonl` | task + plan + stage trace | Agent policy imitation |
+
+The 57 autoresearch runs on a single eval task (T_D) produce dense preference pairs where the only variable is synthesis instruction quality — ideal for preference learning with low confounding.
+
+`logger.py`: `final_content` field (up to 16k chars) stored inline in every run — future exports are self-contained.
+
+### Next steps
+
+- **Push to Hub:** `python hf_export.py --push nickmccarty/ollama-pi-harness-datasets`
+- **SFT run:** `trl sft --model <base> --dataset hf_datasets/sft.jsonl`
+- **DPO run:** `trl dpo --model <sft-model> --dataset hf_datasets/preference.jsonl`
+- **Revision preference data:** capture pre-revision output in `runs.jsonl` to enable within-run preference pairs (currently only cross-run pairs available)
+- **Reward model:** train on `reward.jsonl`; use as evaluator replacement or ensemble member
+
+### Framing (per Perplexity analysis)
+
+The strongest thesis emerging from the data: *"Local agent reliability is primarily a systems problem up to a point, after which producer capacity becomes the limiting factor."*
+
+Cleanest reproducible experiments for a paper/report:
+1. Dual-search floor effect (search volume as leading indicator at regime boundary, not within regime)
+2. Evaluator separation (circular grading with same model; step-function gain from different architecture)
+3. Producer-vs-evaluator scaling (32B breaks T_A ceiling; T_B flat — synthesis instruction is the bottleneck)
+4. External verification loop (wiggum: 3/10 → 9/10 in one round without human intervention)
 
 ---
 
