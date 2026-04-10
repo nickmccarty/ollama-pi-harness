@@ -1,16 +1,16 @@
 """
-search_cache.py — SQLite-backed TTL cache for DDGS web search results.
+search_cache.py — SQLite-backed TTL cache for DDGS search results and research contexts.
 
-Schema:
-    key        TEXT PRIMARY KEY   SHA-256 of normalised query
-    query      TEXT               original query string
-    results    TEXT               JSON-encoded list[dict]
-    created_at REAL               unix timestamp
-    expires_at REAL               unix timestamp (created_at + ttl)
+Tables:
+  search_cache    — per-query DDGS results (key = SHA-256 of normalised query)
+  research_cache  — full gather_research() output (key = SHA-256 of task + task_type)
+                    Opt-in: only active when RESEARCH_CACHE=1 env var is set.
+                    Set by autoresearch.py so interactive runs are unaffected.
 
 Usage:
-    from search_cache import cached_search
+    from search_cache import cached_search, get_research, put_research
 
+    # Search result cache (always active):
     results = cached_search(
         query="best practices for RAG pipelines",
         search_fn=lambda q, n: list(DDGS().text(q, max_results=n)),
@@ -18,9 +18,13 @@ Usage:
         max_results=10,
     )
 
+    # Research context cache (autoresearch only):
+    hit = get_research(task, task_type)   # -> dict | None
+    put_research(task, task_type, context, search_rounds, novelty_scores)
+
 CLI:
-    python search_cache.py            # print stats
-    python search_cache.py --clear    # delete all cached entries
+    python search_cache.py            # print stats (both tables)
+    python search_cache.py --clear    # delete all entries (both tables)
     python search_cache.py --expired  # delete only expired entries
 """
 
@@ -52,6 +56,20 @@ def _connect() -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON search_cache(expires_at)")
+    # Research context cache — full gather_research() output keyed by task + task_type
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS research_cache (
+            key           TEXT PRIMARY KEY,
+            task          TEXT NOT NULL,
+            task_type     TEXT NOT NULL,
+            context       TEXT NOT NULL,
+            search_rounds INTEGER NOT NULL,
+            novelty_scores TEXT NOT NULL,
+            created_at    REAL NOT NULL,
+            expires_at    REAL NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rc_expires ON research_cache(expires_at)")
     conn.commit()
     return conn
 
@@ -148,29 +166,112 @@ def cached_search(
 
 
 # ---------------------------------------------------------------------------
+# Research context cache  (opt-in: RESEARCH_CACHE=1)
+# ---------------------------------------------------------------------------
+
+def _research_key(task: str, task_type: str) -> str:
+    """SHA-256 of normalised task + task_type."""
+    normalised = " ".join(task.lower().split()) + "|" + task_type.lower().strip()
+    return hashlib.sha256(normalised.encode()).hexdigest()
+
+
+def get_research(task: str, task_type: str) -> dict | None:
+    """
+    Return cached research context for (task, task_type), or None if missing/expired.
+    Returns dict with keys: context, search_rounds, novelty_scores.
+    """
+    key  = _research_key(task, task_type)
+    now  = time.time()
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT context, search_rounds, novelty_scores, expires_at "
+            "FROM research_cache WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        context, search_rounds, novelty_json, expires_at = row
+        if expires_at < now:
+            conn.execute("DELETE FROM research_cache WHERE key = ?", (key,))
+            conn.commit()
+            return None
+        print(f"[rcache HIT ] {task[:60]}")
+        return {
+            "context":       context,
+            "search_rounds": search_rounds,
+            "novelty_scores": json.loads(novelty_json),
+        }
+    finally:
+        conn.close()
+
+
+def put_research(
+    task: str,
+    task_type: str,
+    context: str,
+    search_rounds: int,
+    novelty_scores: list,
+    ttl: int = DEFAULT_TTL,
+) -> None:
+    """Store full gather_research() output for (task, task_type)."""
+    key  = _research_key(task, task_type)
+    now  = time.time()
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO research_cache
+                (key, task, task_type, context, search_rounds, novelty_scores, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                context        = excluded.context,
+                search_rounds  = excluded.search_rounds,
+                novelty_scores = excluded.novelty_scores,
+                created_at     = excluded.created_at,
+                expires_at     = excluded.expires_at
+            """,
+            (key, task, task_type, context, search_rounds,
+             json.dumps(novelty_scores), now, now + ttl),
+        )
+        conn.execute("DELETE FROM research_cache WHERE expires_at < ?", (now,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Management helpers
 # ---------------------------------------------------------------------------
 
 def stats() -> dict:
-    """Return cache statistics."""
+    """Return cache statistics for both tables."""
     now  = time.time()
     conn = _connect()
     try:
-        total   = conn.execute("SELECT COUNT(*) FROM search_cache").fetchone()[0]
-        expired = conn.execute(
+        sc_total   = conn.execute("SELECT COUNT(*) FROM search_cache").fetchone()[0]
+        sc_expired = conn.execute(
             "SELECT COUNT(*) FROM search_cache WHERE expires_at < ?", (now,)
         ).fetchone()[0]
+        rc_total   = conn.execute("SELECT COUNT(*) FROM research_cache").fetchone()[0]
+        rc_expired = conn.execute(
+            "SELECT COUNT(*) FROM research_cache WHERE expires_at < ?", (now,)
+        ).fetchone()[0]
         size_kb = os.path.getsize(DB_PATH) // 1024 if os.path.exists(DB_PATH) else 0
-        return {"total": total, "expired": expired, "live": total - expired, "size_kb": size_kb}
+        return {
+            "search":   {"total": sc_total, "expired": sc_expired, "live": sc_total - sc_expired},
+            "research": {"total": rc_total, "expired": rc_expired, "live": rc_total - rc_expired},
+            "size_kb":  size_kb,
+        }
     finally:
         conn.close()
 
 
 def clear_all() -> int:
-    """Delete all cached entries. Returns count deleted."""
+    """Delete all entries from both tables. Returns total count deleted."""
     conn = _connect()
     try:
-        n = conn.execute("DELETE FROM search_cache").rowcount
+        n  = conn.execute("DELETE FROM search_cache").rowcount
+        n += conn.execute("DELETE FROM research_cache").rowcount
         conn.commit()
         return n
     finally:
@@ -178,13 +279,12 @@ def clear_all() -> int:
 
 
 def clear_expired() -> int:
-    """Delete only expired entries. Returns count deleted."""
+    """Delete only expired entries from both tables. Returns total count deleted."""
     now  = time.time()
     conn = _connect()
     try:
-        n = conn.execute(
-            "DELETE FROM search_cache WHERE expires_at < ?", (now,)
-        ).rowcount
+        n  = conn.execute("DELETE FROM search_cache  WHERE expires_at < ?", (now,)).rowcount
+        n += conn.execute("DELETE FROM research_cache WHERE expires_at < ?", (now,)).rowcount
         conn.commit()
         return n
     finally:
@@ -199,10 +299,14 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if "--clear" in args:
         n = clear_all()
-        print(f"[search_cache] cleared {n} entries")
+        print(f"[search_cache] cleared {n} entries (both tables)")
     elif "--expired" in args:
         n = clear_expired()
-        print(f"[search_cache] cleared {n} expired entries")
+        print(f"[search_cache] cleared {n} expired entries (both tables)")
     else:
         s = stats()
-        print(f"[search_cache] {s['live']} live / {s['expired']} expired / {s['total']} total  ({s['size_kb']} KB)")
+        sc = s["search"]
+        rc = s["research"]
+        print(f"[search_cache]   queries: {sc['live']} live / {sc['expired']} expired / {sc['total']} total")
+        print(f"[research_cache] contexts: {rc['live']} live / {rc['expired']} expired / {rc['total']} total")
+        print(f"[db] {s['size_kb']} KB  ({DB_PATH})")

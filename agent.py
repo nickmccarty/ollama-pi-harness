@@ -379,7 +379,25 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
     force_deep=True (set by /deep skill) disables novelty gating and runs all rounds.
     planned_queries are used for rounds 1–N before switching to plan_query().
     Returns a merged context string ready for synthesis.
+
+    When RESEARCH_CACHE=1 (set by autoresearch.py), the full output is cached in
+    research_cache table (24 h TTL). Cache hits skip the entire search + compress loop.
+    Disabled for force_deep runs to ensure fresh results.
     """
+    # Research cache — opt-in, autoresearch only (avoids stale results in interactive use)
+    _research_cache_enabled = os.environ.get("RESEARCH_CACHE") == "1" and not force_deep
+    if _research_cache_enabled:
+        try:
+            from search_cache import get_research, put_research
+            _rc_hit = get_research(task, task_type)
+            if _rc_hit:
+                trace.data["novelty_scores"] = _rc_hit["novelty_scores"]
+                trace.data["search_rounds"]  = _rc_hit["search_rounds"]
+                print(f"  [rcache] research context served from cache ({len(_rc_hit['context'])} chars, {_rc_hit['search_rounds']} rounds skipped)")
+                return _rc_hit["context"]
+        except Exception as _e:
+            print(f"  [rcache] cache lookup failed: {_e} — running search normally")
+
     all_result_sets  = []
     queries_used     = []
     knowledge_state  = ""
@@ -465,6 +483,15 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
         merged_text, removed = strip_injection_candidates(merged_text)
         print(f"  [security] removed {removed} line(s)")
         trace.log_injection_stripped(len(injection_matches))
+
+    # Store in research cache for future autoresearch experiments on the same task
+    if _research_cache_enabled:
+        try:
+            put_research(task, task_type, merged_text,
+                         search_rounds=len(queries_used),
+                         novelty_scores=novelty_scores)
+        except Exception as _e:
+            print(f"  [rcache] store failed: {_e}")
 
     return merged_text
 
