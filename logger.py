@@ -229,9 +229,10 @@ class RunTrace:
         self.data["quality_floor_hit"] = total_chars < 1800
 
     def log_write(self, path: str, content: str):
-        self.data["output_path"] = os.path.abspath(os.path.expanduser(path))
-        self.data["output_lines"] = content.count("\n") + 1
-        self.data["output_bytes"] = len(content.encode("utf-8"))
+        self.data["output_path"]    = os.path.abspath(os.path.expanduser(path))
+        self.data["output_lines"]   = content.count("\n") + 1
+        self.data["output_bytes"]   = len(content.encode("utf-8"))
+        self.data["final_content"]  = content[:16_000]  # inline for HF export; truncated at 16k chars
 
     def log_wiggum(self, wiggum_trace: dict):
         rounds = wiggum_trace.get("rounds", [])
