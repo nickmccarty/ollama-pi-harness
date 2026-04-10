@@ -367,7 +367,7 @@ def plan_query(task: str, knowledge_state: str, round_num: int, producer_model: 
     return response["message"]["content"].strip().strip('"')
 
 
-def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL, force_deep: bool = False) -> str:
+def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = None, producer_model: str = MODEL, force_deep: bool = False, task_type: str = "") -> str:
     """
     Saturation-based search loop: runs up to MAX_SEARCH_ROUNDS searches, stopping
     early when new results score below NOVELTY_THRESHOLD against the accumulated
@@ -440,10 +440,15 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
         trace.log_search_quality(total_chars)
         print(f"  [research] after fallback: {len(merged)} results, {total_chars} chars")
 
+    # URL enrichment — disabled for enumerated tasks: full-page context causes
+    # the model to produce flat lists instead of H2 sections, triggering count_check_retry.
+    # Traces show this adds 300-1000s overhead (29-56% on top of synthesis) with no score gain.
+    enrich_count = 0 if task_type == "enumerated" else URL_ENRICH_COUNT
+
     # URL enrichment — fetch full page content for top results via MarkItDown
-    if URL_ENRICH_COUNT > 0 and MARKITDOWN_AVAILABLE:
-        print(f"  [markitdown] enriching top {URL_ENRICH_COUNT} URL(s)...")
-        page_content = enrich_with_page_content(merged, URL_ENRICH_COUNT, knowledge_state=knowledge_state)
+    if enrich_count > 0 and MARKITDOWN_AVAILABLE:
+        print(f"  [markitdown] enriching top {enrich_count} URL(s)...")
+        page_content = enrich_with_page_content(merged, enrich_count, knowledge_state=knowledge_state)
         if page_content:
             merged_text = merged_text + "\n\n## Full page content\n\n" + page_content
             print(f"  [markitdown] added {len(page_content)} chars of page content")
@@ -663,7 +668,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
         if force_deep:
             print("  [skill:deep] novelty gate disabled — running all search rounds")
         with trace.span("gather_research"):
-            context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model, force_deep=force_deep)
+            context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model, force_deep=force_deep, task_type=plan.task_type or "")
 
         # run_python tool loop — skip for pure research tasks (never use code)
         code_context = ""

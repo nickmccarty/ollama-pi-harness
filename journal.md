@@ -1034,3 +1034,21 @@ python hf_export.py --push nickmccarty/ollama-pi-harness-datasets
 ```bash
 python dashboard.py --open
 ```
+
+---
+
+## Trace Analysis: URL Enrichment Disabled for Enumerated Tasks
+
+Perfetto trace analysis across 10 autoresearch runs revealed four actionable findings:
+
+**1. `synth_count` retry (T_D only) — 29–56% overhead on top of synthesis**
+Every T_D (enumerated) run triggered the count check retry. T_E (best_practices) never did. The full-page URL context causes the model to produce flat prose lists rather than H2 sections on the first synthesis pass; the harness catches this and re-synthesises. The last traced T_D run spent *more time on the retry than the original synthesis* (1052s vs 842s). Fix applied: `enrich_count = 0 if task_type == "enumerated"`. Saves 300–1000s per T_D eval run.
+
+**2. `compress_knowledge` consumes ~80–90% of `gather_research` wall time**
+compress_knowledge is as expensive as the search itself — scales with search rounds (up to 4 calls per run at 5 rounds). Largest outlier: 294s on compress vs 442s total gather. Future fix: skip compress on borderline-novelty rounds, or cache compressed state between autoresearch experiments on the same task.
+
+**3. `wiggum_revise` costs 11–22% of total when it fires**
+4/10 runs triggered revision, adding 310–1116s. Confirms that optimising for first-round score (the autoresearch metric) directly optimises runtime — each +0.5 point on round-1 score avoids a full revision pass.
+
+**4. Panel threads not visible — `WIGGUM_PANEL` not set in autoresearch subprocess**
+All 10 traces show only a `main` thread. The parallel panel is not running during autoresearch eval runs. The env var isn't being passed through the subprocess call.
