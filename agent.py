@@ -58,13 +58,13 @@ COMPRESS_MODEL = os.environ.get("COMPRESS_MODEL", MODEL)  # lighter model for co
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "Output ONLY the markdown starting with #. Structure each section with 'What', 'Why', 'How' subsections using numbered steps and inline code blocks. Provide one executable code snippet with specific tool names and versions per section, include concrete implementation notes for edge cases, mention production-ready libraries, and add trade-off discussions. **For each strategy, explicitly state when NOT to use it and identify specific input boundaries or preconditions that invalidate the approach.**"
+    "Output ONLY the markdown starting with #. Structure each section with 'What', 'Why', 'How' subsections using numbered steps and inline code blocks. Address the reader as a practitioner deploying this tomorrow; ensure every code snippet is complete, executable with specific tool versions, and includes error handling. Provide concrete edge case notes, trade-off discussions, and production-ready libraries. For each strategy, state when NOT to use it, identify input boundaries, define measurable success criteria, and annotate with confidence ratings (High/Medium/Low) and known limitations."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "Output ONLY the markdown starting with #. For each section, use 'What', 'Why', 'How' subsections with numbered steps and inline code blocks. Provide one executable code snippet with specific tool names and versions per section, include concrete implementation notes for edge cases, mention production-ready libraries, and add trade-off discussions. Explicitly list the top strategies as a numbered list in the first section; for each, include a working code example. **For each strategy, explicitly state when NOT to use it and identify specific input boundaries or preconditions that invalidate the approach.**"
+    "Output ONLY the markdown starting with #. List top strategies as a numbered list in the first section with working code examples. Address the reader as a practitioner deploying this tomorrow; ensure every code snippet is complete, executable with specific tool versions, and includes error handling. Use 'What', 'Why', 'How' subsections with numbered steps. Provide concrete edge case notes, trade-off discussions, and production-ready libraries. For each strategy, state when NOT to use it, identify input boundaries, define measurable success criteria, and annotate with confidence ratings (High/Medium/Low) and known limitations."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 SEARCHES_PER_TASK = 2        # minimum searches before novelty gating kicks in
