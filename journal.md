@@ -1078,3 +1078,32 @@ python search_cache.py            # stats
 python search_cache.py --expired  # evict expired rows
 python search_cache.py --clear    # wipe all
 ```
+
+---
+
+## Research Context Cache (gather_research full-output cache)
+
+The search result cache (above) eliminated DDGS latency but not `compress_knowledge` — the LLM compression calls that account for 80-90% of `gather_research` wall time. In autoresearch, the task definitions never change between experiments (same T_D/T_E), so the entire research phase produces identical output across a session. The right cache level is the full `gather_research()` return value.
+
+**Design:** Second table (`research_cache`) in the same `search_cache.db`. Key: `SHA-256(normalised_task + "|" + task_type)`. Value: complete merged context string + `search_rounds` + `novelty_scores` (trace metadata). 24 h TTL, same lazy eviction.
+
+```
+gather_research(task, ...)
+  RESEARCH_CACHE=1 set?
+    -> get_research(task, task_type)
+         HIT:  restore trace metadata, return context  (< 1 ms)
+         MISS: run full search+compress loop, put_research(), return
+```
+
+**Opt-in via env var:** `RESEARCH_CACHE=1` is only set by autoresearch's eval subprocess. Interactive `python agent.py` runs always get fresh search results. `force_deep` skips the cache even in autoresearch (ensures deep-search tasks aren't served stale).
+
+**Autoresearch session profile after both caches:**
+
+| Experiment | gather_research | synthesize + wiggum |
+|------------|----------------|---------------------|
+| 1 (cold)   | full cost (~400-600s) | full cost |
+| 2-N        | ~1 ms (cache hit) | full cost |
+
+The optimizer now runs at the speed of synthesis + wiggum alone. On a 2-task session (T_D + T_E), exp 1 pays ~800-1200s for research; exps 2-N skip it entirely. A 10-experiment session that previously cost ~100-200 min of research overhead now costs ~10-20 min for the cold run only.
+
+**Also fixed in this session:** `WIGGUM_PANEL=1` now propagated through autoresearch eval subprocess — panel scoring was silently skipped in all prior autoresearch runs.

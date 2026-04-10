@@ -99,6 +99,12 @@ New best: **8.915** (exp 7) — largest single-experiment jump across all sessio
 
 Strong negative signal: confidence/hedging annotations (exp 9, −0.950) are explicitly harmful — evaluator reads uncertainty markers as lack of authority and penalises depth. Added to `already_present` blocklist.
 
+**Infrastructure changes applied mid-session 3:**
+
+- `WIGGUM_PANEL=1` now propagated through autoresearch eval subprocess — panel scoring was silently skipped in all prior autoresearch runs; now all 3 personas contribute to the rubric score
+- `RESEARCH_CACHE=1` added to eval subprocess env — full `gather_research()` output cached in SQLite (`research_cache` table, 24 h TTL); experiment 1 cold-populates per task, experiments 2-N skip the entire search + compress loop (~400-600s savings per task per experiment)
+- DDGS result cache already active (`search_cache` table) — redundant with research cache for autoresearch, but covers interactive runs
+
 Start session 3 (resume):
 ```bash
 python autoresearch.py --tasks T_D,T_E --proposer kimi-k2.5:cloud

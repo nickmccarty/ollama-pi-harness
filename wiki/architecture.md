@@ -1,7 +1,7 @@
 ---
 title: Agent Architecture
 updated: 2026-04-10
-sources: [agent.py, logger.py, planner.py, orchestrator.py, memory.py, wiggum.py, skills.py, chunker.py, panel.py]
+sources: [agent.py, logger.py, planner.py, orchestrator.py, memory.py, wiggum.py, skills.py, chunker.py, panel.py, search_cache.py]
 tags: [architecture, pipeline, agent]
 ---
 
@@ -15,8 +15,10 @@ task string
  └─ memory.get_context()  memory.py   — ChromaDB semantic retrieval of relevant past obs
  └─ make_plan()           planner.py  — classify task_type, complexity, generate queries
  └─ auto_activate()       skills.py   — trigger skills by keywords / plan.complexity
- └─ gather_research()     agent.py    — saturation loop: search → novelty gate → compress
-     └─ read_file_context()           — MarkItDown conversion + chunker for large files
+ └─ gather_research()     agent.py    — research cache check (RESEARCH_CACHE=1); else:
+     └─ web_search_raw()             — DDGS via search_cache (24 h SQLite TTL)
+     └─ compress_knowledge()         — rolling LLM knowledge compression
+     └─ read_file_context()          — MarkItDown conversion + chunker for large files
      └─ enrich_with_page_content()   — URL enrichment gated on overlap with knowledge_state
  └─ synthesize()          agent.py    — producer model + skill prompt injections
  └─ wiggum_loop()         wiggum.py   — evaluate → revise → verify (up to 3 rounds)
@@ -43,6 +45,7 @@ task string
 | `vision.py` | Image reading via llama3.2-vision |
 | `eval_suite.py` | Batch eval runner; computes composite score |
 | `autoresearch.py` | Autonomous synthesis instruction improvement loop |
+| `search_cache.py` | SQLite TTL cache: DDGS results (`search_cache` table) + full research contexts (`research_cache` table) |
 
 ## Models
 

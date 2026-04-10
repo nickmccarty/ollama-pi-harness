@@ -376,9 +376,9 @@ Analysed 10 autoresearch traces. Key findings and actions:
 | Finding | Impact | Fix | Status |
 |---------|--------|-----|--------|
 | `synth_count` retry fires on every T_D (enumerated) run; URL context causes flat-list format failure | 29–56% overhead on top of synthesis (300–1000s/run) | `enrich_count = 0 if task_type == "enumerated"` in `gather_research()` | **DONE** |
-| `compress_knowledge` consumes 80–90% of `gather_research` wall time; scales with search rounds | Up to 294s on compress vs 442s total gather | Skip compress on borderline-novelty rounds; cache state across autoresearch exps | Future |
+| `compress_knowledge` consumes 80–90% of `gather_research` wall time; scales with search rounds | Up to 294s on compress vs 442s total gather | Full `gather_research()` output cached in `research_cache` table (24 h TTL, opt-in via `RESEARCH_CACHE=1`) | **DONE** |
 | `wiggum_revise` costs 11–22% of total when it fires | 310–1116s per revision pass | Optimising round-1 score (autoresearch target) directly reduces this | By design |
-| Panel threads not visible in autoresearch traces — `WIGGUM_PANEL` not propagated to subprocess | Panel running in manual runs only | Pass env var through autoresearch subprocess | Future |
+| Panel threads not visible in autoresearch traces — `WIGGUM_PANEL` not propagated to subprocess | Panel running in manual runs only | Pass env var through autoresearch subprocess | **DONE** |
 
 ---
 
