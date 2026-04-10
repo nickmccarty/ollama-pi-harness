@@ -150,6 +150,33 @@ def build_payload(runs):
     model_names  = list(model_counts)
     model_values = [model_counts[m] for m in model_names]
 
+    # --- Tokens/sec by stage and per-run trend ---
+    stage_tps_out = []
+    stage_tps_in  = []
+    for s in stage_names:
+        ms = stage_totals[s]["total_ms"]
+        if ms > 0:
+            stage_tps_out.append(round(stage_totals[s]["output"] / (ms / 1000), 1))
+            stage_tps_in.append(round(stage_totals[s]["input"]  / (ms / 1000), 1))
+        else:
+            stage_tps_out.append(0)
+            stage_tps_in.append(0)
+
+    run_tps_labels = []
+    run_tps_out    = []
+    run_tps_in     = []
+    for r in runs:
+        tbs = r.get("tokens_by_stage") or {}
+        total_out_tok = sum(v.get("output", 0) for v in tbs.values())
+        total_in_tok  = sum(v.get("input",  0) for v in tbs.values())
+        total_ms      = sum(v.get("total_ms", 0) for v in tbs.values())
+        if total_ms > 0:
+            run_tps_labels.append((r.get("timestamp") or "")[:19].replace("T", " "))
+            run_tps_out.append(round(total_out_tok / (total_ms / 1000), 1))
+            run_tps_in.append(round(total_in_tok  / (total_ms / 1000), 1))
+
+    avg_out_tps = round(sum(run_tps_out) / len(run_tps_out), 1) if run_tps_out else 0
+
     # --- Runs per hour-of-day heatmap (0-23) ---
     hour_counts = defaultdict(int)
     for r in runs:
@@ -191,6 +218,16 @@ def build_payload(runs):
         "score_trend":   {"labels": score_labels, "values": score_values, "models": score_models},
         "token_by_date": {"dates": token_dates, "input": token_input, "output": token_output},
         "token_by_stage":{"names": stage_names, "tokens": stage_tokens, "colors": stage_colors, "ms": stage_ms},
+        "toks_per_sec":  {
+            "stage_names":    stage_names,
+            "stage_colors":   stage_colors,
+            "stage_out":      stage_tps_out,
+            "stage_in":       stage_tps_in,
+            "run_labels":     run_tps_labels,
+            "run_out":        run_tps_out,
+            "run_in":         run_tps_in,
+            "avg_out_tps":    avg_out_tps,
+        },
         "wiggum_dims":   {"labels": [k.capitalize() for k in dim_keys], "values": dim_avgs},
         "duration_trend":{"labels": dur_labels, "values": dur_values},
         "model_split":   {"names": model_names, "values": model_values},
@@ -481,6 +518,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<h2 class="section-heading">Throughput — tokens / second</h2>
+
+<div class="chart-grid col-2">
+  <div class="card">
+    <div class="card-title">Output tok/s by stage (generation speed)</div>
+    <div class="chart-wrap" style="height:240px">
+      <canvas id="tpsStageChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Output tok/s — run trend</div>
+    <div class="chart-wrap" style="height:240px">
+      <canvas id="tpsTrendChart"></canvas>
+    </div>
+  </div>
+</div>
+
 <h2 class="section-heading">Cost analysis — local vs cloud equivalent</h2>
 
 <div class="kpi-grid" id="cost-kpi-grid"></div>
@@ -554,6 +608,7 @@ const cards = [
   { label: 'Avg duration',    value: kpi.avg_duration + 'm',              cls: 'orange' },
   { label: 'Total input tok', value: fmtK(kpi.total_input),               cls: 'purple' },
   { label: 'Total output tok',value: fmtK(kpi.total_output),              cls: 'blue'   },
+  { label: 'Avg output tok/s',value: DATA.toks_per_sec.avg_out_tps,  sub: 'generation speed', cls: 'green' },
   { label: 'Errors',          value: kpi.errors,                          cls: 'red'    },
   { label: 'Failed',          value: kpi.failed,                          cls: 'orange' },
 ];
@@ -752,6 +807,92 @@ new Chart($('hourChart'), {
     scales: {
       x: { ...CHART_DEFAULTS.scales.x, ticks: { ...CHART_DEFAULTS.scales.x.ticks, maxTicksLimit: 12 } },
       y: { ...CHART_DEFAULTS.scales.y },
+    },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Throughput — tokens/sec
+// ---------------------------------------------------------------------------
+const TPS = DATA.toks_per_sec;
+
+// Output tok/s per stage — horizontal bar, sorted descending
+const tpsStageOrder = TPS.stage_names
+  .map((n, i) => ({ name: n, out: TPS.stage_out[i], inp: TPS.stage_in[i], color: TPS.stage_colors[i] }))
+  .filter(d => d.out > 0 || d.inp > 0)
+  .sort((a, b) => b.out - a.out);
+
+new Chart($('tpsStageChart'), {
+  type: 'bar',
+  data: {
+    labels: tpsStageOrder.map(d => d.name),
+    datasets: [
+      {
+        label: 'Output tok/s (generation)',
+        data:            tpsStageOrder.map(d => d.out),
+        backgroundColor: tpsStageOrder.map(d => d.color),
+        borderRadius: 3,
+      },
+      {
+        label: 'Input tok/s (prefill)',
+        data:            tpsStageOrder.map(d => d.inp),
+        backgroundColor: 'rgba(139,148,158,0.3)',
+        borderRadius: 3,
+      },
+    ],
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    indexAxis: 'y',
+    plugins: {
+      legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } },
+      tooltip: { callbacks: { label: ctx => ` ${ctx.raw} tok/s` } },
+    },
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: 'tok/s', color: '#8b949e', font: { size: 10 } } },
+      y: { ...CHART_DEFAULTS.scales.y, grid: { display: false } },
+    },
+  },
+});
+
+// Per-run output tok/s trend
+const tpsStride = Math.max(1, Math.floor(TPS.run_labels.length / 150));
+new Chart($('tpsTrendChart'), {
+  type: 'line',
+  data: {
+    labels: TPS.run_labels.filter((_, i) => i % tpsStride === 0),
+    datasets: [
+      {
+        label: 'Output tok/s',
+        data:            TPS.run_out.filter((_, i) => i % tpsStride === 0),
+        borderColor:     '#4ade80',
+        backgroundColor: 'rgba(74,222,128,0.08)',
+        pointRadius: 2,
+        borderWidth: 1.5,
+        tension: 0.3,
+        fill: true,
+      },
+      {
+        label: 'Input tok/s',
+        data:            TPS.run_in.filter((_, i) => i % tpsStride === 0),
+        borderColor:     '#4f8ef7',
+        backgroundColor: 'rgba(79,142,247,0.05)',
+        pointRadius: 1,
+        borderWidth: 1,
+        tension: 0.3,
+        fill: true,
+      },
+    ],
+  },
+  options: {
+    ...CHART_DEFAULTS,
+    plugins: {
+      legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } },
+      tooltip: { callbacks: { label: ctx => ` ${ctx.raw} tok/s` } },
+    },
+    scales: {
+      x: { ...CHART_DEFAULTS.scales.x, ticks: { ...CHART_DEFAULTS.scales.x.ticks, maxTicksLimit: 10 } },
+      y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'tok/s', color: '#8b949e', font: { size: 10 } }, min: 0 },
     },
   },
 });
