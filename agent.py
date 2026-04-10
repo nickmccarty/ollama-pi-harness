@@ -541,22 +541,28 @@ def extract_count_constraint(task: str) -> int | None:
 def clean_synthesis_output(content: str) -> str:
     """
     Strip artefacts that models sometimes wrap around markdown output:
-      - Leading ```markdown / ```md / ``` fence + matching closing ```
-      - Trailing verification/commentary epilogue (file-write confirmation, bash snippets)
+      - Any preamble before the first H1 heading (bash setup blocks, ```markdown fences, etc.)
+      - Trailing ```  that closes an outer fence, plus any verification/commentary after it
+      - Standalone trailing Verification sections and file-write epilogues
       - Leading and trailing blank lines
     """
     content = content.strip()
 
-    # Strip outer markdown code fence (```markdown ... ```)
-    fence_match = re.match(r'^```(?:markdown|md)?\s*\n', content, re.IGNORECASE)
-    if fence_match:
-        content = content[fence_match.end():]
-        # Remove the last ``` that closes the outer fence
-        last_fence = content.rfind('\n```')
-        if last_fence != -1:
-            content = content[:last_fence]
+    # Anchor to the first H1 — discard everything before it (preamble, fences, bash blocks)
+    h1_match = re.search(r'(?:^|\n)(# .+)', content)
+    if h1_match:
+        content = content[h1_match.start(1):]
 
-    # Strip trailing verification / file-write commentary the model sometimes appends
+    # Strip a trailing closing ``` fence + any epilogue that follows it
+    # Only if what follows the fence looks like a verification block, not real content
+    outer_close = re.search(r'\n```\s*\n(.+)$', content, re.DOTALL)
+    if outer_close and re.search(
+        r'Verification|was created|has been|cat ~|display the contents',
+        outer_close.group(1), re.IGNORECASE
+    ):
+        content = content[:outer_close.start()]
+
+    # Strip trailing verification / file-write commentary
     epilogue_re = re.compile(
         r'\n+(?:#{1,4}\s*)?(?:Verification|Verify)[:\s].*$'
         r'|\n+The (?:markdown )?file .{0,120} (?:was created|has been).*$'
