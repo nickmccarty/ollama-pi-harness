@@ -119,6 +119,27 @@ def format_results(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def detect_task_urls(task: str) -> list[str]:
+    """Find http(s):// URLs in the task string (excluding the .md output path)."""
+    return re.findall(r'https?://[^\s"\'<>]+', task)
+
+
+def fetch_task_url_context(urls: list[str]) -> str:
+    """Fetch and concatenate content from task-level URLs using MarkItDown."""
+    if not MARKITDOWN_AVAILABLE or not urls:
+        return ""
+    blocks = []
+    for url in urls:
+        print(f"  [fetch_url] {url[:80]}...")
+        content = fetch_url_content(url)
+        if content:
+            blocks.append(f"--- Source: {url} ---\n{content}")
+            print(f"  [fetch_url] {len(content)} chars")
+        else:
+            print(f"  [fetch_url] failed or empty — skipping")
+    return "\n\n".join(blocks)
+
+
 def detect_text_files(task: str, exclude_path: str = None) -> list[str]:
     """Find readable file paths referenced in the task (non-image, non-output).
     Returns both plain-text and rich-document paths; caller uses extension to route."""
@@ -597,7 +618,7 @@ def synthesize_with_count(task: str, research_context: str, expected_count: int,
         f"{vision_block}{file_block}{code_block}{memory_block}{skill_block}\n"
         f"IMPORTANT: You must produce EXACTLY {expected_count} numbered sections "
         f"(## 1. ... through ## {expected_count}. ...) — no more, no fewer. "
-        f"{SYNTH_INSTRUCTION_COUNT}"
+        f"{SYNTH_INSTRUCTION}"
     )
     response = ollama.chat(
         model=producer_model,
@@ -697,6 +718,17 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
             file_context = read_file_context(text_files, task=task)
             print(f"  [read_file] injecting {len(file_context)} chars of file context")
 
+        # URL fetch — inject content of any http(s):// URLs referenced in the task
+        task_urls = detect_task_urls(task)
+        has_url_content = False
+        if task_urls:
+            print(f"\n[fetch_url] {len(task_urls)} URL(s) in task — fetching...")
+            url_context = fetch_task_url_context(task_urls)
+            if url_context:
+                file_context = (file_context + "\n\n" + url_context).strip()
+                has_url_content = True
+                print(f"  [fetch_url] injecting {len(url_context)} chars of URL content")
+
         # Memory retrieval — before planning so the planner can use prior context
         with trace.span("memory_retrieval"):
             memory_context = memory.get_context(task)
@@ -733,8 +765,12 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
         force_deep = "deep" in active_skills
         if force_deep:
             print("  [skill:deep] novelty gate disabled — running all search rounds")
-        with trace.span("gather_research"):
-            context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model, force_deep=force_deep, task_type=plan.task_type or "")
+        if has_url_content:
+            print("  [fetch_url] document already fetched — skipping web search")
+            context = ""
+        else:
+            with trace.span("gather_research"):
+                context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model, force_deep=force_deep, task_type=plan.task_type or "")
 
         # run_python tool loop — skip for pure research tasks (never use code)
         code_context = ""
@@ -755,15 +791,22 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
             skill_names = [s for s in active_skills if s in ("annotate", "cite")]
             print(f"  [skills] injecting pre_synthesis prompts: {skill_names}")
 
+        # Count constraint: detect before synthesis so we can use the count-aware prompt directly
+        expected_count = plan.expected_sections or extract_count_constraint(task)
+
         print("\n  [synth] synthesizing from merged results...")
-        with trace.span("synthesize", model=producer_model):
-            content = synthesize(task, context, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
+        if expected_count is not None:
+            print(f"  [count] detected count constraint: {expected_count} — using count-aware synthesis")
+            with trace.span("synthesize", model=producer_model):
+                content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
+        else:
+            with trace.span("synthesize", model=producer_model):
+                content = synthesize(task, context, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
 
         # Clean fences and trailing epilogues before any downstream processing
         content = clean_synthesis_output(content)
 
-        # Count constraint: planner takes precedence over regex
-        expected_count = plan.expected_sections or extract_count_constraint(task)
+        # Count verification (safety net — synthesis should already comply)
         if expected_count is not None:
             actual_count = count_output_items(content)
             if actual_count != expected_count:

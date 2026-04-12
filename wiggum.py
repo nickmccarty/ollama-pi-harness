@@ -338,6 +338,10 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
     print(f"  model: evaluator={evaluator_model} producer={producer_model}")
     print(f"  max rounds: {max_rounds}\n")
 
+    best_score = 0.0
+    best_content = ""
+    best_round = 0
+
     for round_num in range(1, max_rounds + 1):
         print(f"--- round {round_num} ---")
 
@@ -352,6 +356,12 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         passed = result.get("passed", False)
         issues = [i for i in result.get("issues", []) if i and str(i).strip().lower() not in ("none", "n/a", "")]
         feedback = result.get("feedback", "")
+
+        # Track best-scoring round so we can restore it if later rounds regress
+        if score > best_score:
+            best_score = score
+            best_content = content
+            best_round = round_num
 
         # 2b. Optional panel — augments issues with multi-persona perspectives
         panel_reviews = []
@@ -396,7 +406,12 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
             _attach_token_stats(trace, _local_trace)
             return trace
 
-        if round_num == MAX_ROUNDS:
+        if round_num == max_rounds:
+            # Restore the best-scoring round's content if later rounds regressed
+            if best_round < round_num:
+                print(f"\n[wiggum] restoring round {best_round} output (score {best_score:.1f} > round {round_num} score {score:.1f})")
+                with open(expanded, "w", encoding="utf-8") as f:
+                    f.write(best_content)
             print(f"\n[wiggum] FAIL — max rounds reached without passing")
             trace["final"] = "FAIL"
             _attach_token_stats(trace, _local_trace)
