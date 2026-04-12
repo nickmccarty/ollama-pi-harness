@@ -1074,7 +1074,9 @@ def main():
     print(f"[dashboard] {len(runs)} runs loaded")
 
     payload  = build_payload(runs)
-    html     = HTML_TEMPLATE.replace("__DATA__", json.dumps(payload))
+    # Escape closing script tags in JSON to prevent XSS when embedded in <script>
+    payload_json = json.dumps(payload).replace("</", r"<\/")
+    html     = HTML_TEMPLATE.replace("__DATA__", payload_json)
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)

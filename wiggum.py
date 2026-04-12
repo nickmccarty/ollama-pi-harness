@@ -418,7 +418,13 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         except Exception:
             revised_content = revised_content.strip()
 
-        # Write revised content back to disk
+        # Write revised content back to disk (re-validate path before each write)
+        from security import check_output_path
+        ok, reason = check_output_path(expanded)
+        if not ok:
+            print(f"  [security] revision write blocked: {reason}")
+            trace["final"] = "ERROR"
+            return trace
         with open(expanded, "w", encoding="utf-8") as f:
             f.write(revised_content)
         print(f"  [write] revision saved to {expanded}")

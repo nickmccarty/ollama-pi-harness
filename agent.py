@@ -35,7 +35,7 @@ from ddgs import DDGS
 from wiggum import loop as wiggum_loop
 from logger import RunTrace
 from vision import extract_image_context, detect_image_paths
-from security import check_python_code, check_file_path, scan_for_injection, strip_injection_candidates
+from security import check_python_code, check_file_path, check_output_path, scan_for_injection, strip_injection_candidates
 from memory import MemoryStore, assess_novelty
 from planner import make_plan, Plan
 from skills import parse_skills, auto_activate, merge_skills, get_prompt_injections, skills_at_hook, run_post_synthesis
@@ -616,6 +616,14 @@ def extract_path(task: str) -> str | None:
 
 def write_output(content: str, path: str, trace: RunTrace):
     print("\n[turn 2] writing file...\n")
+
+    # Validate output path against sandbox before writing
+    ok, reason = check_output_path(path)
+    if not ok:
+        print(f"[security] write blocked: {reason}")
+        print("[error] output path is outside allowed directories — aborting write")
+        trace.finish("ERROR")
+        sys.exit(1)
 
     expanded = os.path.expanduser(path)
     dir_path = os.path.dirname(expanded)

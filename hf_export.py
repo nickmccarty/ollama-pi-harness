@@ -355,6 +355,12 @@ def main():
     if "--push" in args:
         hub_repo = args[args.index("--push") + 1]
     if "--hf-token" in args:
+        import warnings
+        warnings.warn(
+            "--hf-token passes the token via CLI (visible in `ps` and shell history). "
+            "Use the HF_TOKEN environment variable instead.",
+            stacklevel=2,
+        )
         hf_token = args[args.index("--hf-token") + 1]
 
     print(f"[hf_export] loading {RUNS_PATH}...")

@@ -23,12 +23,32 @@ BLOCKED_IMPORTS = {
     "httpx", "aiohttp", "ftplib", "smtplib", "telnetlib", "paramiko",
     "fabric", "pathlib", "glob", "tempfile", "pty", "tty", "signal",
     "ctypes", "cffi", "winreg", "win32api", "win32con",
+    # Dynamic import / code execution — bypass the blocklist entirely
+    "importlib", "runpy", "zipimport",
+    # Serialisation-based code execution
+    "pickle", "shelve", "marshal",
+    # Process / thread spawning
+    "multiprocessing", "concurrent",
+    # Interactive interpreters
+    "code", "codeop", "readline",
+    # Low-level I/O that bypasses open() block
+    "io", "_io",
+    # Direct access to builtins namespace
+    "builtins",
+    # Platform-specific command execution
+    "webbrowser", "antigravity",
 }
 
 # Builtins that can execute arbitrary code or bypass restrictions
 BLOCKED_CALLS = {
     "exec", "eval", "compile", "__import__", "open", "breakpoint",
     "vars", "globals", "locals", "getattr", "setattr", "delattr",
+    # Process control / resource exhaustion
+    "input", "exit", "quit",
+    # Low-level memory access
+    "memoryview",
+    # Class hierarchy traversal (sandbox escape)
+    "__subclasses__",
 }
 
 # Attribute access patterns that indicate dangerous stdlib use
@@ -40,6 +60,10 @@ BLOCKED_ATTR_PATTERNS = [
     re.compile(r'\bopen\s*\('),
     re.compile(r'__builtins__'),
     re.compile(r'__class__.*__bases__'),  # class hierarchy traversal
+    re.compile(r'\bimportlib\s*\.\s*import_module'),  # dynamic import bypass
+    re.compile(r'\bpickle\s*\.\s*(loads|load|Unpickler)'),  # deserialisation exec
+    re.compile(r'\.__subclasses__\s*\('),  # sandbox escape via class hierarchy
+    re.compile(r'\bcodecs\s*\.\s*(open|decode)'),  # file I/O via codecs
 ]
 
 
@@ -114,7 +138,9 @@ def check_file_path(path: str) -> tuple[bool, str]:
     Validate a file path before read_file reads it.
     Returns (True, "ok") if permitted, (False, reason) if blocked.
     """
-    expanded = os.path.abspath(os.path.expanduser(path))
+    # realpath resolves symlinks so a symlink inside ~/Desktop pointing
+    # outside the sandbox cannot bypass the directory allowlist.
+    expanded = os.path.realpath(os.path.expanduser(path))
     filename = os.path.basename(expanded)
 
     # Check blocklisted filename patterns
@@ -123,9 +149,41 @@ def check_file_path(path: str) -> tuple[bool, str]:
             return False, f"blocked sensitive file: {filename!r}"
 
     # Check allowed directory prefixes
-    allowed_expanded = [os.path.abspath(os.path.expanduser(d)) for d in ALLOWED_READ_DIRS]
+    allowed_expanded = [os.path.realpath(os.path.expanduser(d)) for d in ALLOWED_READ_DIRS]
     if not any(expanded.startswith(d) for d in allowed_expanded):
         return False, f"path outside allowed dirs: {expanded!r}"
+
+    return True, "ok"
+
+
+# ---------------------------------------------------------------------------
+# 2b. Output path sandbox
+# ---------------------------------------------------------------------------
+
+# Directories where the agent is allowed to write output files
+ALLOWED_WRITE_DIRS = [
+    "~/Desktop",
+    "~/Documents",
+]
+
+
+def check_output_path(path: str) -> tuple[bool, str]:
+    """
+    Validate an output file path before writing.
+    Returns (True, "ok") if permitted, (False, reason) if blocked.
+    """
+    expanded = os.path.realpath(os.path.expanduser(path))
+    filename = os.path.basename(expanded)
+
+    # Block writing to sensitive file patterns
+    for pattern in BLOCKED_FILE_PATTERNS:
+        if pattern.search(filename) or pattern.search(expanded):
+            return False, f"blocked sensitive file: {filename!r}"
+
+    # Check allowed directory prefixes
+    allowed_expanded = [os.path.realpath(os.path.expanduser(d)) for d in ALLOWED_WRITE_DIRS]
+    if not any(expanded.startswith(d) for d in allowed_expanded):
+        return False, f"output path outside allowed dirs: {expanded!r}"
 
     return True, "ok"
 

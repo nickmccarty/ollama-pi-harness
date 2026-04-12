@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import ollama
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, Markup
 
 MODEL = "pi-qwen-32b"
 DEFAULT_NODES = 10
@@ -254,13 +254,16 @@ def render_html(graph_data: dict, output_path: Path, title: str, model: str, art
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
 
-    env = Environment(loader=FileSystemLoader(str(template_path.parent)))
+    env = Environment(
+        loader=FileSystemLoader(str(template_path.parent)),
+        autoescape=True,
+    )
     template = env.get_template(TEMPLATE_FILE)
 
     snippet = article_snippet[:200] + ("..." if len(article_snippet) > 200 else "")
 
     html = template.render(
-        graph_json=json.dumps(graph_data),
+        graph_json=Markup(json.dumps(graph_data)),
         title=title,
         model=model,
         article_snippet=snippet,
