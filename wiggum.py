@@ -58,7 +58,7 @@ except ImportError:
 PRODUCER_MODEL = "pi-qwen-32b"
 EVALUATOR_MODEL = "Qwen3-Coder:30b"
 MAX_ROUNDS = 3
-PASS_THRESHOLD = 8.0
+PASS_THRESHOLD = 9.0
 
 # WIGGUM_PANEL=1 enables the TinyTroupe multi-persona panel after each evaluate() call.
 # Panel issues are merged into the revision prompt for richer feedback.
@@ -212,7 +212,7 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
     response = ollama.chat(
         model=EVALUATOR_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.0},
+        options={"temperature": 0.0, "think": False},
     )
     if _trace is not None:
         _trace.log_usage(response, stage="wiggum_eval")
@@ -289,7 +289,7 @@ def revise(task: str, content: str, eval_result: dict, _trace=None) -> str:
     response = ollama.chat(
         model=PRODUCER_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.1},
+        options={"temperature": 0.1, "think": False},
     )
     if _trace is not None:
         _trace.log_usage(response, stage="wiggum_revise")
@@ -454,6 +454,269 @@ def _attach_token_stats(trace: dict, local_trace):
     trace["input_tokens"]    = local_trace.data["input_tokens"]
     trace["output_tokens"]   = local_trace.data["output_tokens"]
     trace["tokens_by_stage"] = local_trace.data["tokens_by_stage"]
+
+
+# ---------------------------------------------------------------------------
+# Annotation evaluation loop (/annotate /wiggum)
+# ---------------------------------------------------------------------------
+
+EVAL_PROMPT_ANNOTATE = """You are evaluating a Nanda Annotated Abstract against the original paper content.
+
+The Nanda framework produces a structured abstract with EXACTLY these eight bold section headers:
+  **Topic** | **Motivation** | **Contribution** | **Detail / Nuance** | **Evidence / Contribution 2** | **Weaker result** | **Narrow impact** | **Broad impact**
+
+Each section should have 1-2 sentences of prose synthesized from the paper.
+
+Paper content (ground truth):
+{paper_context}
+
+Annotated abstract to evaluate:
+{content}
+
+Score across four dimensions (0-10 integer each):
+- section_accuracy (weight 0.35): Does each section's prose correctly capture the right rhetorical move? Key distinctions: Topic = subject area (not the contribution); Motivation = gap/need; Contribution = what was built/proved; Evidence = benchmark results; Broad impact = open-source/community-wide effects.
+- coverage (weight 0.25): Are all 8 sections present with substantive prose? Penalty for missing sections or empty/placeholder content.
+- faithfulness (weight 0.25): Is the prose grounded in the paper content — no hallucinated results, fabricated benchmarks, or invented claims?
+- structure (weight 0.15): Does the output start with a # heading and use exactly the 8 bold headers in order?
+
+Dimension score guide (be strict):
+- 10:  perfect — all 8 sections present, correctly characterized, grounded in the paper
+- 8-9: near-perfect — one minor section characterization issue; all 8 sections present
+- 6-7: acceptable — one clear section mismatch or one missing/empty section
+- 4-5: weak — two or more section mismatches or multiple missing sections
+- 1-3: failing — most sections wrong, missing, or not grounded in the paper
+
+Compute composite = round(0.35*section_accuracy + 0.25*coverage + 0.25*faithfulness + 0.15*structure, 1)
+
+Respond with valid JSON only — no preamble, no explanation:
+{{
+  "section_accuracy": integer 0-10,
+  "coverage": integer 0-10,
+  "faithfulness": integer 0-10,
+  "structure": integer 0-10,
+  "score": composite as a number with one decimal place,
+  "passed": true if composite >= 9.0 else false,
+  "issues": ["specific issue: which section, what is wrong or missing"],
+  "feedback": "one paragraph of specific, actionable corrections for the annotator"
+}}"""
+
+REVISE_PROMPT_ANNOTATE = """You are a research-paper analyst producing a Nanda Annotated Abstract.
+
+The Nanda framework requires EXACTLY these eight bold section headers in this order:
+**Topic**
+**Motivation**
+**Contribution**
+**Detail / Nuance**
+**Evidence / Contribution 2**
+**Weaker result**
+**Narrow impact**
+**Broad impact**
+
+After each header, write 1-2 sentences of plain prose synthesized from the paper. Use only information from the provided text. If a section is not clearly evidenced, write a brief inference grounded in what IS present.
+
+Paper content (ground truth):
+{paper_context}
+
+Your previous annotation:
+{content}
+
+The evaluator found these issues:
+{issues}
+
+Evaluator feedback:
+{feedback}
+
+Produce a corrected annotation. Start with:
+# Annotated Abstract: <paper title>
+
+Then output all eight headers with revised prose. Output NOTHING before **Topic** and NOTHING after the **Broad impact** prose."""
+
+
+ANNOTATE_EVALUATOR_MODEL = "pi-qwen-32b"   # lighter than EVALUATOR_MODEL; annotation eval doesn't need a 30B thinking model
+
+
+def loop_annotate(
+    task: str,
+    output_path: str,
+    paper_context: str,
+    producer_model: str = PRODUCER_MODEL,
+    evaluator_model: str = ANNOTATE_EVALUATOR_MODEL,
+    parent_trace=None,
+) -> dict:
+    """
+    Wiggum evaluation+revision loop for /annotate /wiggum outputs.
+
+    Uses annotation-specific eval/revise prompts with the original paper content
+    as ground truth. The evaluator checks label accuracy, coverage, and faithfulness
+    rather than the standard depth/specificity/relevance dimensions.
+
+    Returns a trace dict with round-by-round results and final status.
+    """
+    import time as _time
+    from logger import RunTrace as _RunTrace
+
+    global PRODUCER_MODEL, EVALUATOR_MODEL
+    PRODUCER_MODEL = producer_model
+    EVALUATOR_MODEL = evaluator_model
+
+    expanded = os.path.expanduser(output_path)
+
+    max_rounds = MAX_ROUNDS
+    env_cap = os.environ.get("WIGGUM_MAX_ROUNDS")
+    if env_cap is not None:
+        try:
+            max_rounds = max(1, int(env_cap))
+        except ValueError:
+            pass
+
+    _local_trace = _RunTrace(task=task, producer_model=producer_model, evaluator_model=evaluator_model)
+    trace = {"task": task, "task_type": "annotate", "output_path": expanded, "rounds": [], "final": None}
+
+    # Clean garbled PDF text (single-char-per-line runs from MarkItDown pdfminer)
+    try:
+        from skills import _clean_pdf_text
+        paper_context = _clean_pdf_text(paper_context)
+    except Exception:
+        pass
+
+    print(f"\n[wiggum:annotate] starting annotation evaluation loop")
+    print(f"  file:  {expanded}")
+    print(f"  model: evaluator={evaluator_model}  producer={producer_model}")
+    print(f"  max rounds: {max_rounds}\n")
+
+    best_score = 0.0
+    best_content = ""
+    best_round = 0
+
+    for round_num in range(1, max_rounds + 1):
+        print(f"--- round {round_num} ---")
+
+        # 1. Read current annotation from disk
+        with (parent_trace.span("normalize") if parent_trace else _nullspan()):
+            content = normalize(expanded)
+
+        # 2. Evaluate against paper content
+        print(f"  [evaluate] task_type=annotate  scoring annotation...")
+        eval_prompt = EVAL_PROMPT_ANNOTATE.format(
+            paper_context=paper_context[:4000],
+            content=content[:4000],
+        )
+        response = ollama.chat(
+            model=evaluator_model,
+            messages=[{"role": "user", "content": eval_prompt}],
+            options={"temperature": 0.0, "think": False},
+        )
+        _local_trace.log_usage(response, stage="wiggum_eval")
+
+        raw = response["message"]["content"].strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            print(f"  [warn] evaluator returned non-JSON: {raw[:200]}")
+            result = {"passed": False, "score": 0.0, "issues": ["evaluator parse error"], "feedback": raw}
+
+        # Recompute composite in Python — don't trust model arithmetic
+        ann_dims = {
+            "section_accuracy": (result.get("section_accuracy", 0), 0.35),
+            "coverage":         (result.get("coverage", 0),         0.25),
+            "faithfulness":     (result.get("faithfulness", 0),     0.25),
+            "structure":        (result.get("structure", 0),        0.15),
+        }
+        composite = round(sum(score * weight for score, weight in ann_dims.values()), 1)
+        result["score"] = composite
+        result["dims"]  = {k: v[0] for k, v in ann_dims.items()}
+        result["passed"] = composite >= PASS_THRESHOLD
+
+        score   = result["score"]
+        passed  = result["passed"]
+        issues  = [i for i in result.get("issues", []) if i and str(i).strip().lower() not in ("none", "n/a", "")]
+        feedback = result.get("feedback", "")
+
+        if score > best_score:
+            best_score = score
+            best_content = content
+            best_round = round_num
+
+        abbrev  = {"section_accuracy": "sec", "coverage": "cov", "faithfulness": "fth", "structure": "str"}
+        dim_str = "  ".join(f"{abbrev.get(k, k)}={v[0]}" for k, v in ann_dims.items())
+        print(f"  score: {score}/10  passed: {passed}  [{dim_str}]")
+        if issues:
+            for issue in issues:
+                print(f"    - {issue}")
+
+        round_record = {
+            "round":    round_num,
+            "score":    score,
+            "dims":     result["dims"],
+            "passed":   passed,
+            "issues":   issues,
+            "feedback": feedback,
+        }
+        trace["rounds"].append(round_record)
+
+        if passed:
+            print(f"\n[wiggum:annotate] PASS on round {round_num} (score {score}/10)")
+            trace["final"] = "PASS"
+            _attach_token_stats(trace, _local_trace)
+            return trace
+
+        if round_num == max_rounds:
+            if best_round < round_num:
+                print(f"\n[wiggum:annotate] restoring round {best_round} output (score {best_score:.1f} > round {round_num} score {score:.1f})")
+                with open(expanded, "w", encoding="utf-8") as f:
+                    f.write(best_content)
+            print(f"\n[wiggum:annotate] FAIL — max rounds reached without passing")
+            trace["final"] = "FAIL"
+            _attach_token_stats(trace, _local_trace)
+            return trace
+
+        # 3. Revise — re-annotate using paper context + evaluator feedback
+        print("  [revise] re-annotating with evaluator corrections...")
+        issues_text  = "\n".join(f"- {i}" for i in issues)
+        revise_prompt = REVISE_PROMPT_ANNOTATE.format(
+            paper_context=paper_context[:4000],
+            content=content,
+            issues=issues_text,
+            feedback=feedback,
+        )
+        rev_response = ollama.chat(
+            model=producer_model,
+            messages=[{"role": "user", "content": revise_prompt}],
+            options={"temperature": 0.1, "think": False},
+        )
+        _local_trace.log_usage(rev_response, stage="wiggum_revise")
+        revised = rev_response["message"]["content"].strip()
+
+        if not revised.strip():
+            print("  [warn] producer returned empty revision, stopping")
+            trace["final"] = "FAIL"
+            _attach_token_stats(trace, _local_trace)
+            return trace
+
+        try:
+            from agent import clean_synthesis_output
+            revised = clean_synthesis_output(revised)
+        except Exception:
+            pass
+
+        from security import check_output_path
+        ok, reason = check_output_path(expanded)
+        if not ok:
+            print(f"  [security] revision write blocked: {reason}")
+            trace["final"] = "ERROR"
+            _attach_token_stats(trace, _local_trace)
+            return trace
+
+        with open(expanded, "w", encoding="utf-8") as f:
+            f.write(revised)
+        print(f"  [write] revised annotation saved to {expanded}")
+
+    trace["final"] = "FAIL"
+    _attach_token_stats(trace, _local_trace)
+    return trace
 
 
 # ---------------------------------------------------------------------------

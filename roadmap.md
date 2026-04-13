@@ -1,12 +1,29 @@
-# Roadmap: Toward Multimodal Agent Swarms
+# Roadmap: Self-Improving Agentic Swarm
+
+## North Star
+
+A locally-running swarm of specialized agents that iteratively improves its own harness, models, and capabilities — without human intervention beyond goal-setting and checkpoint approval.
+
+The end state:
+- **Proposer agents** generate harness mutations (synthesis instructions, search strategy, rubric parameters, chunking config)
+- **Executor agents** run eval tasks in parallel against the proposed mutation
+- **Critic agents** score results using typed telemetry from structured event traces, decide keep/revert
+- **Trainer agents** trigger fine-tuning when preference data crosses a threshold; benchmark the checkpoint
+- **Integrator agents** promote checkpoints, hot-swap via vLLM, commit new baselines
+
+The loop closes continuously: run → preference data → fine-tune → hot-swap → benchmark → promote or revert. Human checkpoints at goal-setting and promotion; everything between is autonomous.
+
+This is achievable on a single RTX 5000 Ada (63.8GB VRAM) with the harness architecture already in place. The scaffolding — orchestrator, autoresearch, evaluator separation, RLHF feedback, memory, fine-tuning pipeline — is mostly built. What remains is closing the manual hand-offs, expanding the mutation surface, and adding the structured telemetry the critic needs to reason about *why* something worked.
+
+---
 
 ## Current Baseline
 
 A working three-stage pipeline running locally via Ollama:
 
-1. **Research** (`agent.py`) - agentic web search loop using `ddgs`, forced synthesis after 2 rounds, Python writes output to disk
-2. **Verify/Revise** (`wiggum.py`) - evaluates output with `qwen2.5:72b`, revises with producer if failing, loops up to 3 rounds
-3. **Ground-truth eval** (`eval.sh`) - filesystem checks independent of model self-report
+1. **Research** (`agent.py`) — agentic web search loop using `ddgs`, forced synthesis after 2 rounds, Python writes output to disk
+2. **Verify/Revise** (`wiggum.py`) — evaluates output with `qwen2.5:72b`, revises with producer if failing, loops up to 3 rounds
+3. **Ground-truth eval** (`eval.sh`) — filesystem checks independent of model self-report
 
 Demonstrated self-correction: 3/10 to 9/10 in one wiggum revision round without human intervention.
 
@@ -137,6 +154,37 @@ Remaining additional tools:
 **`Plan.subtasks` is empty — the Stage 3 hook.** Filling it and spawning `agent.run()` per subtask is the orchestrator.
 
 `plan` dict logged per run. CLI: `python planner.py "<task>"`.
+
+### Wiggum best-round restoration — DONE (2026-04-12)
+
+Analysis of 123 eval runs found 12/57 multi-round runs regressed: final score < r1 (avg −0.36). Wiggum was unconditionally returning the last round's content. Fixed: `loop()` now tracks `best_score / best_content / best_round` across all rounds and restores the best content to disk before returning FAIL if a later round scored lower. Also fixed: termination gate was using the `MAX_ROUNDS` global constant instead of the `max_rounds` local variable — `WIGGUM_MAX_ROUNDS` env override now works correctly at the exit gate.
+
+### synthesize_with_count uses SYNTH_INSTRUCTION — DONE (2026-04-12)
+
+`SYNTH_INSTRUCTION_COUNT` was session-1-era quality and had never been through the autoresearch optimization loop. Ablation run revealed it was producing ~1300-byte outputs vs 5000–7000 bytes from SYNTH_INSTRUCTION on identical tasks, with r1 dropping from 8.8 → 6.9. Fixed: `synthesize_with_count()` now uses `SYNTH_INSTRUCTION` with the count constraint injected as a prefix. `SYNTH_INSTRUCTION_COUNT` is dead code, left inside its autoresearch sentinels.
+
+Also: `expected_count` is now extracted before the first `synthesize()` call, routing enumerated tasks directly to `synthesize_with_count()` rather than running a wasted first synthesis pass.
+
+### Closed-book prior knowledge pass — NEXT
+
+**Motivation:** MagenticOne architecture review (2026-04-12) identified a gap: we go straight to web search without auditing what the producer already knows. Searches for well-known topics retrieve content the model already knows, inflating novelty scores with no synthesis gain. Gap queries generated from the task string alone; no grounding in actual model knowledge.
+
+**Design:** before `gather_research()`, add a `prior_knowledge_pass()` call in `planner.py`:
+> "What do you already know about: {task}? List: (1) facts you're confident about, (2) specific gaps you'd need to look up to answer authoritatively."
+
+The gap list seeds `plan_query()` instead of generic topic queries. Known facts injected as a "verified facts" block in the synthesis prompt. Novelty scoring calibrated against gaps rather than blank slate.
+
+**Expected benefit:** more targeted searches, fewer redundant rounds, cleaner synthesis context. Addresses the synthesis gap (no reflect step between search and synthesis) without a full ReAct loop inside synthesis.
+
+**Effort:** one new LLM call in `planner.py`, minor changes to `gather_research()` query seeding and `synthesize()` prompt assembly.
+
+### Wiggum cycling detection — NEXT
+
+After round 2, ask the evaluator: "Are the issues in this round substantively different from round 1, or is the revision cycling on the same problems?" If cycling → return best round immediately, no third revision call. Saves ~580s avg wiggum_revise call on the 30/57 multi-round runs that are flat or regressing.
+
+### Autoresearch stall replan — NEXT
+
+If 4+ consecutive autoresearch experiments are discarded, inject a directive into `PROPOSE_PROMPT`: "The last 4 variations were all discarded. Stop refining — propose a fundamentally different framing approach." Mirrors MagenticOne's replan trigger. Breaks proposer out of local minima; the local proposer clustered in "add code examples" for 10 consecutive experiments in session 1.
 
 ---
 
@@ -382,31 +430,69 @@ Analysed 10 autoresearch traces. Key findings and actions:
 
 ---
 
-## Stage 4 - Multimodal Agent Swarm
+## Stage 4 - Self-Improving Agent Swarm
 
-*Objective: a coordinated swarm of agents handling complex, long-horizon tasks across text, images, code, and structured data.*
+*Objective: a coordinated swarm of specialized agents that handles complex tasks AND iteratively improves the harness, models, and its own capabilities with minimal human intervention.*
+
+### The self-improvement loop
+
+```
+goal-setting (human)
+    ↓
+Proposer agent — generates harness mutation (instruction, rubric param, search config)
+    ↓
+Executor agents (parallel) — run eval tasks with mutation applied
+    ↓
+Critic agent — scores via typed event telemetry, decides keep/revert
+    ↓
+  keep → Trainer agent — triggers fine-tune when preference data threshold crossed
+            ↓
+          checkpoint → vLLM hot-swap → benchmark
+            ↓
+          Integrator agent — promotes, commits new baseline
+  revert → git reset, next proposal
+```
+
+Human checkpoints: goal-setting and checkpoint promotion. Everything between is autonomous.
 
 ### What changes at swarm scale
 
-**Communication:** agents need a shared message bus or state store. Options: SQLite, Redis, or a simple append-only JSONL log that all agents read and write.
+**Communication:** shared message bus via SQLite append-only JSONL — all agents read/write. Redis if pub/sub or cross-process invalidation becomes necessary.
 
-**Agent identity:** each agent has a role, a capability profile, and a trust level. The orchestrator assigns tasks based on capability matching, not hardcoded routing.
+**Agent identity:** each agent has a role, capability profile, and trust level. Orchestrator assigns tasks via capability matching, not hardcoded routing.
 
-**Emergent decomposition:** the orchestrator uses an LLM to decompose tasks dynamically. The decomposition itself becomes a harness component to verify and correct.
+**Structured telemetry as critic input:** the critic reasons about *why* a mutation worked using typed event traces (plan events, search events, wiggum dimension scores, span timings) — not just a scalar score. This is why 7h (structured event protocol) is a prerequisite.
 
-**Failure propagation:** when one agent fails, the swarm needs a policy: retry, reroute, escalate, or abort. This is the multi-agent equivalent of a verification loop.
+**Failure propagation:** when one agent fails — retry, reroute, escalate, or abort. Multi-agent equivalent of the wiggum verification loop.
+
+### Mutation surface (expanding from autoresearch)
+
+Current autoresearch mutates only `SYNTH_INSTRUCTION`. Full self-improvement requires the proposer to target any harness config parameter:
+
+| Component | Mutable parameters |
+|-----------|-------------------|
+| Synthesis | `SYNTH_INSTRUCTION`, `SYNTH_INSTRUCTION_COUNT` |
+| Search | `MAX_SEARCH_ROUNDS`, novelty threshold, query generation prompt |
+| Wiggum | rubric weights, `PASS_THRESHOLD`, dimension definitions |
+| Planner | gap-detection prompt, complexity classifier |
+| Chunker | chunk size, overlap, top-K retrieval |
+| Fine-tune | LoRA rank, learning rate, training data mix |
 
 ### Multimodal inputs
-- Text prompts: research + write pipeline (current capability)
-- Screenshots: vision agent extracts content, text agents act on it
-- PDFs: markitdown extracts text, routes to research or write agents
+- Text prompts: research + write pipeline (current)
+- Screenshots: vision agent → text agents
+- PDFs: markitdown + chunker → research or write agents
 - Structured data (CSV, JSON): code agent processes, write agent documents
 - Audio (future): transcription agent feeds text pipeline
 
-### The hardware question
-A swarm of 7B models running in parallel is feasible on a single GPU with 24GB VRAM. Four simultaneous 7B agents use approximately the same memory as one 32B agent, with potentially higher throughput on parallelizable tasks. The coordination overhead is the cost.
+### Hardware fit (RTX 5000 Ada, 63.8GB VRAM)
 
-With a 32B producer the single-agent pipeline consumes the full 24GB budget — parallelism is no longer free. The architectural choice becomes: one high-quality agent or multiple lower-quality agents in parallel. Experiment-03 suggests the 7B producer is the quality bottleneck, not the harness, which shifts the calculus toward the single high-quality agent path.
+63.8GB VRAM removes the single-GPU tradeoff that constrained earlier design. Options that weren't viable at 24GB:
+- pi-qwen-32b producer + Qwen3-Coder:30b evaluator + llama3.2:3b skill agent simultaneously
+- vLLM continuous batching across all three with headroom for LoRA adapters
+- Fine-tuning a 7B model while serving a 32B producer (separate VRAM partitions)
+
+The coordination overhead — not VRAM — is now the binding constraint.
 
 ---
 
@@ -459,6 +545,52 @@ The 57 autoresearch runs on a single eval task (T_D) produce dense preference pa
 - **Revision preference data:** capture pre-revision output in `runs.jsonl` to enable within-run preference pairs (currently only cross-run pairs available)
 - **Reward model:** train on `reward.jsonl`; use as evaluator replacement or ensemble member
 
+### 6b: TinyTroupe Research Curator Personas — PLANNED
+
+**Motivation:** The annotation pipeline (`run_annotations.py`) processes all arxiv papers with equal weight. Adding a *taste layer* — opinionated personas that score papers on relevance, novelty, and practical value before annotation — lets the training data reflect discriminating judgment, not just coverage.
+
+**Design:**
+
+5 personas filter the candidate paper pool before annotation. Each persona independently scores every paper (0-10) on a structured rubric; papers that clear a threshold in ≥2 personas advance to the Nanda annotation stage.
+
+| Persona | Lens | Scores highest on |
+|---------|------|-------------------|
+| Pragmatic Engineer | Applied ML | Reproducible results, released code, compute-efficient methods |
+| Academic Rigorist | Theoretical foundations | Proof-backed claims, ablation depth, benchmark diversity |
+| Synthesis Thinker | Cross-domain connection | Ideas that bridge fields, survey-worthy scope, conceptual novelty |
+| Field Practitioner | Real-world deployment | Production constraints, latency/memory tradeoffs, failure modes |
+| Contrarian | Assumption challenge | Results that contradict consensus, null findings, replication studies |
+
+**Scoring rubric per paper (per persona):**
+- Relevance to persona's lens (0-4)
+- Novelty relative to what's already in the corpus (0-3)
+- Quality of evidence / reproducibility (0-3)
+
+**Threshold:** paper advances if ≥2 personas score it ≥6, OR any single persona scores it ≥9.
+
+**Integration:**
+
+```
+mine_knowledge.py         →  raw arxiv_*.md files
+                                    ↓
+                         tinytroupe_curator.py   ← 5 personas score each paper
+                                    ↓
+                         arxiv_*_curated.json    (arxiv_id, scores, rationale)
+                                    ↓
+                         run_annotations.py      (only curated papers)
+                                    ↓
+                         build_finetune_from_annotations.py
+```
+
+**File to build:** `tinytroupe_curator.py`
+- Reads `arxiv_*.md` files, extracts paper list
+- Instantiates 5 TinyTroupe agents with persona definitions
+- For each paper: shows title + abstract to all 5, collects structured scores
+- Outputs `arxiv_<batch>_curated.json`: `{arxiv_id, title, scores: {persona: score}, rationale: {persona: str}, advance: bool}`
+- `run_annotations.py` gets `--curated-only` flag that filters to advancing papers
+
+**Why this matters for self-improvement:** As the annotation model improves, it needs *better* training data — not just more. Persona-filtered data concentrates the training signal on papers that exhibit the properties we actually want the model to internalize. The taste layer is itself trainable: as the corpus grows, we can fine-tune the curator on the preference pairs the swarm generates.
+
 ### Framing (per Perplexity analysis)
 
 The strongest thesis emerging from the data: *"Local agent reliability is primarily a systems problem up to a point, after which producer capacity becomes the limiting factor."*
@@ -468,6 +600,394 @@ Cleanest reproducible experiments for a paper/report:
 2. Evaluator separation (circular grading with same model; step-function gain from different architecture)
 3. Producer-vs-evaluator scaling (32B breaks T_A ceiling; T_B flat — synthesis instruction is the bottleneck)
 4. External verification loop (wiggum: 3/10 → 9/10 in one round without human intervention)
+
+---
+
+## Stage 7 - Capability Upgrades (sourced 2026-04-12)
+
+### 7a: OCR preprocessing for document ingestion — NEXT (low effort, high value)
+
+**Problem:** `read_file_context()` routes PDFs through MarkItDown. For scanned or image-heavy documents, MarkItDown extracts garbage or nothing — the chunker receives corrupt input, synthesis quality collapses.
+
+**Approach:** add an OCR preprocessing step in `read_file_context()`. Detect scanned/image-heavy PDFs (heuristic: very low text char count relative to page count after MarkItDown conversion), route through a local OCR model, feed the clean markdown to the existing chunker.
+
+**Models available via Ollama/llama.cpp GGUF:**
+- `ggml-org/GLM-OCR-GGUF` — best general OCR, supports `"OCR markdown"` and `"OCR HTML table"` prompts
+- `Qwen3-VL-2B` — already in the vision family; lighter weight
+
+**Integration (llama-server route):**
+```bash
+llama-server -hf ggml-org/GLM-OCR-GGUF
+```
+```python
+# POST /v1/chat/completions with base64 image + "OCR markdown" prompt
+# Drop result into existing chunker pipeline unchanged
+```
+
+**Also useful for:** the `/annotate` skill on papers where MarkItDown produces malformed markdown from complex layouts (two-column PDFs, tables, equations).
+
+**Source:** [ggml-org/using-ocr-models-with-llama-cpp](https://huggingface.co/blog/ggml-org/using-ocr-models-with-llama-cpp)
+
+---
+
+### 7b: Gemma 4 as evaluator / panel member — NEXT (one command to test)
+
+**Motivation:** Qwen3-Coder:30b is the sole evaluator across wiggum and panel. Evaluator monoculture means autoresearch is optimizing against one model's scoring preferences — if Qwen3-Coder has a systematic bias (e.g. rewarding code density regardless of relevance), it's invisible in the current setup.
+
+**Gemma 4 26B MoE** is the right candidate:
+- Different architecture family (Google vs Alibaba) — no circular grading risk
+- 3.8B active params at inference — fits alongside pi-qwen-32b without full VRAM swap
+- 256K context, native function calling, configurable thinking mode
+- Strong coding benchmark: 80% on LiveCodeBench v6
+
+**Test protocol:**
+```bash
+ollama pull gemma4:26b
+# Swap into wiggum as evaluator for one eval session:
+EVALUATOR_MODEL=gemma4:26b python eval_suite.py --tasks T_D,T_E --score
+```
+
+Compare scores against Qwen3-Coder baseline. If Gemma 4 scores diverge significantly → consider rotating evaluators across autoresearch sessions, or adding it as a 4th panel persona (Adversarial Evaluator). If scores converge → models agree; current rubric is robust.
+
+**Thinking mode upside:** `"configurable thinking mode"` could improve wiggum feedback quality — richer reasoning about *why* a section is shallow, not just that it is.
+
+**Source:** [ollama.com/library/gemma4](https://ollama.com/library/gemma4)
+
+---
+
+### 7c: Nanda annotation fine-tuning — IN PROGRESS (2026-04-13)
+
+**Status:** `finetune_annotate.py` running. Training `Qwen/Qwen2.5-7B-Instruct` with LoRA on 121 human-curated Nanda annotation examples from `annotated-abstracts.csv`.
+
+**Training setup:**
+- LoRA r=16, alpha=32, target projectors (q/k/v/o/gate/up/down)
+- bf16, no quantization (63.8GB VRAM, NVIDIA RTX 5000 Ada)
+- 3 epochs, batch size 2, grad accum 4 → 42 effective steps
+- TensorBoard at `http://localhost:6006`
+
+**Next steps after training:**
+1. Convert to GGUF: `python llama.cpp/convert_hf_to_gguf.py finetune_output/merged --outfile nanda-annotator.gguf --outtype q8_0`
+2. Register in Ollama: `ollama create nanda-annotator -f finetune_output/Modelfile`
+3. Benchmark: run `/annotate /wiggum --producer nanda-annotator` on held-out papers, compare wiggum scores vs base `pi-qwen-32b`
+
+**Round 2 training data:** `run_annotations.py` currently annotating 600 papers from `arxiv_agentic_papers.md` + `arxiv_agentic_harness_engineering_papers.md`. These will expand the training set from 121 → 700+ examples for a second fine-tuning run.
+
+---
+
+### 7d: Ollama GGUF import for fine-tuned producers — when training loop closes
+
+**Motivation:** `hf_export.py` already exports `preference.jsonl` and `sft.jsonl`. When SFT/DPO training runs against those datasets, the resulting model needs to come back into the harness as the producer.
+
+**Import path (Modelfile):**
+```
+FROM /path/to/finetuned.gguf
+```
+```bash
+ollama create pi-qwen-32b-sft --file Modelfile
+# or with quantization at import:
+ollama create pi-qwen-32b-dpo --file Modelfile --quantize q4_K_M
+```
+
+**LoRA adapter path:** if training produces a Safetensors adapter rather than a full model, import against the base:
+```
+FROM pi-qwen-32b
+ADAPTER /path/to/lora-adapter/
+```
+
+This is the closing step of the self-improvement loop: autoresearch → preference data → DPO → re-import → new baseline producer.
+
+**Supported architectures confirmed:** Llama, Mistral, Gemma, Phi3. Qwen2.5 (pi-qwen-32b's base) imports cleanly as it's Llama-compatible.
+
+**Source:** [docs.ollama.com/import](https://docs.ollama.com/import)
+
+---
+
+### 7e: vLLM as inference backend — Stage 4 infrastructure
+
+**Context:** Ollama's single-request-at-a-time default became a direct bottleneck in session 5 — the annotation loop blocked the email skill for the duration of a 300-paper run. `OLLAMA_NUM_PARALLEL=4` partially addresses this, but Ollama has no dynamic batching and no native LoRA hot-swap.
+
+**Where vLLM fits:**
+
+| Need | Ollama | vLLM |
+|------|--------|------|
+| Concurrent agent requests (swarm) | Queue (1 default) | Continuous batching — all requests batch-infer together |
+| LoRA adapter serving | Experimental | Native (`--enable-lora`, hot-swap without base reload) |
+| RLHF / DPO training loop | No integration | OpenAI-compatible API — reward signals can be computed inline |
+| Throughput for annotation/email batch runs | Sequential | 5–10× on parallel workloads vs Ollama queue |
+| API compatibility | `ollama.chat()` — custom SDK | `/v1/chat/completions` — drop-in OpenAI SDK target |
+
+**The "downsides" are actually upsides here:**
+- *Requires manual weight management (no `ollama pull`):* forces explicit model versioning — critical when fine-tuned checkpoints are entering the loop. Accidental model swaps break RL baselines; explicit paths prevent this.
+- *Linux/WSL2 only:* WSL2 with GPU passthrough on the RTX 5000 Ada is straightforward. The annotation and email batch workloads are already non-interactive — WSL2 is the right home for them.
+- *Heavier to set up:* one-time cost; the OpenAI-compatible API means the rest of the harness needs zero changes (`OLLAMA_BASE_URL` → vLLM endpoint).
+
+**Planned integration point:** Stage 4 / swarm infrastructure. When subtask workers scale beyond 4 concurrent agents, Ollama's queue becomes the ceiling. vLLM removes it.
+
+**LoRA serving is the highest-value near-term use case:** once `finetune_annotate.py` produces a checkpoint, vLLM can serve the base + LoRA adapter simultaneously — compare base vs fine-tuned on live annotation tasks without separate Ollama model registrations.
+
+**Migration path (zero harness changes):**
+```bash
+# WSL2
+pip install vllm
+vllm serve Qwen/Qwen2.5-32B-Instruct --enable-lora --max-lora-rank 16 --port 11434
+# agent.py — no change; Ollama client already reads OLLAMA_HOST
+export OLLAMA_HOST=http://localhost:11434
+```
+
+**Status:** not yet — build after fine-tune loop closes and swarm scale demands it. Annotate on 7e when annotation throughput or concurrent swarm runs become the observed bottleneck.
+
+---
+
+### 7f: Docker sandbox for run_python — file and revisit
+
+**Current state:** `run_python` uses AST analysis + subprocess with 10s timeout as the security layer. This covers the threat model for research tasks where code comes from the producer model (not untrusted external sources).
+
+**When this becomes urgent:** if `run_python` scope expands to execute code from web search results, user-provided scripts, or untrusted agent outputs. Docker Sandboxes would replace the AST blocklist with true process isolation — throwaway container, no host filesystem access.
+
+**Not urgent now.** Revisit if harness is productionized for other users or if `run_python` is granted broader permissions.
+
+**Source:** [docker.com/blog/docker-sandboxes-run-agents-in-yolo-mode-safely](https://www.docker.com/blog/docker-sandboxes-run-agents-in-yolo-mode-safely/)
+
+---
+
+### 7g: /plan slash command — interactive pre-run planning
+
+**Motivation:** the closed-book prior knowledge pass (Stage 1 NEXT) and the existing `planner.py` both run autonomously with no human checkpoint. Claude Code's `/plan` pattern is strictly better: show the gap analysis and proposed search queries before any search runs, let the user edit or approve, then proceed. Bad gap identification is caught before it wastes search rounds.
+
+**Design:**
+
+```
+/plan Search for RAG papers on retrieval augmented generation
+  ↓
+[planner.py] prior_knowledge_pass() → known facts + gaps identified
+  ↓
+Dashboard OR terminal renders:
+  Known: transformer attention, dense retrieval, BM25 vs dense
+  Gaps:  late-interaction models, multi-hop retrieval, RAG vs long-context tradeoffs
+  Proposed queries: [editable list]
+  [Approve] [Edit]
+  ↓
+agent.run() proceeds with approved queries
+```
+
+**Implementation:**
+- Add `plan` to `skills.py` REGISTRY — `hook: "pre_research"`, explicit only
+- `agent.py`: when `plan` in explicit_skills, call `prior_knowledge_pass()` in `planner.py`, print `[EVENT]{"type":"plan",...}` structured event, then pause for approval
+- **Terminal path:** `input()` prompt — print plan, ask "Approve? [Y/edit]". If edit, open $EDITOR or accept inline query edits
+- **Dashboard path:** SSE stream emits plan event → dashboard renders editable plan card with Approve button → POST `/api/run/<run_id>/approve-plan` → agent continues
+- `plan.approved_queries` replaces auto-generated queries in `gather_research()`
+
+**Status:** NEXT — build before closed-book autonomous pass (this supersedes it)
+
+---
+
+### 7g-ii: Agentic cost estimator — COCOMO II for agent swarms
+
+**Motivation:** COCOMO II estimates software effort in person-months from SLOC, scale drivers, and cost drivers. The harness equivalent already exists in `runs.jsonl` — every run logs `run_duration_s`, `input_tokens`, `output_tokens`, `wiggum_rounds`, `task_type`, `score`, `final`. This is a calibration dataset for a pre-task cost model that estimates effort *before* a run begins, using the same inputs the planner already produces.
+
+**Unit mapping — COCOMO II → harness:**
+
+| COCOMO II | Harness equivalent |
+|-----------|-------------------|
+| SLOC | Task string complexity + expected output size |
+| Precedentedness | Memory hit rate for similar past tasks |
+| Architecture/Risk Resolution | Plan complexity rating + subtask count |
+| Team cohesion | Evaluator/producer model alignment (score variance across runs) |
+| Required reliability | `PASS_THRESHOLD` setting |
+| Platform experience | Task type frequency in last N runs |
+| Process maturity | Wiggum round distribution across recent runs |
+
+**Output of the estimator:**
+
+```python
+CostEstimate(
+    estimated_llm_calls   = N,
+    estimated_tokens      = K,
+    estimated_wiggum_rounds = 1-3,
+    estimated_wall_time_s = T,
+    complexity            = "low" | "medium" | "high",
+    risk_flags            = ["count_constraint", "requires_vision", "novel_task_type", ...],
+    confidence            = 0.0-1.0,   # based on similar past runs in memory
+)
+```
+
+**Where it plugs in:**
+- **`/plan` command:** shows cost estimate alongside gap analysis before any search runs — you know before committing whether a task is a 2-minute run or a 45-minute orchestrated run
+- **Swarm scheduling:** orchestrator uses estimates to allocate workers — cheap tasks get smaller/faster models, expensive tasks get pi-qwen-32b
+- **Critic signal:** actual vs estimated variance logged per run — consistent underestimation on a task type flags either a harness gap or a miscalibrated estimator
+- **Roadmap prioritization:** run estimator against all NEXT roadmap items, rank by effort/value ratio to guide session planning
+
+**Calibration:** train against `runs.jsonl` actuals after 50+ runs. `planner.py` emits `CostEstimate` alongside `Plan`. Variance tracked in `runs.jsonl` as `estimated_*` vs `actual_*` fields. Model improves as the run history grows — self-calibrating via the same data the swarm generates.
+
+**Dashboard:** surface in the `/plan` card as a phase distribution table (Inception/Elaboration/Construction/Transition mapped to Plan/Research/Synthesis/Eval stages) with agent-native units (tokens, wall time, LLM calls) mirroring the COCOMO II UI structure.
+
+**Status:** NEXT — implement after `/plan` slash command (7g) is wired; estimator needs the plan output as input
+
+---
+
+### 7h: Unified observability — structured event protocol + dashboard
+
+**Motivation:** three separate observability gaps identified in session 5:
+1. Dashboard shows raw stdout during runs — no visibility into plan reasoning, search stage, synthesis progress
+2. Fine-tuning metrics only visible in TensorBoard after epoch end — no live per-step dashboard view
+3. No compute-stage trace data from fine-tuning runs for retrospective analysis (forward/backward/optimizer timing)
+
+**The fix is one shared protocol, three emitters.**
+
+#### Structured event format
+
+All pipeline components print `[EVENT]<json>` lines to stdout. The SSE stream already delivers these to the dashboard. Dashboard detects the prefix and routes:
+
+```json
+{"type": "plan",   "data": {"queries": [...], "gaps": [...], "complexity": "high"}}
+{"type": "search", "data": {"query": "...", "round": 1, "hits": 3}}
+{"type": "synth",  "data": {"stage": "start", "tokens_in": 4200}}
+{"type": "metric", "data": {"step": 14, "loss": 1.35, "accuracy": 0.69, "epoch": 0.13, "grad_norm": 0.57}}
+{"type": "span",   "data": {"name": "forward_pass", "duration_ms": 1240, "phase": "train"}}
+{"type": "log",    "data": {"text": "raw stdout line"}}
+```
+
+Non-`[EVENT]` lines fall through as `log` events — backward compatible with all existing output.
+
+#### Emitter 1 — `agent.py` plan + stage events
+
+Emit typed events at each pipeline transition:
+- After planner runs: `{"type":"plan", "data": plan.__dict__}`
+- Each search round start/end: `{"type":"search", ...}`
+- Synthesis start: `{"type":"synth", "data":{"stage":"start"}}`
+- Wiggum round: `{"type":"wiggum", "data":{"round":N, "score":X}}`
+
+Zero impact on non-dashboard runs — extra print lines, nothing more.
+
+#### Emitter 2 — `finetune_annotate.py` per-step metrics
+
+Add a `trl.TrainerCallback` subclass (`DashboardCallback`) that on `on_log()`:
+1. Writes `[EVENT]{"type":"metric",...}` to stdout (captured by run SSE stream if launched via server)
+2. Appends the same JSON to `finetune_metrics.jsonl` (sidecar file, persists across sessions)
+
+New server endpoint: `GET /api/finetune/metrics` — streams `finetune_metrics.jsonl` as JSON array. Dashboard polls this every 5s when a finetune run is detected.
+
+No waiting for epoch end. Step 14's loss visible in dashboard within seconds of it printing.
+
+#### Emitter 3 — fine-tuning Perfetto tracer
+
+`FinetuneTracer` context manager using `torch.cuda.Event` for GPU-accurate timing:
+
+```python
+with FinetuneTracer("forward_pass"):
+    outputs = model(**batch)
+
+with FinetuneTracer("backward_pass"):
+    loss.backward()
+
+with FinetuneTracer("optimizer_step"):
+    optimizer.step()
+```
+
+Emits `{"type":"span",...}` events per step. At run end, writes `traces/finetune_<ts>.json` in Chrome Trace Event format (same as existing `RunTrace` in `logger.py`) — loadable at `ui.perfetto.dev`.
+
+Annotates: `data_loading`, `forward_pass`, `backward_pass`, `optimizer_step`, `lr_scheduler`, `logging`. GPU utilization and VRAM usage attached as metadata per span.
+
+#### Dashboard changes
+
+- **Run detail panel:** parse `[EVENT]` prefix → render plan card (queries/gaps/complexity) above the log stream; show search round progress inline
+- **New "Training" tab:** polls `/api/finetune/metrics`, renders:
+  - Live loss + accuracy sparklines (step-level)
+  - Current step / total steps progress bar + ETA
+  - Grad norm trend (early warning for training instability)
+  - "Open in Perfetto" link when trace file exists
+- **Backward compatible:** runs without structured events render exactly as today
+
+#### Build order
+
+| Step | What | Effort | Value |
+|------|------|--------|-------|
+| 1 | Event protocol + `agent.py` emitters | Small | Plan visibility immediately |
+| 2 | `DashboardCallback` + `/api/finetune/metrics` | Small | Live training metrics now |
+| 3 | Dashboard plan card + training tab | Medium | Ties it together visually |
+| 4 | `FinetuneTracer` + Perfetto output | Medium | Retrospective compute analysis |
+
+**Status:** NEXT — start with step 2 (fine-tuning callback) since training run is live
+
+---
+
+### 7i: Harness ontology layer — code graph + KG skill → self-aware code review
+
+**Insight:** The harness already has a knowledge graph generator skill (producing D3.js graphs from synthesis output). `code-review-graph` does the structural analogue for code: Tree-sitter AST parsing, blast-radius analysis, community detection, incremental SQLite-backed updates in <2s. Combining them gives us an *ontology layer* — a continuously maintained semantic + structural map of the harness itself.
+
+**What this enables:**
+
+| Capability | How |
+|-----------|-----|
+| Automated code review of harness mutations | Proposer generates a patch; Critic uses blast-radius to scope review to affected functions and callers only — no full-repo read |
+| /plan blast-radius preview | Before executing a plan step, the planner queries the graph: "what does changing `agent.py:synthesize()` actually touch?" |
+| Dead code detection | As the harness evolves, the graph flags unused skills, stale stage hooks, and orphaned utilities |
+| Capability ontology | Nodes = skills/tools/stages, edges = invocation chains. Proposer agent reasons over this graph when proposing mutations |
+| Wiki auto-generation | `code-review-graph wiki` produces a markdown wiki from code communities via Ollama — feeds into harness memory |
+
+**Install (Ollama-compatible extras only):**
+
+```bash
+pip install "code-review-graph[communities,wiki]"
+code-review-graph build    # initial parse of harness repo
+code-review-graph watch    # incremental updates on every save/commit
+code-review-graph install --platform claude-code  # MCP wiring for this session
+```
+
+**Token economics:** blast-radius context averages 8.2x fewer tokens than full-file reads per the published benchmarks. On a 32B critic model this compounds across every Proposer→Critic round.
+
+**When to build:** after Stage 4 self-improvement loop prototype — most valuable once Proposer agents exist and need structured context about what they can mutate and what the downstream impact is.
+
+---
+
+### 7j: Git worktrees as Proposer isolation substrate
+
+**Insight:** Each git worktree is an isolated filesystem path on its own branch. `code-review-graph` builds a separate SQLite graph per directory — so you get **structural graph diffs across branches**, not just file diffs. Worktrees are the execution substrate that makes parallel Proposer evaluation safe without interrupting live harness runs on `main`.
+
+**Mutation testing loop:**
+
+```
+Proposer generates patch
+  → git worktree add ../harness-mut-<id> -b mutation/<id>
+  → apply patch in worktree
+  → code-review-graph build (in worktree)  →  mutation.db
+  → diff main.db vs mutation.db            →  structural change set
+  → run eval suite inside worktree
+  → Critic scores delta
+  → git worktree remove (revert) or git merge --ff-only (promote)
+```
+
+**Why worktrees over branching in place:**
+
+| Problem | Worktree solution |
+|---------|------------------|
+| `server.py` stays live on `main` during mutation tests | Different path — no port conflict, no interrupted runs |
+| Parallel Proposers step on each other's files | Each gets its own worktree — N agents, N isolated workspaces |
+| code-review-graph SQLite graph is per-directory | Each worktree builds its own graph; edge sets are diffable |
+| Annotation/fine-tuning runs can't be interrupted | They live on `main`; mutations happen in sibling directories |
+
+**The graph diff as Critic context:**
+
+```python
+main_graph    = query_graph("harness-engineering/.code-review-graph/graph.db")
+mut_graph     = query_graph("harness-mut-<id>/.code-review-graph/graph.db")
+
+new_edges     = mut_graph.edges - main_graph.edges
+removed_edges = main_graph.edges - mut_graph.edges
+blast_radius  = mut_graph.get_impact_radius(changed_files)
+```
+
+The Critic sees: "Proposer added a call edge from `synthesize()` to `cache_lookup()`, now on the hot path for 6 downstream callers" — structural reasoning a file diff can't surface.
+
+**Watch mode constraint:** one `code-review-graph watch` process per active worktree. At N≤4 parallel Proposers, run one watcher each. Beyond that, trigger `code-review-graph update` on-demand after patch application instead.
+
+**Integrator agent actions:**
+- Revert: `git worktree remove ../harness-mut-<id> --force`
+- Promote: `git -C harness-engineering merge --ff-only mutation/<id> && git worktree prune`
+
+This pattern mirrors what Claude Code's `isolation: "worktree"` does for subagents — proven at the tooling level, now apply it to the self-improvement loop.
+
+**When to build:** alongside Stage 4 Proposer implementation. Worktrees are zero-infrastructure — no new services, just `git worktree add` in the Proposer agent's scaffolding.
 
 ---
 
@@ -496,3 +1016,9 @@ The model is a commodity input. The harness -- how it is constrained, informed, 
 
 **8. The evaluator reveals the producer ceiling; it does not set it.**
 A strong evaluator exposes quality gaps the producer cannot close. When revision regresses or stagnates, the evaluator is working correctly — the producer is the bottleneck. Fix the producer, not the threshold.
+
+**9. Every manual hand-off is a loop that hasn't closed yet.**
+The gap between "autoresearch on synthesis instructions" and "self-improving swarm" is a sequence of manual steps: fine-tune trigger, checkpoint promotion, model registration, baseline update. Each one is a target for automation. Build toward the loop closing continuously — human approval at goal-setting and promotion, autonomous everywhere between.
+
+**10. Telemetry is what separates a critic from a scorer.**
+A scalar score tells you *that* something improved. Typed event traces — plan reasoning, search rounds, wiggum dimension breakdown, compute span timings — tell you *why*. The self-improvement loop stalls without this signal. Structured observability (7h) is prerequisite infrastructure for swarm-level self-improvement, not a dashboard nicety.

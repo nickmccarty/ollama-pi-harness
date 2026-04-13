@@ -35,20 +35,10 @@ import re
 REGISTRY: dict[str, dict] = {
 
     "annotate": {
-        "description": "Inject the 8-move Nanda Annotated Abstract framework into synthesis",
-        "hook":        "pre_synthesis",
-        "prompt": (
-            "Structure your output using the Nanda Annotated Abstract framework. "
-            "For each major finding or concept, address these eight dimensions: "
-            "**Topic** (what this is), **Motivation** (why it matters), "
-            "**Contribution** (what is new or key), **Detail/Nuance** (important specifics or caveats), "
-            "**Evidence/Contribution 2** (supporting findings), **Weaker result** (limitations), "
-            "**Narrow impact** (immediate application), **Broad impact** (wider implications). "
-            "Use the bold header for each dimension on its own line."
-        ),
-        "auto": lambda task, plan: any(
-            w in task.lower() for w in ["paper", "abstract", "literature", "survey", "review"]
-        ),
+        "description": "Standalone: read a paper (local or URL) and output a Nanda Annotated Abstract",
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only — /annotate bypasses the whole pipeline
     },
 
     "kg": {
@@ -90,9 +80,33 @@ REGISTRY: dict[str, dict] = {
 
     "annotated-abstract": {
         "description": "Alias for /annotate",
-        "hook":        "pre_synthesis",
+        "hook":        "standalone",
         "prompt":      None,   # resolved to "annotate" at parse time
         "auto":        None,
+    },
+
+    "wiggum": {
+        "description": "Run the wiggum evaluation+revision loop on the output (combine with /annotate for annotation eval)",
+        "hook":        "modifier",
+        "prompt":      None,
+        "auto":        None,   # explicit only — always opt-in
+    },
+
+    "email": {
+        "description": "Generate personalized .eml drafts from a CSV of contacts + a stated goal",
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only
+    },
+
+    "github": {
+        "description": (
+            "GitHub operations via gh CLI: push, pr create/list/view/merge/review, "
+            "issue create/list/view, repo view/clone, status"
+        ),
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only — always opt-in
     },
 
 }
@@ -223,6 +237,216 @@ def _handle_kg(content: str, task: str, output_path: str, producer_model: str) -
     except Exception as e:
         print(f"  [skill:kg] failed: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Standalone skill handler — /annotate
+# ---------------------------------------------------------------------------
+
+# The 8 rhetorical moves in Nanda's Annotated Abstract framework
+_ANNOTATE_LABELS = [
+    "Topic",
+    "Motivation",
+    "Contribution",
+    "Detail/Nuance",
+    "Evidence/Contribution 2",
+    "Weaker result",
+    "Narrow impact",
+    "Broad impact",
+]
+
+_ANNOTATE_SYSTEM = (
+    "You are a research-paper analyst. Given paper content, produce an annotated abstract "
+    "using the Nanda framework with EXACTLY these eight bold section headers, in this order:\n\n"
+    "**Topic**\n"
+    "**Motivation**\n"
+    "**Contribution**\n"
+    "**Detail / Nuance**\n"
+    "**Evidence / Contribution 2**\n"
+    "**Weaker result**\n"
+    "**Narrow impact**\n"
+    "**Broad impact**\n\n"
+    "Rules:\n"
+    "- Each header must appear on its own line, bold, exactly as shown above.\n"
+    "- After each header write 1-2 sentences of plain prose synthesized from the paper. Be concise.\n"
+    "- Use only information from the provided text. Do not invent results.\n"
+    "- If a section is not clearly evidenced, write a brief inference grounded in what IS present.\n"
+    "- Output NOTHING before **Topic** and NOTHING after the **Broad impact** prose.\n\n"
+    "Section definitions:\n"
+    "  Topic                    — what subject area / problem this paper addresses\n"
+    "  Motivation               — why this problem matters; the gap or need being addressed\n"
+    "  Contribution             — the main new artifact, method, or claim ('We introduce/propose X')\n"
+    "  Detail / Nuance          — key technical specifics of how the contribution works\n"
+    "  Evidence / Contribution 2 — benchmark results or empirical evidence; secondary findings\n"
+    "  Weaker result            — limitations, conditions where the approach underperforms, or open problems\n"
+    "  Narrow impact            — specific, bounded applications or immediate takeaways\n"
+    "  Broad impact             — wider implications for the field or community (e.g. open-source release)\n"
+)
+
+_ANNOTATE_PROMPT = (
+    "Here is the paper content. Produce the annotated abstract.\n\n"
+    "Start your output with:\n"
+    "# Annotated Abstract: <paper title>\n\n"
+    "Then output each of the eight section headers followed immediately by 1-2 sentences.\n\n"
+    "PAPER CONTENT:\n"
+)
+
+
+_ANNOTATE_SECTION_PATTERNS = [
+    ("Abstract",     r"(?i)^#+\s*abstract|^abstract\s*:",          2_000),
+    ("Conclusion",   r"(?i)^#+\s*conclusions?",                     2_500),
+    ("Introduction", r"(?i)^#+\s*\d*\.?\s*introduction",           2_500),
+    ("Results",      r"(?i)^#+\s*\d*\.?\s*(results?|experiments?|evaluation)", 2_500),
+    ("Discussion",   r"(?i)^#+\s*\d*\.?\s*discussion",              1_500),
+]
+_ANNOTATE_CHAR_BUDGET = 10_000
+
+_ANNOTATE_LABELS = [
+    "**Topic**",
+    "**Motivation**",
+    "**Contribution**",
+    "**Detail / Nuance**",
+    "**Evidence / Contribution 2**",
+    "**Weaker result**",
+    "**Narrow impact**",
+    "**Broad impact**",
+]
+
+
+def _extract_sections(text: str) -> str:
+    """
+    Extract key sections (Abstract, Conclusion, Introduction, Results, Discussion)
+    in priority order within a char budget. Falls back to truncated full text if
+    no section headings are found (e.g. arxiv abstract-only pages).
+    """
+    lines = text.splitlines()
+    heading_re = re.compile(r"^#+\s")
+
+    section_starts = []
+    for label, pattern, max_chars in _ANNOTATE_SECTION_PATTERNS:
+        for idx, line in enumerate(lines):
+            if re.match(pattern, line.strip()):
+                section_starts.append((label, idx, max_chars))
+                break
+
+    if not section_starts:
+        # No headings — likely an abstract-only page. Return as-is.
+        return text[:_ANNOTATE_CHAR_BUDGET]
+
+    extracted = {}
+    for label, start_idx, max_chars in section_starts:
+        chunk_lines = []
+        for line in lines[start_idx:]:
+            if chunk_lines and heading_re.match(line):
+                break
+            chunk_lines.append(line)
+        extracted[label] = "\n".join(chunk_lines)[:max_chars]
+
+    priority = ["Abstract", "Conclusion", "Introduction", "Results", "Discussion"]
+    parts = []
+    remaining = _ANNOTATE_CHAR_BUDGET
+    for label in priority:
+        if label not in extracted or remaining <= 0:
+            continue
+        chunk = extracted[label][:remaining]
+        parts.append(f"=== {label} ===\n{chunk}")
+        remaining -= len(chunk)
+
+    if not parts:
+        return text[:_ANNOTATE_CHAR_BUDGET]
+
+    return "\n\n".join(parts)
+
+
+def _is_valid_annotation(text: str) -> bool:
+    """Return True if annotation has a heading and at least 6 of 8 Nanda sections."""
+    if not re.search(r"^#\s", text, re.MULTILINE):
+        return False
+    hits = sum(1 for lbl in _ANNOTATE_LABELS if lbl in text)
+    return hits >= 6
+
+
+def _clean_pdf_text(text: str) -> str:
+    """
+    Clean garbled PDF extraction output.
+
+    MarkItDown's pdfminer backend sometimes produces single-character-per-line
+    output for PDFs with unusual font encoding (common in arXiv papers).
+    This collapses those runs back into readable text before feeding to the model.
+    """
+    lines = text.split("\n")
+    cleaned = []
+    i = 0
+    while i < len(lines):
+        # Detect a run of >=5 single-char (or 2-char) lines — garbled PDF artifact
+        run_start = i
+        while i < len(lines) and len(lines[i].strip()) <= 2:
+            i += 1
+        run_len = i - run_start
+        if run_len >= 5:
+            # Collapse: join non-blank single chars, skip pure whitespace lines
+            joined = "".join(l.strip() for l in lines[run_start:i] if l.strip())
+            if joined:
+                cleaned.append(joined)
+        else:
+            cleaned.extend(lines[run_start:i])
+            if i < len(lines):
+                cleaned.append(lines[i])
+                i += 1
+    return "\n".join(cleaned)
+
+
+def run_annotate_standalone(
+    paper_context: str,
+    producer_model: str,
+    max_retries: int = 3,
+) -> str:
+    """
+    Standalone /annotate handler.
+
+    Reads the paper content (already fetched by agent.py — local PDF or URL),
+    extracts key sections (Abstract, Conclusion, Introduction, Results),
+    and returns a Nanda-annotated abstract with retry logic.
+
+    Bypasses the normal research → synthesize → wiggum pipeline entirely.
+    """
+    import ollama as _ollama_raw
+    import os
+
+    keep_alive = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
+
+    if not paper_context.strip():
+        return ""
+
+    cleaned_context = _clean_pdf_text(paper_context)
+    context = _extract_sections(cleaned_context)
+    print(f"  [annotate] paper context: {len(paper_context)} chars raw → {len(context)} chars extracted")
+
+    # Append /no_think for Qwen3 models — more reliable than the think:false option
+    model_lower = producer_model.lower()
+    system = _ANNOTATE_SYSTEM
+    if "qwen3" in model_lower:
+        system = system + "\n/no_think"
+
+    prompt = system + "\n\n" + _ANNOTATE_PROMPT + context
+
+    for attempt in range(1, max_retries + 1):
+        resp = _ollama_raw.chat(
+            model=producer_model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"num_predict": 2048, "num_ctx": 8192},
+            keep_alive=keep_alive,
+        )
+        result = resp["message"]["content"].strip()
+        # Strip Qwen3 chain-of-thought blocks if present
+        result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+
+        if _is_valid_annotation(result):
+            return result
+
+        print(f"  [annotate] attempt {attempt}/{max_retries} — invalid output, retrying...")
+
+    return result  # return last attempt even if invalid; wiggum will catch it
 
 
 # ---------------------------------------------------------------------------

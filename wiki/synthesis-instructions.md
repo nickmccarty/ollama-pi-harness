@@ -61,9 +61,34 @@ Clustered heavily in "add code examples" space for 10+ consecutive experiments. 
 
 See also: [Experiments](experiments.md) · [Eval Framework](eval-framework.md)
 
+## Autoresearch findings (session 2)
+
+**Best score: 8.420** on T_A + T_B. No per-experiment breakdown retained — session focused on exploring structural variants after session 1 saturated the "add code examples" cluster.
+
+## Autoresearch findings (session 3 — in progress as of 2026-04-11)
+
+**Best score: 8.915** (exp 7, +0.332 delta from session 2 baseline).
+
+Eval tasks switched to **T_D + T_E** (context window management strategies + prompt injection defense).
+Proposer switched to **kimi-k2.5:cloud** — first session with no VRAM swap overhead.
+
+### What works (session 3)
+
+- **Applicability constraints framing**: explicitly requiring "when NOT to use" coverage + input/output boundary descriptions. Kimi found this angle immediately — local Qwen3-Coder had never tried it across 20+ experiments.
+
+### What doesn't work (session 3)
+
+| Exp | Delta | Change | Why likely failed |
+|-----|-------|--------|------------------|
+| 9 | −0.950 | Confidence ratings (High/Med/Low) per library | Hedging reads as shallow, tanks depth score |
+
+### Proposer behavior (session 3)
+
+kimi-k2.5:cloud explores orthogonal directions faster than local Qwen3-Coder. First experiment immediately found a new framing axis (applicability constraints) that hadn't appeared in 20+ prior experiments.
+
 ## Autoresearch loop mechanics
 
 See `autoresearch.py`. Key config:
 - `DELTA_THRESHOLD = 0.1` — minimum improvement to keep a change
-- Eval tasks: T_A + T_B (fast subset; ~25 min/loop)
-- Proposer: Qwen3-Coder:30b at temperature 0.3
+- Eval tasks: T_D + T_E (session 3); T_A + T_B (sessions 1–2)
+- Proposer: `kimi-k2.5:cloud` (preferred — no VRAM swap); fallback: Qwen3-Coder:30b at temperature 0.3

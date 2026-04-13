@@ -19,6 +19,11 @@ import re
 import os
 import subprocess
 import textwrap
+import warnings
+
+# Suppress pydub's ffmpeg-not-found warning — ffmpeg is not used in this pipeline
+warnings.filterwarnings("ignore", message="Couldn't find ffmpeg", category=RuntimeWarning)
+
 import ollama as _ollama_raw
 
 # Keep models hot between calls — avoids 30-60s cold reload between pipeline stages.
@@ -38,7 +43,7 @@ from vision import extract_image_context, detect_image_paths
 from security import check_python_code, check_file_path, check_output_path, scan_for_injection, strip_injection_candidates
 from memory import MemoryStore, assess_novelty
 from planner import make_plan, Plan
-from skills import parse_skills, auto_activate, merge_skills, get_prompt_injections, skills_at_hook, run_post_synthesis
+from skills import parse_skills, auto_activate, merge_skills, get_prompt_injections, skills_at_hook, run_post_synthesis, run_annotate_standalone
 
 try:
     from markitdown import MarkItDown
@@ -688,19 +693,23 @@ def _store_memory(memory: MemoryStore, task: str, task_type: str, trace_data: di
         print(f"  [memory] compression failed (non-fatal): {e}")
 
 
-def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
-    from wiggum import EVALUATOR_MODEL
-    trace = RunTrace(task=task, producer_model=producer_model, evaluator_model=EVALUATOR_MODEL)
+def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluator_model: str = None):
+    from wiggum import EVALUATOR_MODEL, ANNOTATE_EVALUATOR_MODEL
+    _eval_model    = evaluator_model or EVALUATOR_MODEL
+    _ann_eval_model = evaluator_model or ANNOTATE_EVALUATOR_MODEL
+    trace = RunTrace(task=task, producer_model=producer_model, evaluator_model=_eval_model)
     memory = MemoryStore()
 
     try:
         # Skill parsing — extract /skill tokens before anything else touches the task
         task, explicit_skills = parse_skills(task)
-        if explicit_skills:
-            print(f"[skills] explicit: {explicit_skills}")
+        mode = "+".join(explicit_skills) if explicit_skills else "research"
+        print(f"[agent] model={producer_model}  mode={mode}")
 
+        # Standalone skills that produce their own output don't require a .md path
+        _path_optional = {"email", "github"}
         path = extract_path(task)
-        if not path:
+        if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
             trace.finish("ERROR")
             sys.exit(1)
@@ -736,6 +745,95 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL):
                 file_context = (file_context + "\n\n" + url_context).strip()
                 has_url_content = True
                 print(f"  [fetch_url] injecting {len(url_context)} chars of URL content")
+
+        # Standalone skill dispatch — short-circuits the full pipeline when /annotate is explicit.
+        # Must run after file/URL context is assembled so paper_context is available.
+        if "annotate" in explicit_skills:
+            print("\n[skill:annotate] standalone mode — annotating paper abstract...")
+            if not file_context.strip():
+                print("[error] /annotate requires a paper URL or local file path in the task")
+                trace.finish("ERROR")
+                sys.exit(1)
+            with trace.span("synthesize", model=producer_model):
+                content = run_annotate_standalone(file_context, producer_model)
+            content = content.strip()
+            if not content:
+                print("[error] annotation model returned empty output")
+                trace.finish("ERROR")
+                return
+            print("\n" + content + "\n")
+            write_output(content, path, trace)
+
+            # /wiggum modifier — evaluate and iteratively improve the annotation
+            # against the original paper content as ground truth
+            if "wiggum" in explicit_skills:
+                from wiggum import loop_annotate
+                wiggum_result = loop_annotate(
+                    task=task,
+                    output_path=path,
+                    paper_context=file_context,
+                    producer_model=producer_model,
+                    evaluator_model=_ann_eval_model,
+                    parent_trace=trace,
+                )
+                final_status = wiggum_result.get("final", "FAIL")
+                trace.data["wiggum"] = wiggum_result
+            else:
+                final_status = "PASS"
+
+            trace.finish(final_status)
+            from wiggum import detect_task_type
+            _store_memory(memory, task, "annotate", trace.data, content)
+            return
+
+        # /email standalone — generate personalized .eml drafts from a CSV
+        if "email" in explicit_skills:
+            print("\n[skill:email] standalone mode — generating email drafts...")
+            from email_skill import run_email_standalone
+
+            # Parse: first path-like token = CSV, last path-like token = output dir
+            # Everything in between = goal
+            tokens = task.split()
+            csv_token  = next((t for t in tokens if t.endswith(".csv")), "")
+            out_token  = next((t for t in reversed(tokens) if "/" in t or t.endswith("/")), "email_drafts/")
+            goal_tokens = [t for t in tokens if t != csv_token and t != out_token]
+            goal = " ".join(goal_tokens).strip() or task
+
+            if not csv_token:
+                print("[error] /email requires a .csv path in the task string")
+                trace.finish("ERROR")
+                return
+
+            sender_name  = os.environ.get("SENDER_NAME", "")
+            sender_email = os.environ.get("SENDER_EMAIL", "")
+
+            with trace.span("email_drafts", model=producer_model):
+                results = run_email_standalone(
+                    csv_path=csv_token,
+                    goal=goal,
+                    output_dir=out_token,
+                    producer_model=producer_model,
+                    sender_name=sender_name,
+                    sender_email=sender_email,
+                )
+
+            summary = f"Generated {len(results)} email drafts -> {out_token}"
+            print(f"\n{summary}")
+            trace.data["email_drafts"] = len(results)
+            trace.data["email_output_dir"] = out_token
+            trace.finish("PASS")
+            return
+
+        # /github standalone — gh CLI operations (push, pr, issue, repo, status)
+        if "github" in explicit_skills:
+            print("\n[skill:github] standalone mode...")
+            from github_skill import run_github_standalone
+
+            result = run_github_standalone(task, model=producer_model)
+            if path:
+                write_output(result, path, trace)
+            trace.finish("PASS")
+            return
 
         # Memory retrieval — before planning so the planner can use prior context
         with trace.span("memory_retrieval"):
@@ -885,5 +983,36 @@ if __name__ == "__main__":
             producer = args[idx + 1]
             args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
 
-    task_args = [a for a in args if a != "--no-wiggum"]
-    run(" ".join(task_args), use_wiggum=not no_wiggum, producer_model=producer)
+    evaluator = None
+    if "--evaluator" in args:
+        idx = args.index("--evaluator")
+        if idx + 1 < len(args):
+            evaluator = args[idx + 1]
+            args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
+
+    if "--from-env" in args:
+        task = os.environ.get("AGENT_TASK", "").strip()
+        if not task:
+            print("[error] --from-env specified but AGENT_TASK env var is empty")
+            sys.exit(1)
+        # Parse --producer / --evaluator / --no-wiggum out of the task string too,
+        # since the server bundles everything into AGENT_TASK to avoid MSYS2 path conversion.
+        task_parts = task.split()
+        clean_parts = []
+        i = 0
+        while i < len(task_parts):
+            tok = task_parts[i]
+            if tok == "--producer" and i + 1 < len(task_parts):
+                producer = task_parts[i + 1]; i += 2
+            elif tok == "--evaluator" and i + 1 < len(task_parts):
+                evaluator = task_parts[i + 1]; i += 2
+            elif tok == "--no-wiggum":
+                no_wiggum = True; i += 1
+            else:
+                clean_parts.append(tok); i += 1
+        task = " ".join(clean_parts)
+    else:
+        task_args = [a for a in args if a not in ("--no-wiggum", "--from-env")]
+        task = " ".join(task_args)
+
+    run(task, use_wiggum=not no_wiggum, producer_model=producer, evaluator_model=evaluator)

@@ -1107,3 +1107,385 @@ gather_research(task, ...)
 The optimizer now runs at the speed of synthesis + wiggum alone. On a 2-task session (T_D + T_E), exp 1 pays ~800-1200s for research; exps 2-N skip it entirely. A 10-experiment session that previously cost ~100-200 min of research overhead now costs ~10-20 min for the cold run only.
 
 **Also fixed in this session:** `WIGGUM_PANEL=1` now propagated through autoresearch eval subprocess — panel scoring was silently skipped in all prior autoresearch runs.
+
+---
+
+## External Source Review (2026-04-12)
+
+Evaluated four sources for project relevance. Findings added to roadmap Stage 7.
+
+**OCR models with llama.cpp (ggml-org):** `GLM-OCR-GGUF` and `Qwen3-VL-2B` run via `llama-server` and expose a standard `/v1/chat/completions` endpoint. Prompts: `"OCR markdown"`, `"OCR HTML table"`. Direct fix for the MarkItDown-on-scanned-PDF failure mode in `read_file_context()`. Low effort: detect low text yield from MarkItDown, route through OCR, feed clean markdown to chunker unchanged.
+
+**Gemma 4 (Ollama):** 26B MoE variant has 3.8B active params at inference, 256K context, native function calling, configurable thinking mode, different architecture family from Qwen3-Coder. Candidate evaluator for diversity-testing the wiggum rubric. One command to test: `ollama pull gemma4:26b` + swap into `eval_suite.py` for one session and compare scores against Qwen3-Coder baseline.
+
+**Ollama import:** GGUF and Safetensors (full model + LoRA adapter) both supported. `--quantize q4_K_M` at import time. This is the re-import leg of the self-improvement loop once DPO/SFT training closes against `hf_datasets/preference.jsonl`. Qwen2.5 imports cleanly (Llama-compatible).
+
+**Docker Sandboxes:** containerized execution for agent code. Not urgent — current AST blocklist covers the research-task threat model. Revisit if `run_python` is expanded to execute untrusted external code or harness is productionized for other users.
+
+---
+
+## runs.jsonl Analysis + Pipeline Fixes (2026-04-12)
+
+Deep analysis of 123 eval runs in `runs.jsonl` revealed several actionable findings and led to three code fixes.
+
+### Findings
+
+**Dimension bottleneck (confirmed with precision):** specificity (mean r1 = 6.65) is actually weaker than depth (6.97), despite depth receiving 2× the composite weight. The synthesis instruction has been targeting depth language; specificity has more headroom and is undertargeted.
+
+**Wiggum revision regressions:** 12 of 57 multi-round runs scored lower on the final round than round 1 (avg −0.36). All regressions on T_A (context engineering techniques). The evaluator demands code depth; the producer overcorrects and loses completeness or structure. The loop was returning the last round's content unconditionally — even if it was the worst round produced.
+
+**count_check_retry drag:** 31/123 runs (25%) triggered the count retry. Mean r1 with retry = 7.53 vs 7.92 without — a 0.39 score penalty. The penalty came from the first synthesis (using SYNTH_INSTRUCTION) producing the wrong count, then a second synthesis (using SYNTH_INSTRUCTION_COUNT, session-1-era quality) replacing it as the final output.
+
+**Search rounds vs r1:** runs with 5 search rounds scored mean r1 = 8.12 vs 7.85 for 2-round runs. The highest-scoring gap queries in 5-round runs use progressively specific exclusion syntax ("not including X, Y, Z") based on what was already found.
+
+**Novelty scale compression:** in 55 runs with novelty scores, the distribution is {2: 24, 3: 30, 4: 1}. The scale is effectively binary. NOVELTY_THRESHOLD=3 stops on score=2; later search rounds (round 4 mean = 2.83) are borderline and may still contain useful content.
+
+### Fix 1 — Wiggum best-round restoration (`wiggum.py`)
+
+Track `best_score / best_content / best_round` across all rounds. Before returning FAIL at max rounds, restore the best-scoring round's content to disk if a later round scored lower. Also fixed a latent bug: the termination gate used the `MAX_ROUNDS` global constant instead of the `max_rounds` local variable — `WIGGUM_MAX_ROUNDS` env override was correctly scoping the loop but not the early-exit check.
+
+### Fix 2 + 3 — Enumerated task synthesis path (`agent.py`)
+
+`expected_count` now extracted before the first `synthesize()` call. Enumerated tasks route directly to `synthesize_with_count()` — no wasted first synthesis pass.
+
+`synthesize_with_count()` was using `SYNTH_INSTRUCTION_COUNT`, which had never been through the autoresearch optimization loop (session-1-era quality). Ablation run (see below) caught this — ablation outputs scored 6.9 vs 8.8 historical T_D baseline on identical tasks. Root cause: SYNTH_INSTRUCTION_COUNT produces ~1300 byte outputs vs 5000–7000 byte outputs from SYNTH_INSTRUCTION. Fixed: `synthesize_with_count()` now uses `SYNTH_INSTRUCTION` with the count constraint injected as a prefix. `SYNTH_INSTRUCTION_COUNT` is dead code, left in place inside its autoresearch sentinels.
+
+---
+
+## Ablation: Saturation Loop vs Single Search (2026-04-12)
+
+**Goal:** determine whether `compress_knowledge()` in the saturation loop is worth its cost, or whether it introduces lossy compression that hurts synthesis quality. Motivated by the observation that April 7 runs (pre-saturation-loop) produced r1=9.0, while current runs peak at 8.8.
+
+**Design:** same task (T_D — top 3 context window management strategies), `NOVELTY_THRESHOLD=0` to force all rounds, two runs:
+- Run 1: `MAX_SEARCH_ROUNDS=1` (single search, no compress_knowledge)
+- Run 2: `MAX_SEARCH_ROUNDS=5` (up to 5 rounds, compress_knowledge active rounds 2+)
+
+**First run (confounded):** both runs scored r1=6.9 with identical dimension profiles. The confound was Fix 3 above — our code change routed both runs through SYNTH_INSTRUCTION_COUNT, depressing all scores below baseline. The comparison was bad-vs-bad.
+
+**Rerun in progress** after Fix 3. Preliminary signal from the confounded run: both 1-round and 5-round produced identical r1 scores, suggesting extra search rounds may not lift synthesis quality independently of instruction quality. Result pending clean rerun.
+
+---
+
+## MagenticOne Architecture Review (2026-04-12)
+
+Reviewed Microsoft's MagenticOne (AutoGen v0.4.4) — a 5-agent orchestrator (Orchestrator, WebSurfer, FileSurfer, Coder, ComputerTerminal) with an LLM-driven ledger for dynamic routing.
+
+**Key MagenticOne mechanisms:**
+- **Ledger:** 5-key JSON generated per round: `is_request_satisfied`, `is_in_loop`, `is_progress_being_made`, `next_speaker`, `instruction_or_question`. Updated after every agent action.
+- **Stall recovery:** stall counter increments when `is_in_loop=true` or `is_progress_being_made=false`. After 3 stalls: replan (update facts + plan via LLM, broadcast ResetMessage). After 3 replans: terminate and report educated guess.
+- **7 orchestrator prompt templates** — closed-book init, plan generation, synthesize, ledger query, update facts, update plan, final answer.
+
+**Mapping to our harness:**
+
+| MagenticOne | Harness equivalent | Gap |
+|-------------|-------------------|-----|
+| Task Ledger | `planner.py` Plan + `knowledge_state` string | Our state is a flat string; no verified-facts / open-gaps structure |
+| Progress Ledger | `assess_novelty()` + wiggum score delta | No cross-pipeline "is progress being made" signal |
+| Stall → replan | `NOVELTY_THRESHOLD` + `WIGGUM_MAX_ROUNDS` | Stall detection is per-stage, not pipeline-level |
+| `ORCHESTRATOR_CLOSED_BOOK_PROMPT` | **Missing** | We go straight to web search without auditing prior knowledge |
+| Dynamic routing | Fixed pipeline | By design — our fixed pipeline enables autoresearch optimization |
+
+**What we do better:** measurable eval rubric (vs vibes-based `is_satisfied`), autoresearch meta-optimization, novelty-based search saturation, panel evaluation for preference data.
+
+**Highest-value borrow: closed-book prior knowledge pass.** Before `gather_research()`, ask the producer: "What do you already know about {task}? List (1) facts you're confident about, (2) gaps you'd need to look up." Gap list seeds `plan_query()` — searches target actual unknowns rather than re-surfacing what the model already knows. This also addresses the synthesis gap identified earlier: a reflect step between planner and search, without needing a full ReAct loop inside synthesis. Roadmapped under Stage 1.
+
+---
+
+## Traces + runs.jsonl Deep Analysis — Experiment Design (2026-04-12)
+
+### Data
+
+- 211 runs total; 138 scored (wiggum_scores present, not ERROR)
+- 38 Perfetto traces in `traces/` (T_D/T_E and /annotate sessions, Apr 9–11)
+
+---
+
+### Finding 1 — Time allocation (from traces)
+
+| Stage | Mean % wall time |
+|-------|-----------------|
+| synthesize | **53%** |
+| wiggum (all rounds) | 32% |
+|   of which wiggum_revise | ~94% of wiggum time |
+|   of which wiggum_eval | ~6% |
+| gather_research | 15% |
+
+**Implication:** Synthesis is the single biggest cost center. Wiggum eval is essentially free (6% of wiggum); all the wiggum cost is the revision LLM call. Any experiment that cuts revision rounds or cuts synthesis latency has large wall-time leverage. Gather research is surprisingly cheap at 15% — the research cache optimization saves that, but it's not the dominant term.
+
+---
+
+### Finding 2 — Memory hits confound (DEBUNKED)
+
+The earlier apparent finding that memory_hits=0 scored higher (8.35) than memory_hits=4+ (7.53) is a **confounder, not a signal**:
+
+- All zero-hit runs are from 2026-04-07 (pre-memory implementation)
+- April 7 used **glm4:9b evaluator** + pi-qwen 7B producer
+- April 8+ used **Qwen3-Coder:30b evaluator** + pi-qwen-32b producer
+
+The evaluator change from glm4:9b to Qwen3-Coder:30b fully explains the score difference. glm4:9b is more lenient. This is **evaluator calibration drift**, not a memory effect.
+
+**Implication:** We cannot directly compare scores across evaluator changes. We need a calibration run: same tasks + same outputs scored by both evaluators to establish a conversion factor. This also motivates Gemma 4 evaluator testing — need to know where it sits on the scale before interpreting autoresearch results.
+
+---
+
+### Finding 3 — Wiggum lift/regression distribution
+
+| Outcome | Count | % | Magnitude |
+|---------|-------|---|-----------|
+| Lifted (r_final > r1) | 35 | 25% | mean +1.02 |
+| Unchanged | 89 | 64% | — |
+| Regressed (r_final < r1) | 14 | 10% | mean −0.38 |
+
+Within enumerated tasks specifically: 17 lifts, 10 regressions, 13 unchanged (of 40 multi-round runs).
+
+Best-round restoration fix (2026-04-12) addresses the 10% regression case — should recover those 14 runs to their best-seen score.
+
+---
+
+### Finding 4 — Dimension weakness profile (104 scored runs)
+
+| Dimension | Mean score | Weight |
+|-----------|-----------|--------|
+| relevance | 8.88 | 0.20 |
+| structure | 8.54 | 0.10 |
+| completeness | 7.19 | 0.25 |
+| depth | 6.87 | 0.30 |
+| **specificity** | **6.61** | **0.15** |
+
+Specificity is weakest, depth second. Since depth has the highest weight (0.30), it is the highest-leverage target. Specificity is weakest but lower weight.
+
+Autoresearch session 3's best result (exp 7, "when NOT to use" + input boundaries) targeted applicability — which maps to specificity and completeness. That was the right direction.
+
+**Implication for autoresearch session 4:** prime the PROPOSE_PROMPT explicitly for depth improvements.
+
+---
+
+### Finding 5 — Task type performance + pass rates
+
+| Task type | n | mean_r1 | Pass rate |
+|-----------|---|---------|----------|
+| unknown (Apr 7, glm4:9b) | 17 | 8.76 | 100% |
+| best_practices | 42 | 7.81 | 64% |
+| enumerated | 66 | 7.56 | 52% |
+| **research (/annotate)** | **13** | **6.91** | **0%** |
+
+Research-type (/annotate arxiv PDFs) has 0% pass rate and mean r1 = 6.91. These runs never pass wiggum. Scores are stuck 6.2–7.8 with no trajectory to 8+. Root cause candidates:
+1. Wiggum criteria designed for synthesis tasks, not annotation tasks
+2. Output format mismatch — annotation vs. structured research synthesis
+3. chunker.py not extracting enough from PDFs (Section 5 truncation issue from session 3 applies here too)
+
+---
+
+### Finding 6 — Search rounds vs r1
+
+| search_rounds | n | mean_r1 |
+|--------------|---|---------|
+| 0 (cache hit) | 114 | 7.72 |
+| 2 | 12 | 7.77 |
+| 3 | 4 | 7.20 |
+| 4 | 2 | 7.55 |
+| 5 | 6 | **8.07** |
+
+The 5-round runs score highest (8.07) but n=6 is too small for confidence. The preliminary ablation finding (1-round = 5-round) was confounded by SYNTH_INSTRUCTION_COUNT; a clean rerun is needed.
+
+---
+
+### Proposed Experiments
+
+**EXP-A: Evaluator calibration (Gemma 4)**
+- `ollama pull gemma4:26b`
+- Run T_D + T_E with `WIGGUM_MODEL=gemma4:26b` — single run each, compare to Qwen3-Coder scores
+- Goal: establish score conversion factor before relying on cross-evaluator comparisons
+- Cost: 1–2 hours
+
+**EXP-B: Clean saturation loop ablation (1 vs 5 rounds)**
+- Now that SYNTH_INSTRUCTION_COUNT is fixed, this is a clean comparison
+- `MAX_SEARCH_ROUNDS=1` vs `MAX_SEARCH_ROUNDS=5` on T_D + T_E
+- Confirm or deny: does 5-round search lift r1 vs 1-round?
+- Cost: ~2 hours (one research cache warmup, then two evals)
+
+**EXP-C: Annotate task wiggum audit**
+- Run `/annotate` with `WIGGUM_MAX_ROUNDS=1`, capture `wiggum_eval_log`
+- Inspect: what specific issues does wiggum identify on annotation output?
+- If criteria mismatch: design an annotation-specific eval rubric or lower PASS_THRESHOLD for annotate tasks
+- Cost: 1 run, 30 min
+
+**EXP-D: Autoresearch session 4 — depth-targeted**
+- Prime PROPOSE_PROMPT with depth (weight 0.30) as explicit target dimension
+- Add "depth" to Unexplored Angles list; add "completeness" as secondary
+- Resume with `python autoresearch.py --tasks T_D,T_E --proposer kimi-k2.5:cloud`
+- Goal: beat 8.915 (current best) by improving depth dimension specifically
+- Cost: 4–8 hours (autoresearch loop)
+
+**EXP-E: Closed-book prior knowledge pass (roadmap Stage 1)**
+- Implement: before `gather_research()`, call producer with task + "what do you already know / what gaps exist?"
+- Gap list replaces or augments `plan_query()` output
+- Measure r1 delta on T_D + T_E (3 runs each condition, compare means)
+- This is the MagenticOne borrow — highest expected ROI from new harness feature
+- Cost: 1–2 days implementation + eval
+
+**EXP-F: Synthesis latency reduction**
+- Traces show synthesize = 53% of wall time; mean 711s per run
+- `num_predict=8192` was added (session 3), but mean synth time is still high
+- Investigate: is the bottleneck eval_ms (generation) or prompt_ms (prefill)?
+- From trace args: check `prompt_ms` vs `eval_ms` on `llm:synth` events
+- If prefill-dominated: context compression before synthesis (reduce total_search_chars)
+- Cost: analysis only (read existing traces)
+
+**Priority order: EXP-B (clean ablation, unblocks baseline confidence) → EXP-C (quick annotate audit) → EXP-D (session 4, highest score leverage) → EXP-A (evaluator calibration) → EXP-E (closed-book pass)**
+
+---
+
+## Session 5 — Annotation Pipeline Overhaul + Fine-Tuning Initiation (2026-04-13)
+
+### Root cause: `_clean_pdf_text` infinite loop
+
+All annotation hangs traced to a single bug in `skills.py`. The `else` branch of `_clean_pdf_text` extended `cleaned` with short-run lines but never advanced `i` past the current non-short line. Any line with >2 characters caused an infinite loop. Every model tried — Qwen3-Coder, kimi-k2.5, pi-qwen-32b — appeared to hang; they were all waiting on stuck preprocessing. Fixed by advancing `i` in the else branch.
+
+**Lesson:** Before suspecting model behavior, audit preprocessing. The bug predated all model testing in this session and masked every subsequent experiment.
+
+---
+
+### Annotation format: sentence-labeling → generative
+
+The prior `/annotate` implementation labeled existing abstract sentences (`[Topic] We introduce...`). This broke on abstracts that don't contain explicit topic or motivation sentences — e.g., Mistral 7B's abstract never states a topic directly, so those sections simply didn't appear in the output.
+
+Switched to fully generative format: model synthesizes 1-2 prose sentences per section from the full paper content, matching the reference Nanda Annotated Abstract framework. All 8 section headers are bold, on their own lines, with generated prose beneath.
+
+**Changes:**
+- `_ANNOTATE_SYSTEM` and `_ANNOTATE_PROMPT` rewritten for generative instruction
+- `_ANNOTATE_LABELS` updated to match exact bold header format (`**Topic**`, etc.)
+- `_is_valid_annotation()` now requires 6/8 sections present (was checking for bracketed labels)
+- `_extract_sections()` added: extracts Abstract, Conclusion, Introduction, Results, Discussion in priority order within a 10k char budget
+- `run_annotate_standalone()` updated: retry loop (3×), `/no_think` injected for Qwen3, `<think>` blocks stripped, `num_ctx=8192`
+
+---
+
+### Wiggum annotation eval: tightened threshold + rewritten rubric
+
+- `PASS_THRESHOLD` raised from 8.0 to 9.0 for annotation path
+- `EVAL_PROMPT_ANNOTATE` rewritten for generative format: `label_accuracy` dimension replaced with `section_accuracy`, score guide explicitly penalizes sections that merely restate abstract text rather than synthesizing
+- `REVISE_PROMPT_ANNOTATE` rewritten to match
+- `abbrev` dict updated: `section_accuracy → sec`
+
+**Finding from pre-fix evaluation:** evaluator scored a known-bad annotation 9.3/10 and passed it. Root cause: the annotation had the right structure but section content was direct quote from abstract, not synthesis. The new rubric explicitly distinguishes "recitation" (scores 1-4) from "synthesis" (scores 7-10).
+
+---
+
+### Dashboard: UTC→local timestamps + SSE deduplication
+
+**UTC timestamps:** `dashboard.py` was displaying UTC throughout — run cards, heatmap hour buckets, table columns. Added `fmt_ts()` Python helper using `datetime.astimezone()` for server-side conversion; updated JS `fmtTs` to use `new Date(iso)` with local time components.
+
+**SSE duplicates:** Late-joining SSE clients received both the backlog replay (from `log_lines`) and queued items (from `log_queue`), producing duplicate log lines in run cards. Fixed by removing `log_queue` entirely and replacing with `threading.Event + per-client read index` pattern. Each client tracks its own position in `log_lines`; no message is ever delivered twice.
+
+---
+
+### Fine-tuning pipeline: `finetune_annotate.py`
+
+Initiated a QLoRA fine-tuning experiment to train a dedicated Nanda annotation model.
+
+**Training data:** 142 rows in `annotated-abstracts.csv` (human-curated Nanda annotations). 21 rows have non-arxiv filenames (CVPR PDFs, social media artifacts) and are skipped. 121 valid training examples built by fetching arxiv title + abstract via the arxiv API and joining with the CSV annotations.
+
+**Dataset format:** instruction pairs — `(abstract → 8-section generative annotation)` — formatted as Qwen2.5-Instruct chat templates. 90/10 train/eval split: 108 train, 13 eval.
+
+**Model:** `Qwen/Qwen2.5-7B-Instruct` with LoRA (r=16, alpha=32, target: q/k/v/o/gate/up/down projectors). No quantization — machine has 63.8GB dedicated VRAM (NVIDIA RTX 5000 Ada Generation), so full bf16 is used. 3 epochs, batch size 2, gradient accumulation 4, cosine LR schedule.
+
+**Infrastructure issues encountered:**
+- `bitsandbytes` on Windows caused silent CPU offload when used with `device_map="auto"` — model loaded but never reached GPU, hanging at 0% indefinitely
+- `device_map="cuda:0"` also failed to place model on GPU correctly
+- Root fix: explicit `.to("cuda")` after `from_pretrained()`, removed quantization entirely
+- `torch_dtype` → `dtype` API change in newer transformers (then reverted; `torch_dtype` is still the correct param for `from_pretrained`)
+- `max_seq_length` removed from both `SFTConfig` and `SFTTrainer` in trl ≥ 0.13; now set via `tokenizer.model_max_length`
+- `warmup_ratio` deprecated in trl v5.2; switched to explicit `warmup_steps=4`
+- Windows CP1252 encoding: `python -X utf8 finetune_annotate.py` required for trl's Jinja template loading
+
+**TensorBoard:** `report_to=["tensorboard"]` enabled; `logging_steps=1` for step-level loss tracking. View at `http://localhost:6006` during training.
+
+**Status:** training in progress as of 2026-04-13. 42 effective steps (batch_size=2), ~20-30 min estimated.
+
+---
+
+### Annotation corpus expansion: `run_annotations.py`
+
+Rewrote `run_annotations.py` to parse arxiv markdown files and produce Nanda annotation CSVs.
+
+Two markdown corpora identified:
+- `arxiv_agentic_papers.md` — 300 papers (agentic / LLM / autonomous systems)
+- `arxiv_agentic_harness_engineering_papers.md` — 300 papers (software engineering focus)
+
+Parser extracts: arxiv_id (from abstract URL), title, abstract text, published date, pdf_url. Annotation runner calls `run_annotate_standalone()` directly per paper (no agent.py subprocess), parses 8-section output into CSV columns matching `annotated-abstracts.csv`, appends to output CSV with `--skip-existing` resume support.
+
+Output files: `arxiv_agentic_papers_annotated.csv`, `arxiv_agentic_harness_engineering_papers_annotated.csv`.
+
+**Status:** annotation loop running on both files (600 papers) as of 2026-04-13. These will serve as expanded training data for fine-tuning round 2 once the initial Qwen2.5-7B run completes.
+
+---
+
+### Fine-tuning dataset builder: `build_finetune_from_annotations.py`
+
+New script that converts annotated CSVs into fine-tuning JSONL, merging all sources in one pass:
+
+1. Seeds from existing `finetune_dataset.jsonl` (121 gold examples with arxiv-fetched abstracts)
+2. Parses all `arxiv_*.md` markdown files to extract abstracts inline — no API calls needed
+3. Reads all `arxiv_*_annotated.csv` files, joins on arxiv_id, deduplicates, validates (≥6 sections)
+4. Outputs `finetune_dataset_v2.jsonl`
+
+First run: 167 examples (121 gold + 46 from 47-row partial annotation run). Will grow to 700+ once full annotation run completes. Script is idempotent — re-run after each annotation batch to accumulate examples.
+
+Training on v2 dataset: `python finetune_annotate.py --dataset finetune_dataset_v2.jsonl`
+
+---
+
+### Dashboard: live fine-tuning metrics
+
+Added `DashboardCallback` (trl `TrainerCallback`) to `finetune_annotate.py`:
+- Emits `{"type":"metric", step, epoch, loss, grad_norm, learning_rate, mean_token_accuracy, elapsed_s, eta_s}` per step to `finetune_metrics.jsonl`
+- Also prints `[EVENT]<json>` to stdout — picked up by SSE stream when launched via `server.py`
+- ETA computed from rolling average of last 10 step durations
+
+Server: `GET /api/finetune/metrics` endpoint reads `finetune_metrics.jsonl` and returns JSON array.
+
+Dashboard: new "Fine-tuning — live metrics" section polls every 8s; renders 6 KPI cards (status, loss, token accuracy, grad norm, elapsed, ETA) and 4 sparkline charts (loss, token accuracy, grad norm, learning rate schedule). No page reload required.
+
+---
+
+### /email standalone skill
+
+Built `email_skill.py` — generates personalized `.eml` draft per speaker from a CSV of contacts + stated goal.
+
+Pipeline per row: load slide markdown (pre-converted or fetch via MarkItDown) → generate subject (64 tokens) → generate body (512 tokens) → build `.eml` via `email.mime` with quoted-printable encoding (human-readable file) → save to output directory.
+
+Handles: skip rows with no valid email address, log rows with multiple addresses and use first. `sender_company` and `platform_url` parameters injected into both subject and body prompts for brand-consistent outreach.
+
+CSV tested: `geo-week-talks.csv` (160 rows, 65 with email addresses). Model: `llama3.2:3b` — appropriate for short-form writing, fast, resident in VRAM. Output: `email_drafts/` directory with individual `.eml` files + `manifest.json`.
+
+---
+
+### Session 5 insight: toward a self-improving research intelligence
+
+A crystallising observation from this session's architecture discussions:
+
+The system as built is not just a research harness — it is the scaffolding for a self-improving research intelligence. The compounding cycle:
+
+```
+Agent runs → preference data → fine-tune → smarter producer
+     ↑                                            ↓
+Memory retrieves                          Better annotations
+prior observations                        Better curation taste
+     ↑                                            ↓
+TinyTroupe panel                         Higher quality training
+filters weak papers                       data next round
+     ↑                                            ↓
+Wiggum scores                            Stronger evaluator signal
+improve over time                        (reward model from reward.jsonl)
+```
+
+Each component feeds the next. Memory means nothing useful is forgotten. Persona curation means the system becomes more selective over time. Fine-tuned annotators produce better training signal for the next round. Wiggum reward models train on their own scoring history and become better judges.
+
+**What makes this different from prompting loops:** model weights actually change (LoRA fine-tuning), memory persists across sessions, and the reward model improves alongside the producer. The loop tightens rather than degrading.
+
+**The taste layer is the critical differentiator.** Most self-improvement loops optimize a scalar metric. TinyTroupe persona curation introduces *diverse* taste — a pragmatic engineer, an academic rigorist, a synthesis thinker, a contrarian. Research standards get encoded into the dataset composition itself, not just into the output format. The model learns *which papers are worth annotating carefully*, not just how to format 8 sections.
+
+**The honest constraint:** the evaluator's blind spots compound. If wiggum has a systematic bias, the whole loop optimizes toward it. Rotating evaluators (Gemma 4 as second evaluator) and diverse persona panels break monoculture before it compounds. Diversity in judgment is a first-class architectural concern, not an afterthought.
+
+**Roadmap implication:** vLLM (7e) closes the training loop continuously; TinyTroupe persona curation (planned, Stage 6 extension) operationalizes taste as a selection function; structured event protocol (7h) gives the critic agent the telemetry it needs to reason about *why* something worked rather than just *that* it did. These three together are what separate a self-improving system from a self-reinforcing one.

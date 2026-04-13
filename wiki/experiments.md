@@ -109,3 +109,26 @@ Start session 3 (resume):
 ```bash
 python autoresearch.py --tasks T_D,T_E --proposer kimi-k2.5:cloud
 ```
+
+## Code fixes applied 2026-04-12
+
+Based on deep analysis of 123 eval runs in `runs.jsonl`:
+
+**Fix 1 — Wiggum best-round restoration (`wiggum.py`)**
+12/57 multi-round runs regressed: final score < r1. Wiggum was returning the last round's content regardless of score trajectory. Fixed: track `best_score/best_content/best_round` across all rounds; restore best content to disk before returning FAIL if a later round scored lower. Also fixed termination gate from `MAX_ROUNDS` constant to `max_rounds` variable — env override `WIGGUM_MAX_ROUNDS` now works correctly at the exit gate.
+
+**Fix 2 — Enumerated task synthesis path (`agent.py`)**
+`expected_count` now extracted before first `synthesize()` call. Enumerated tasks route directly to `synthesize_with_count()` — no wasted first synthesis + count retry. Safety-net retry path retained for cases where count compliance still fails.
+
+**Fix 3 — SYNTH_INSTRUCTION_COUNT eliminated (`agent.py`)**
+Ablation run (Priority 5) revealed `synthesize_with_count()` was using `SYNTH_INSTRUCTION_COUNT`, which had not been through autoresearch optimization (session-1-era quality). Scores dropped from 8.8 → 6.9 r1 for T_D. Fixed: `synthesize_with_count()` now uses `SYNTH_INSTRUCTION` (session-3-optimized) with the count constraint injected as prefix. `SYNTH_INSTRUCTION_COUNT` is now dead code inside its autoresearch sentinels.
+
+## Ablation — saturation loop vs single search (2026-04-12, Priority 5)
+
+**Design:** same task (T_D — top 3 context window management strategies), different search depths. `NOVELTY_THRESHOLD=0` forces all rounds to run.
+
+First run confounded by Fix 3 above — both runs used the inferior SYNTH_INSTRUCTION_COUNT, depressing scores. Rerun in progress after fix.
+
+**Preliminary finding (pre-fix):** 1-round and 5-round both scored r1=6.9 with identical dimension profiles — extra search rounds did not lift synthesis quality. Requires clean rerun to confirm.
+
+**Implication if confirmed:** the saturation loop's value may be in redundancy/robustness rather than synthesis quality lift. The closed-book prior knowledge pass (see roadmap) would be a more targeted improvement.

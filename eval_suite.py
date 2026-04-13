@@ -24,6 +24,8 @@ import re
 import sys
 import subprocess
 
+KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge_base")
+
 # ---------------------------------------------------------------------------
 # Criterion factories
 # ---------------------------------------------------------------------------
@@ -115,6 +117,7 @@ SUITE = [
         "desc": "top 5, context engineering",
         "task": f"Search for the top 5 context engineering techniques used in production LLM agents and save to {BASE}/eval-context-engineering.md",
         "output": f"{BASE}/eval-context-engineering.md",
+        "kb_file": os.path.join(KB_DIR, "T_A.md"),
         "criteria": [
             min_bytes(800),
             min_lines(15),
@@ -129,6 +132,7 @@ SUITE = [
         "desc": "open-ended, cost management",
         "task": f"Search for best practices for cost envelope management in production AI agents and save to {BASE}/eval-cost-management.md",
         "output": f"{BASE}/eval-cost-management.md",
+        "kb_file": os.path.join(KB_DIR, "T_B.md"),
         "criteria": [
             min_bytes(800),
             min_lines(15),
@@ -143,6 +147,7 @@ SUITE = [
         "desc": "top 3, agent failure modes",
         "task": f"Search for the 3 most common failure modes in multi-agent AI systems and save to {BASE}/eval-agent-failure-modes.md",
         "output": f"{BASE}/eval-agent-failure-modes.md",
+        "kb_file": os.path.join(KB_DIR, "T_C.md"),
         "criteria": [
             min_bytes(600),
             min_lines(10),
@@ -157,6 +162,7 @@ SUITE = [
         "desc": "top 3, context window management",
         "task": f"Search for the top 3 context window management strategies for production LLM applications and save to {BASE}/eval-context-window.md",
         "output": f"{BASE}/eval-context-window.md",
+        "kb_file": os.path.join(KB_DIR, "T_D.md"),
         "criteria": [
             min_bytes(600),
             min_lines(10),
@@ -171,6 +177,7 @@ SUITE = [
         "desc": "open-ended, prompt injection defense",
         "task": f"Search for best practices for prompt injection defense in production AI systems and save to {BASE}/eval-prompt-injection.md",
         "output": f"{BASE}/eval-prompt-injection.md",
+        "kb_file": os.path.join(KB_DIR, "T_E.md"),
         "criteria": [
             min_bytes(800),
             min_lines(15),
@@ -230,7 +237,15 @@ def run_task(task_def: dict, use_wiggum: bool = True) -> bool:
     cmd = [sys.executable, "agent.py"]
     if not use_wiggum:
         cmd.append("--no-wiggum")
-    cmd.append(task_def["task"])
+
+    task_str = task_def["task"]
+    kb = task_def.get("kb_file", "")
+    is_enumerated = any(c.__name__.startswith("exact_sections") for c in task_def.get("criteria", []))
+    if kb and os.path.exists(kb) and is_enumerated:
+        task_str += f" read {kb}"
+        print(f"  [kb ] {task_def['id']}: injecting {os.path.basename(kb)}")
+
+    cmd.append(task_str)
 
     print(f"  [run] {task_def['id']}: {task_def['desc']}")
     result = subprocess.run(cmd, capture_output=False)

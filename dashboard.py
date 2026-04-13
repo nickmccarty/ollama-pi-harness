@@ -12,7 +12,20 @@ import os
 import sys
 import webbrowser
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def fmt_ts(ts_str):
+    """Convert a UTC ISO timestamp string to local time display string."""
+    if not ts_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ts_str[:19].replace("T", " ")
 
 RUNS_PATH = os.path.join(os.path.dirname(__file__), "runs.jsonl")
 OUT_PATH  = os.path.join(os.path.dirname(__file__), "dashboard.html")
@@ -95,9 +108,9 @@ def build_payload(runs):
     avg_duration = round(sum(r.get("run_duration_s", 0) or 0 for r in runs) / total, 1) if total else 0
 
     # --- Score trend (chronological, only runs with a wiggum score) ---
-    scored_runs = [(r["timestamp"][:19], first_wiggum_score(r), r.get("producer_model", ""))
+    scored_runs = [(r["timestamp"], first_wiggum_score(r), r.get("producer_model", ""))
                    for r in runs if first_wiggum_score(r) is not None]
-    score_labels  = [x[0].replace("T", " ") for x in scored_runs]
+    score_labels  = [fmt_ts(x[0]) for x in scored_runs]
     score_values  = [x[1] for x in scored_runs]
     score_models  = [x[2] for x in scored_runs]
 
@@ -140,7 +153,7 @@ def build_payload(runs):
                 for k in dim_keys]
 
     # --- Run duration trend ---
-    dur_labels = [(r.get("timestamp") or "")[:19].replace("T", " ") for r in runs if r.get("run_duration_s")]
+    dur_labels = [fmt_ts(r.get("timestamp")) for r in runs if r.get("run_duration_s")]
     dur_values = [round(r["run_duration_s"] / 60, 1) for r in runs if r.get("run_duration_s")]
 
     # --- Model breakdown ---
@@ -171,7 +184,7 @@ def build_payload(runs):
         total_in_tok  = sum(v.get("input",  0) for v in tbs.values())
         total_ms      = sum(v.get("total_ms", 0) for v in tbs.values())
         if total_ms > 0:
-            run_tps_labels.append((r.get("timestamp") or "")[:19].replace("T", " "))
+            run_tps_labels.append(fmt_ts(r.get("timestamp")))
             run_tps_out.append(round(total_out_tok / (total_ms / 1000), 1))
             run_tps_in.append(round(total_in_tok  / (total_ms / 1000), 1))
 
@@ -181,10 +194,13 @@ def build_payload(runs):
     hour_counts = defaultdict(int)
     for r in runs:
         ts = r.get("timestamp") or ""
-        if len(ts) >= 13:
+        if ts:
             try:
-                hour_counts[int(ts[11:13])] += 1
-            except ValueError:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                hour_counts[dt.astimezone().hour] += 1
+            except (ValueError, AttributeError):
                 pass
     hour_labels = [f"{h:02d}:00" for h in range(24)]
     hour_values = [hour_counts[h] for h in range(24)]
@@ -192,9 +208,32 @@ def build_payload(runs):
     # --- Recent runs table (last 30) ---
     recent = []
     for r in runs[-30:]:
+        # Wiggum dims — first round's dimension scores
+        dims_raw = r.get("wiggum_dims")
+        dims = None
+        if isinstance(dims_raw, list) and dims_raw and isinstance(dims_raw[0], dict):
+            dims = dims_raw[0]
+        elif isinstance(dims_raw, dict):
+            dims = dims_raw
+
+        # Eval log — first round's issues + feedback excerpt
+        eval_log = r.get("wiggum_eval_log")
+        first_issues  = []
+        first_feedback = ""
+        score_trajectory = []
+        if isinstance(eval_log, list) and eval_log:
+            first_round = eval_log[0]
+            first_issues  = first_round.get("issues") or []
+            fb = first_round.get("feedback") or ""
+            first_feedback = fb[:300] + ("…" if len(fb) > 300 else "")
+        # Score trajectory across all wiggum rounds
+        scores = r.get("wiggum_scores") or []
+        score_trajectory = [s for s in scores if s is not None]
+
         recent.append({
-            "ts":       (r.get("timestamp") or "")[:19].replace("T", " "),
+            "ts":       fmt_ts(r.get("timestamp")),
             "task":     (r.get("task") or "")[:70],
+            "task_full": (r.get("task") or ""),
             "model":    r.get("producer_model") or "",
             "type":     r.get("task_type") or "?",
             "score":    first_wiggum_score(r),
@@ -204,6 +243,16 @@ def build_payload(runs):
             "tokens_out": r.get("output_tokens") or 0,
             "final":    r.get("final") or "?",
             "searches": r.get("search_rounds") or len(r.get("tool_calls") or []),
+            # Detail-row fields
+            "memory_hits":       r.get("memory_hits") or 0,
+            "dims":              dims,
+            "issues":            first_issues,
+            "feedback":          first_feedback,
+            "score_trajectory":  score_trajectory,
+            "count_check_retry": bool(r.get("count_check_retry")),
+            "novelty_scores":    r.get("novelty_scores") or [],
+            "output_bytes":      r.get("output_bytes") or 0,
+            "output_lines":      r.get("output_lines") or 0,
         })
     recent.reverse()
 
@@ -283,7 +332,7 @@ def build_cost_data(runs: list[dict]) -> dict:
     cumulative_electric   = []
     cum_in = cum_out = cum_s = 0.0
     for r in runs:
-        ts = (r.get("timestamp") or "")[:19].replace("T", " ")
+        ts = fmt_ts(r.get("timestamp"))
         cum_in  += r.get("input_tokens",  0) or 0
         cum_out += r.get("output_tokens", 0) or 0
         cum_s   += r.get("run_duration_s", 0) or 0
@@ -425,7 +474,96 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   td { padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(255,255,255,0.03); }
+  tr.run-row:hover td { background: rgba(255,255,255,0.03); }
+
+  /* Chevron expand */
+  .chevron-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    padding: 2px 4px; font-size: 11px; line-height: 1;
+    transition: transform 0.18s, color 0.18s;
+  }
+  .chevron-btn:hover { color: var(--text); }
+  .chevron-btn.open { transform: rotate(90deg); color: var(--blue); }
+
+  /* RLHF feedback panel */
+  .btn-thumb {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 6px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn-thumb:hover { background: var(--bg2); }
+  .btn-thumb-active { background: var(--accent) !important; border-color: var(--accent) !important; }
+
+  /* Detail row */
+  .detail-row td { padding: 0; border-bottom: 1px solid var(--border); white-space: normal; }
+  .detail-row.hidden { display: none; }
+  .detail-inner {
+    /* Stick to the left edge of the scroll container so cards stay in the viewport
+       even when the table is wider than the screen */
+    position: sticky;
+    left: 0;
+    width: calc(100vw - 48px);   /* full viewport minus body side padding */
+    max-width: 1100px;
+    box-sizing: border-box;
+    padding: 14px 16px 18px 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+  }
+  .detail-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-size: 12px;
+    min-width: 0;          /* prevent grid blowout */
+    overflow: hidden;
+  }
+  .detail-card-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.07em; color: var(--muted); margin-bottom: 8px;
+  }
+  /* Dim bars */
+  .dim-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .dim-label {
+    width: 82px; color: var(--muted); font-size: 10px; flex-shrink: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .dim-bar-wrap { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; min-width: 0; }
+  .dim-bar-fill { height: 100%; border-radius: 3px; }
+  .dim-value { width: 18px; text-align: right; color: var(--text); font-size: 10px; flex-shrink: 0; }
+  /* Score pills */
+  .score-pill {
+    display: inline-block; padding: 1px 6px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; margin: 2px 2px 2px 0;
+    background: rgba(79,142,247,.15); color: var(--blue);
+  }
+  /* Issues list */
+  .issues-scroll {
+    max-height: 130px; overflow-y: auto;
+  }
+  .issue-item {
+    color: var(--muted); font-size: 11px; line-height: 1.45;
+    padding: 3px 0 3px 12px; border-bottom: 1px solid rgba(48,54,61,.6);
+    word-break: break-word; white-space: normal;
+    position: relative;
+  }
+  .issue-item:last-child { border-bottom: none; }
+  .issue-item::before {
+    content: "·"; position: absolute; left: 0;
+    color: var(--orange); font-size: 14px; line-height: 1.1;
+  }
+  /* Feedback text */
+  .feedback-text {
+    color: var(--muted); font-size: 11px; line-height: 1.5;
+    white-space: normal; word-break: break-word;
+    max-height: 130px; overflow-y: auto;
+  }
+  /* Task full text */
+  .task-full {
+    color: var(--text); font-size: 11px; line-height: 1.5;
+    white-space: normal; word-break: break-word;
+  }
 
   .badge {
     display: inline-block; padding: 2px 7px; border-radius: 4px;
@@ -559,6 +697,40 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="card-title">Cumulative cost over time — cheapest cloud tier vs local electricity</div>
     <div class="chart-wrap" style="height:200px">
       <canvas id="cumulCostChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<h2 class="section-heading">Fine-tuning — live metrics</h2>
+
+<div class="kpi-grid" id="ft-kpi-grid"></div>
+
+<div class="chart-grid col-2">
+  <div class="card">
+    <div class="card-title">Loss — per step</div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="ftLossChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Token accuracy — per step</div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="ftAccChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="chart-grid col-2">
+  <div class="card">
+    <div class="card-title">Gradient norm — per step</div>
+    <div class="chart-wrap" style="height:180px">
+      <canvas id="ftGradChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Learning rate schedule</div>
+    <div class="chart-wrap" style="height:180px">
+      <canvas id="ftLrChart"></canvas>
     </div>
   </div>
 </div>
@@ -898,34 +1070,247 @@ new Chart($('tpsTrendChart'), {
 });
 
 // ---------------------------------------------------------------------------
-// Recent runs table
+// Recent runs table — with expandable detail rows
 // ---------------------------------------------------------------------------
 const tbl = $('runsTable');
-const cols = ['Timestamp','Task','Model','Type','Score','Rounds','Duration','In tok','Out tok','Searches','Result'];
+const cols = ['','Timestamp','Task','Model','Type','Score','Rounds','Duration','In tok','Out tok','Searches','Result'];
 tbl.innerHTML = `<tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>`;
 
-DATA.recent_runs.forEach(r => {
+const DIM_COLORS = {
+  relevance:    '#4f8ef7',
+  completeness: '#3fb950',
+  depth:        '#a78bfa',
+  specificity:  '#fb923c',
+  structure:    '#f472b6',
+};
+
+function buildDetailInner(r) {
+  const cards = [];
+
+  // Card: Task (full text)
+  cards.push(`
+    <div class="detail-card" style="grid-column: 1 / -1">
+      <div class="detail-card-title">Task</div>
+      <div class="task-full">${(r.task_full || r.task).replace(/</g,'&lt;')}</div>
+    </div>`);
+
+  // Card: Memory
+  const memColor = r.memory_hits > 0 ? 'var(--blue)' : 'var(--muted)';
+  cards.push(`
+    <div class="detail-card">
+      <div class="detail-card-title">Memory</div>
+      <div style="font-size:22px;font-weight:700;color:${memColor};line-height:1.1">${r.memory_hits}</div>
+      <div style="color:var(--muted);font-size:11px;margin-top:4px">${r.memory_hits === 1 ? 'prior observation retrieved' : r.memory_hits > 1 ? 'prior observations retrieved' : 'no prior context'}</div>
+    </div>`);
+
+  // Card: Score trajectory + flags
+  const trajectory = (r.score_trajectory || []);
+  const pills = trajectory.length
+    ? trajectory.map((s,i) => {
+        const isFirst = i === 0, isLast = i === trajectory.length - 1 && trajectory.length > 1;
+        const col = isFirst ? 'rgba(79,142,247,.15)' : isLast ? 'rgba(63,185,80,.2)' : 'rgba(139,148,158,.15)';
+        const tcol = isFirst ? 'var(--blue)' : isLast ? 'var(--green)' : 'var(--muted)';
+        return `<span class="score-pill" style="background:${col};color:${tcol}">r${i+1}: ${s}</span>`;
+      }).join('')
+    : '<span style="color:var(--muted);font-size:11px">no scores</span>';
+  const flags = [];
+  if (r.count_check_retry) flags.push(`<span style="color:var(--orange);font-size:11px">&#9888; count retry</span>`);
+  if ((r.novelty_scores||[]).length) flags.push(`<span style="color:var(--muted);font-size:11px">novelty: ${r.novelty_scores.join(', ')}</span>`);
+  const outInfo = r.output_bytes > 0
+    ? `<div style="color:var(--muted);font-size:11px;margin-top:6px">${(r.output_bytes/1024).toFixed(1)} KB &middot; ${r.output_lines} lines</div>` : '';
+  cards.push(`
+    <div class="detail-card">
+      <div class="detail-card-title">Score trajectory</div>
+      <div>${pills}</div>
+      ${flags.length ? `<div style="margin-top:6px">${flags.join(' &nbsp; ')}</div>` : ''}
+      ${outInfo}
+    </div>`);
+
+  // Card: Wiggum dimensions
+  if (r.dims && Object.keys(r.dims).length) {
+    const dimRows = Object.entries(r.dims).map(([k, v]) => {
+      const col = DIM_COLORS[k] || 'var(--blue)';
+      return `<div class="dim-row">
+        <span class="dim-label">${k}</span>
+        <div class="dim-bar-wrap"><div class="dim-bar-fill" style="width:${v*10}%;background:${col}"></div></div>
+        <span class="dim-value">${v}</span>
+      </div>`;
+    }).join('');
+    cards.push(`
+      <div class="detail-card">
+        <div class="detail-card-title">Dimensions (r1)</div>
+        ${dimRows}
+      </div>`);
+  }
+
+  // Card: Evaluator issues (r1)
+  if (r.issues && r.issues.length) {
+    const issueItems = r.issues.map(iss =>
+      `<div class="issue-item">${iss.replace(/</g,'&lt;')}</div>`
+    ).join('');
+    const countLabel = `<div style="color:var(--muted);font-size:10px;margin-bottom:6px">${r.issues.length} issue${r.issues.length > 1 ? 's' : ''}</div>`;
+    cards.push(`
+      <div class="detail-card">
+        <div class="detail-card-title">Issues (r1)</div>
+        ${countLabel}
+        <div class="issues-scroll">${issueItems}</div>
+      </div>`);
+  }
+
+  // Card: Evaluator feedback
+  if (r.feedback) {
+    cards.push(`
+      <div class="detail-card">
+        <div class="detail-card-title">Evaluator feedback (r1)</div>
+        <div class="feedback-text">${r.feedback.replace(/</g,'&lt;')}</div>
+      </div>`);
+  }
+
+  // Card: RLHF feedback panel
+  const fbKey = 'rlhf_' + (r.run_id || r.ts);
+  const savedFb = (() => { try { return JSON.parse(localStorage.getItem(fbKey) || 'null'); } catch(e) { return null; } })();
+  const savedRating  = savedFb ? savedFb.rating  : 0;
+  const savedEdited  = savedFb ? (savedFb.edited_output || '') : '';
+  const savedComment = savedFb ? (savedFb.comment || '') : '';
+  const fbSaved      = savedFb != null;
+  const thumbUp   = savedRating ===  1 ? 'btn-thumb-active' : '';
+  const thumbDown = savedRating === -1 ? 'btn-thumb-active' : '';
+  const savedNote = fbSaved ? `<span style="color:var(--green);font-size:10px">saved</span>` : '';
+  cards.push(`
+    <div class="detail-card detail-card-feedback rlhf-panel" id="fb-card-${fbKey}">
+      <div class="detail-card-title" style="display:flex;align-items:center;gap:8px">
+        RLHF Feedback ${savedNote}
+        <button class="btn-thumb ${thumbUp}"  data-fb="${fbKey}" data-rating="1"  title="Good output">&#128077;</button>
+        <button class="btn-thumb ${thumbDown}" data-fb="${fbKey}" data-rating="-1" title="Bad output">&#128078;</button>
+      </div>
+      <textarea class="fb-edit" id="fb-edit-${fbKey}" rows="4"
+        placeholder="Edit or annotate the output here (optional — saved as preferred version for RLHF)"
+        style="width:100%;box-sizing:border-box;background:var(--bg2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:6px;font-size:11px;font-family:monospace;resize:vertical"
+      >${savedEdited.replace(/</g,'&lt;')}</textarea>
+      <input class="fb-comment" id="fb-comment-${fbKey}" type="text"
+        value="${savedComment.replace(/"/g,'&quot;')}"
+        placeholder="Optional comment (e.g. what was wrong)"
+        style="width:100%;box-sizing:border-box;margin-top:4px;background:var(--bg2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:5px 6px;font-size:11px"
+      />
+      <button class="btn-save-fb" data-fb="${fbKey}" data-run-id="${r.run_id || ''}" data-task="${(r.task||'').replace(/"/g,'&quot;')}"
+        style="margin-top:6px;padding:4px 12px;font-size:11px;cursor:pointer;background:var(--accent);color:#fff;border:none;border-radius:4px">
+        Save feedback
+      </button>
+    </div>`);
+
+  return cards.join('');
+}
+
+DATA.recent_runs.forEach((r, idx) => {
   const scoreBar = r.score != null
     ? `<span class="score-bar"><span class="score-fill" style="width:${r.score*10}%"></span></span>${r.score}`
-    : '—';
+    : '&mdash;';
   const badge = r.final === 'PASS'  ? `<span class="badge badge-pass">PASS</span>`
               : r.final === 'FAIL'  ? `<span class="badge badge-fail">FAIL</span>`
               : r.final === 'ERROR' ? `<span class="badge badge-error">ERR</span>`
               : r.final;
-  const row = [
+  const detailId = `run-detail-${idx}`;
+  const btnId    = `run-btn-${idx}`;
+
+  const cells = [
+    `<td style="width:28px;padding:7px 6px"><button class="chevron-btn" id="${btnId}" data-detail="${detailId}" aria-label="expand">&#x276F;</button></td>`,
     `<td style="color:var(--muted);font-size:11px">${r.ts}</td>`,
-    `<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis" title="${r.task.replace(/"/g,'&quot;')}">${r.task}</td>`,
+    `<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${r.task.replace(/"/g,'&quot;')}">${r.task}</td>`,
     `<td style="color:var(--muted)">${r.model}</td>`,
     `<td style="color:var(--muted)">${r.type}</td>`,
     `<td>${scoreBar}</td>`,
-    `<td style="color:var(--muted);text-align:center">${r.rounds ?? '—'}</td>`,
+    `<td style="color:var(--muted);text-align:center">${r.rounds ?? '&mdash;'}</td>`,
     `<td style="color:var(--orange)">${r.duration}m</td>`,
     `<td style="color:var(--muted)">${fmtK(r.tokens_in)}</td>`,
     `<td style="color:var(--muted)">${fmtK(r.tokens_out)}</td>`,
     `<td style="text-align:center;color:var(--muted)">${r.searches}</td>`,
     `<td>${badge}</td>`,
   ];
-  tbl.innerHTML += `<tr>${row.join('')}</tr>`;
+
+  const colspan = cols.length;
+  tbl.innerHTML += `
+    <tr class="run-row">${cells.join('')}</tr>
+    <tr class="detail-row hidden" id="${detailId}">
+      <td colspan="${colspan}">
+        <div class="detail-inner">${buildDetailInner(r)}</div>
+      </td>
+    </tr>`;
+});
+
+// Attach click handlers after DOM is built
+tbl.querySelectorAll('.chevron-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const detailRow = document.getElementById(btn.dataset.detail);
+    const isHidden = detailRow.classList.toggle('hidden');
+    btn.classList.toggle('open', !isHidden);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RLHF feedback handlers
+// ---------------------------------------------------------------------------
+tbl.querySelectorAll('.btn-thumb').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const fbKey  = btn.dataset.fb;
+    const rating = parseInt(btn.dataset.rating, 10);
+    // Load existing saved state
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(fbKey) || '{}'); } catch(e) {}
+    // Toggle: clicking same thumb again clears rating
+    const newRating = saved.rating === rating ? 0 : rating;
+    saved.rating = newRating;
+    localStorage.setItem(fbKey, JSON.stringify(saved));
+    // Update button active state within this detail block
+    const parent = btn.closest('.rlhf-panel');
+    if (parent) {
+      parent.querySelectorAll('.btn-thumb').forEach(b => b.classList.remove('btn-thumb-active'));
+      if (newRating !== 0) {
+        parent.querySelectorAll(`.btn-thumb[data-rating="${newRating}"]`).forEach(b => b.classList.add('btn-thumb-active'));
+      }
+    }
+  });
+});
+
+tbl.querySelectorAll('.btn-save-fb').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const fbKey  = btn.dataset.fb;
+    const runId  = btn.dataset.runId;
+    const task   = btn.dataset.task;
+    // Read current panel state
+    const editArea   = document.getElementById('fb-edit-' + fbKey);
+    const commentEl  = document.getElementById('fb-comment-' + fbKey);
+    const editedOut  = editArea   ? editArea.value   : '';
+    const comment    = commentEl  ? commentEl.value  : '';
+    // Get rating from localStorage
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(fbKey) || '{}'); } catch(e) {}
+    const rating = saved.rating || 0;
+    // Persist full state to localStorage
+    saved.edited_output = editedOut;
+    saved.comment       = comment;
+    localStorage.setItem(fbKey, JSON.stringify(saved));
+    // POST to server
+    fetch('/api/feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        run_id:          runId,
+        task:            task,
+        rating:          rating,
+        original_output: saved.original_output || editedOut,
+        edited_output:   editedOut,
+        comment:         comment,
+      }),
+    }).then(r => r.json()).then(() => {
+      btn.textContent = 'Saved!';
+      btn.style.background = 'var(--green)';
+      setTimeout(() => { btn.textContent = 'Save feedback'; btn.style.background = ''; }, 1800);
+    }).catch(() => {
+      btn.textContent = 'Error';
+      btn.style.background = 'var(--red)';
+      setTimeout(() => { btn.textContent = 'Save feedback'; btn.style.background = ''; }, 1800);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1050,10 +1435,471 @@ new Chart($('cumulCostChart'), {
     },
   },
 });
+
+// ---------------------------------------------------------------------------
+// Fine-tuning live metrics — polls /api/finetune/metrics every 8s
+// ---------------------------------------------------------------------------
+(function () {
+  if (location.protocol === 'file:') return;
+
+  let ftLossChart = null, ftAccChart = null, ftGradChart = null, ftLrChart = null;
+
+  function mkFtChart(id, label, color) {
+    return new Chart($(id), {
+      type: 'line',
+      data: { labels: [], datasets: [{ label, data: [], borderColor: color,
+        backgroundColor: color.replace(')', ',0.08)').replace('rgb', 'rgba'),
+        borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: true }] },
+      options: { ...CHART_DEFAULTS, plugins: { legend: { display: false } } },
+    });
+  }
+
+  function fmtEta(s) {
+    if (!s) return '--';
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  function renderFt(records) {
+    const metrics = records.filter(r => r.type === 'metric');
+    const begin   = records.find(r  => r.type === 'train_begin');
+    const ended   = records.find(r  => r.type === 'train_end');
+    if (!metrics.length) return;
+
+    const steps   = metrics.map(r => r.step);
+    const losses  = metrics.map(r => r.loss ?? null);
+    const accs    = metrics.map(r => r.mean_token_accuracy ?? null);
+    const grads   = metrics.map(r => r.grad_norm ?? null);
+    const lrs     = metrics.map(r => r.learning_rate ?? null);
+    const last    = metrics[metrics.length - 1];
+    const maxSteps = begin?.max_steps || last.max_steps || 1;
+    const pct     = Math.round((last.step / maxSteps) * 100);
+
+    // KPI cards
+    const status  = ended ? 'Complete' : `${pct}% — step ${last.step}/${maxSteps}`;
+    const etaStr  = ended ? 'Done' : fmtEta(last.eta_s);
+    const elapsed = last.elapsed_s ? fmtEta(last.elapsed_s) : '--';
+    $('ft-kpi-grid').innerHTML = [
+      { label: 'Status',       value: status,                            cls: ended ? 'green' : 'blue' },
+      { label: 'Loss',         value: last.loss?.toFixed(4) ?? '--',     cls: 'yellow' },
+      { label: 'Token acc',    value: last.mean_token_accuracy ? (last.mean_token_accuracy * 100).toFixed(1) + '%' : '--', cls: 'purple' },
+      { label: 'Grad norm',    value: last.grad_norm?.toFixed(3) ?? '--', cls: 'orange' },
+      { label: 'Elapsed',      value: elapsed,                           cls: 'muted' },
+      { label: 'ETA',          value: etaStr,                            cls: 'muted' },
+    ].map(c => `<div class="kpi ${c.cls}">
+      <div class="kpi-label">${c.label}</div>
+      <div class="kpi-value" style="font-size:18px">${c.value}</div>
+    </div>`).join('');
+
+    // Update or create charts
+    function syncChart(chart, id, label, color, data) {
+      if (!chart) chart = mkFtChart(id, label, color);
+      chart.data.labels = steps;
+      chart.data.datasets[0].data = data;
+      chart.update('none');
+      return chart;
+    }
+    ftLossChart = syncChart(ftLossChart, 'ftLossChart', 'Loss',       'rgb(251,146,60)',  losses);
+    ftAccChart  = syncChart(ftAccChart,  'ftAccChart',  'Token acc',  'rgb(74,222,128)',  accs);
+    ftGradChart = syncChart(ftGradChart, 'ftGradChart', 'Grad norm',  'rgb(139,92,246)',  grads);
+    ftLrChart   = syncChart(ftLrChart,   'ftLrChart',   'Learn rate', 'rgb(96,165,250)',  lrs);
+  }
+
+  function pollFt() {
+    fetch('/api/finetune/metrics').then(r => r.json()).then(data => {
+      if (data && data.length) renderFt(data);
+    }).catch(() => {});
+  }
+
+  pollFt();
+  setInterval(pollFt, 8000);
+})();
+
+// ---------------------------------------------------------------------------
+// Live panel — only active when served via server.py (http: protocol)
+// Hidden entirely in static file:// mode.
+// ---------------------------------------------------------------------------
+(function () {
+  if (location.protocol === 'file:') return;   // static mode — skip
+
+  // ── Inject Live section into DOM ─────────────────────────────────────────
+  const liveSection = document.createElement('div');
+  liveSection.id = 'live-section';
+  liveSection.innerHTML = `
+<style>
+  #live-section { margin-top: 32px; }
+  .live-heading {
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    margin: 0 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green); flex-shrink: 0;
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* Submit form */
+  .live-form-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 18px 20px; margin-bottom: 16px;
+  }
+  .live-form-title {
+    font-size: 12px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px;
+  }
+  .live-task-input {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 13px;
+    padding: 10px 12px; resize: vertical; min-height: 60px;
+    font-family: inherit; margin-bottom: 10px;
+  }
+  .live-task-input:focus { outline: none; border-color: var(--blue); }
+  .live-form-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .live-cron-wrap { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 180px; }
+  .live-cron-label { font-size: 11px; color: var(--muted); }
+  .live-cron-input {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 12px;
+    padding: 8px 10px; font-family: monospace; width: 100%;
+  }
+  .live-cron-input:focus { outline: none; border-color: var(--purple); }
+  .live-cron-hint { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .live-btn {
+    padding: 8px 18px; border-radius: 6px; border: none; cursor: pointer;
+    font-size: 13px; font-weight: 600; white-space: nowrap;
+    transition: opacity .15s;
+  }
+  .live-btn:hover { opacity: .85; }
+  .live-btn:disabled { opacity: .4; cursor: default; }
+  .btn-run    { background: var(--blue);   color: #fff; }
+  .btn-sched  { background: var(--purple); color: #fff; }
+  .live-msg { font-size: 12px; margin-top: 8px; min-height: 18px; }
+
+  /* Active run cards */
+  .run-cards { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+  .run-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .run-card-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap; gap: 8px;
+  }
+  .run-status-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .run-status-dot.running { background: var(--blue); animation: pulse 1.5s infinite; }
+  .run-status-dot.done    { background: var(--green); }
+  .run-status-dot.error   { background: var(--red); }
+  .run-id-badge {
+    font-family: monospace; font-size: 11px; color: var(--muted);
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px;
+  }
+  .run-task-label {
+    flex: 1; font-size: 12px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .run-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .btn-cancel {
+    font-size: 11px; padding: 3px 10px; border-radius: 4px; border: none;
+    background: rgba(248,81,73,.15); color: var(--red); cursor: pointer;
+  }
+  .btn-cancel:hover { background: rgba(248,81,73,.28); }
+  .run-log {
+    font-family: monospace; font-size: 11px; line-height: 1.55;
+    background: var(--bg); color: var(--muted);
+    padding: 10px 16px; max-height: 260px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .log-line-stage  { color: var(--blue); }
+  .log-line-pass   { color: var(--green); }
+  .log-line-fail   { color: var(--red); }
+  .log-line-warn   { color: var(--orange); }
+  .log-line-done   { color: var(--purple); font-weight: 600; }
+
+  /* Scheduled tasks table */
+  .sched-empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
+  .btn-del-sched {
+    font-size: 11px; padding: 2px 8px; border-radius: 4px; border: none;
+    background: rgba(248,81,73,.12); color: var(--red); cursor: pointer;
+  }
+  .btn-del-sched:hover { background: rgba(248,81,73,.25); }
+</style>
+
+<div class="live-heading">
+  <span class="live-dot"></span> Live
+</div>
+
+<!-- Submit form -->
+<div class="live-form-card">
+  <div class="live-form-title">Submit Task</div>
+  <textarea class="live-task-input" id="liveTaskInput"
+    placeholder='Search for the top 3 context window strategies and save to ~/Desktop/harness-engineering/out.md'></textarea>
+  <div class="live-form-row">
+    <div class="live-cron-wrap">
+      <span class="live-cron-label">Schedule (cron) — leave blank to run now</span>
+      <input class="live-cron-input" id="liveCronInput" placeholder="0 9 * * 1-5  (weekdays 9am)" />
+      <span class="live-cron-hint">min hour day month weekday &nbsp;·&nbsp; * = any</span>
+    </div>
+    <button class="live-btn btn-run"   id="liveBtnRun">&#9654; Run now</button>
+    <button class="live-btn btn-sched" id="liveBtnSched">&#128197; Schedule</button>
+  </div>
+  <div class="live-msg" id="liveMsg"></div>
+</div>
+
+<!-- Active runs -->
+<div class="live-heading" style="margin-top:24px;font-size:12px">Active runs</div>
+<div class="run-cards" id="activeRunCards">
+  <div style="color:var(--muted);font-size:12px" id="noActiveRuns">No active runs.</div>
+</div>
+
+<!-- Scheduled tasks -->
+<div class="live-heading" style="margin-top:24px;font-size:12px">Scheduled tasks</div>
+<div id="schedList" style="margin-bottom:32px">
+  <div class="sched-empty" id="noSched">No scheduled tasks.</div>
+  <table id="schedTable" style="display:none;width:100%;border-collapse:collapse;font-size:12px">
+    <tr>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Name</th>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Cron</th>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Task</th>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Next run</th>
+      <th style="padding:6px 8px;border-bottom:1px solid var(--border)"></th>
+    </tr>
+    <tbody id="schedTbody"></tbody>
+  </table>
+</div>
+`;
+  document.body.appendChild(liveSection);
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+  const fmtTs = iso => {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.getFullYear() + '-' +
+        String(d.getMonth()+1).padStart(2,'0') + '-' +
+        String(d.getDate()).padStart(2,'0') + ' ' +
+        String(d.getHours()).padStart(2,'0') + ':' +
+        String(d.getMinutes()).padStart(2,'0') + ':' +
+        String(d.getSeconds()).padStart(2,'0');
+    } catch { return iso.replace('T',' '); }
+  };
+
+  function elapsed(startIso) {
+    const s = Math.round((Date.now() - new Date(startIso)) / 1000);
+    return s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
+  }
+
+  function colorLine(raw) {
+    const esc = raw.replace(/</g,'&lt;');
+    if (/\[wiggum\]\s*PASS|\bPASS\b/.test(esc))  return `<span class="log-line-pass">${esc}</span>`;
+    if (/\[wiggum\]\s*FAIL|\bFAIL\b/.test(esc))  return `<span class="log-line-fail">${esc}</span>`;
+    if (/\[error\]/.test(esc))                    return `<span class="log-line-fail">${esc}</span>`;
+    if (/\[DONE\]/.test(esc))                     return `<span class="log-line-done">${esc}</span>`;
+    if (/\[synth\]|\[wiggum\]|\[skill/.test(esc)) return `<span class="log-line-stage">${esc}</span>`;
+    if (/\[warn\]|count retry/.test(esc))         return `<span class="log-line-warn">${esc}</span>`;
+    if (/turn \d|turn1|turn2/.test(esc))          return `<span class="log-line-stage">${esc}</span>`;
+    return esc;
+  }
+
+  function setMsg(txt, color='var(--muted)') {
+    $('liveMsg').style.color = color;
+    $('liveMsg').textContent = txt;
+  }
+
+  // ── Active run card management ────────────────────────────────────────────
+  const _cards = {};   // run_id → {el, logEl, es}
+
+  function addRunCard(run) {
+    if (_cards[run.run_id]) return;   // already tracked
+
+    $('noActiveRuns').style.display = 'none';
+
+    const card = document.createElement('div');
+    card.className = 'run-card';
+    card.id = `card-${run.run_id}`;
+    card.innerHTML = `
+      <div class="run-card-header">
+        <span class="run-status-dot running" id="dot-${run.run_id}"></span>
+        <span class="run-id-badge">${run.run_id}</span>
+        <span class="run-task-label" title="${run.task.replace(/"/g,'&quot;')}">${run.task}</span>
+        <span class="run-meta" id="meta-${run.run_id}">started ${fmtTs(run.start_ts)}</span>
+        <button class="btn-cancel" onclick="cancelRun('${run.run_id}')">&#9632; Cancel</button>
+      </div>
+      <div class="run-log" id="log-${run.run_id}"></div>`;
+
+    $('activeRunCards').appendChild(card);
+
+    const logEl = $(`log-${run.run_id}`);
+
+    // SSE stream
+    const es = new EventSource(`/api/stream/${run.run_id}`);
+    es.onmessage = e => {
+      if (e.data === '[DONE]' || e.data === '[run not found]') {
+        es.close();
+        finishCard(run.run_id);
+        return;
+      }
+      const line = document.createElement('div');
+      line.innerHTML = colorLine(e.data);
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+    es.onerror = () => { es.close(); finishCard(run.run_id); };
+
+    _cards[run.run_id] = { el: card, logEl, es };
+  }
+
+  function finishCard(run_id) {
+    const dot  = $(`dot-${run_id}`);
+    const meta = $(`meta-${run_id}`);
+    if (dot)  { dot.classList.remove('running'); dot.classList.add('done'); }
+    if (meta) meta.textContent = 'completed';
+    // Remove cancel button
+    const card = $(`card-${run_id}`);
+    if (card) card.querySelector('.btn-cancel')?.remove();
+    delete _cards[run_id];
+    if (Object.keys(_cards).length === 0) $('noActiveRuns').style.display = '';
+  }
+
+  window.cancelRun = function(run_id) {
+    fetch(`/api/run/${run_id}/cancel`, {method:'POST'})
+      .then(() => finishCard(run_id));
+  };
+
+  // ── Submit handlers ───────────────────────────────────────────────────────
+  $('liveBtnRun').addEventListener('click', () => {
+    const task = $('liveTaskInput').value.trim();
+    if (!task) { setMsg('Enter a task first.', 'var(--orange)'); return; }
+    $('liveBtnRun').disabled = true;
+    setMsg('Starting…');
+    fetch('/api/run', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({task}),
+    })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { setMsg(d.error, 'var(--red)'); return; }
+      setMsg(`Run ${d.run_id} started.`, 'var(--green)');
+      $('liveTaskInput').value = '';
+      addRunCard({run_id: d.run_id, task, start_ts: new Date().toISOString(), status:'running'});
+    })
+    .catch(e => setMsg(String(e), 'var(--red)'))
+    .finally(() => $('liveBtnRun').disabled = false);
+  });
+
+  $('liveBtnSched').addEventListener('click', () => {
+    const task = $('liveTaskInput').value.trim();
+    const cron = $('liveCronInput').value.trim();
+    if (!task) { setMsg('Enter a task first.', 'var(--orange)'); return; }
+    if (!cron) { setMsg('Enter a cron expression to schedule.', 'var(--orange)'); return; }
+    $('liveBtnSched').disabled = true;
+    setMsg('Scheduling…');
+    fetch('/api/schedule', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({task, cron}),
+    })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { setMsg(d.error, 'var(--red)'); return; }
+      setMsg(`Scheduled (${d.sched_id}) — next: ${fmtTs(d.next_run)}`, 'var(--purple)');
+      $('liveTaskInput').value = '';
+      $('liveCronInput').value = '';
+      refreshSchedule();
+    })
+    .catch(e => setMsg(String(e), 'var(--red)'))
+    .finally(() => $('liveBtnSched').disabled = false);
+  });
+
+  // ── Scheduled tasks table ─────────────────────────────────────────────────
+  function refreshSchedule() {
+    fetch('/api/schedule')
+    .then(r => r.json())
+    .then(d => {
+      const rows = d.schedules || [];
+      if (!d.cron_available) {
+        $('noSched').textContent = 'APScheduler not installed — pip install apscheduler';
+        $('schedTable').style.display = 'none';
+        return;
+      }
+      $('noSched').style.display = rows.length ? 'none' : '';
+      $('schedTable').style.display = rows.length ? '' : 'none';
+      const tbody = $('schedTbody');
+      tbody.innerHTML = '';
+      rows.forEach(s => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="padding:6px 8px;color:var(--text)">${s.name}</td>
+          <td style="padding:6px 8px;font-family:monospace;color:var(--purple)">${s.cron}</td>
+          <td style="padding:6px 8px;color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.task}">${s.task}</td>
+          <td style="padding:6px 8px;color:var(--muted)">${fmtTs(s.next_run)}</td>
+          <td style="padding:6px 8px;text-align:right">
+            <button class="btn-del-sched" onclick="deleteSchedule('${s.sched_id}')">&#128465; Remove</button>
+          </td>`;
+        tbody.appendChild(tr);
+      });
+    });
+  }
+
+  window.deleteSchedule = function(id) {
+    fetch(`/api/schedule/${id}`, {method:'DELETE'})
+    .then(() => refreshSchedule());
+  };
+
+  // ── Polling: pick up runs started externally (autoresearch, CLI, etc.) ────
+  function pollActive() {
+    fetch('/api/runs')
+    .then(r => r.json())
+    .then(d => {
+      (d.active || []).forEach(run => addRunCard(run));
+    })
+    .catch(() => {});
+  }
+
+  // Initial load + refresh every 10s
+  refreshSchedule();
+  pollActive();
+  setInterval(() => { refreshSchedule(); pollActive(); }, 10_000);
+
+  // Update elapsed time on active cards every second
+  setInterval(() => {
+    Object.entries(_cards).forEach(([id, {el}]) => {
+      const meta = document.getElementById(`meta-${id}`);
+      if (meta && el.dataset.startTs) meta.textContent = `running ${elapsed(el.dataset.startTs)}`;
+    });
+  }, 1000);
+
+})();
 </script>
 </body>
 </html>
 """
+
+
+# ---------------------------------------------------------------------------
+# Public API — used by server.py
+# ---------------------------------------------------------------------------
+
+def build() -> dict:
+    """Load runs and return the full dashboard payload dict."""
+    runs = load_runs()
+    return build_payload(runs)
+
+
+def render(payload: dict) -> str:
+    """Render the HTML template with a pre-built payload dict."""
+    payload_json = json.dumps(payload).replace("</", r"<\/")
+    return HTML_TEMPLATE.replace("__DATA__", payload_json)
 
 
 # ---------------------------------------------------------------------------

@@ -46,9 +46,12 @@ An experiment is **discarded** if delta ≤ 0.1:
 ```bash
 conda activate ollama-pi
 python autoresearch.py                   # default: T_A + T_B, delta=0.1
-python autoresearch.py --tasks T_A,T_B   # explicit task subset
+python autoresearch.py --tasks T_D,T_E   # Session 3 tasks (context window + prompt injection)
+python autoresearch.py --tasks T_A,T_B   # Session 1/2 tasks (context engineering + cost mgmt)
 python autoresearch.py --delta 0.2       # stricter keep threshold
 ```
+
+**Proposer model:** `kimi-k2.5:cloud` (set via `PROPOSER_MODEL` env var). Cloud proposer runs without VRAM swap, eliminating the 30–60s load/unload cost between producer and evaluator. Preferred for all new sessions.
 
 `autoresearch.tsv` is untracked by git. Do not commit it.
 
@@ -63,6 +66,11 @@ High-scoring synthesis instructions tend to:
 - Name the structure within each item (e.g. "what it is / why it matters / how to apply it")
 - Ask for specific tool names, library versions, or command-line examples where applicable
 - Forbid filler phrases ("it is important to", "one should consider")
+- **Frame applicability constraints** — "when NOT to use" + input/output boundaries (Session 3 exp 7, +0.332, biggest jump to date)
+
+### What kills scores
+
+- Confidence ratings (High/Med/Low) per technique or library — hedging reads as shallow and directly tanks the depth dimension (Session 3 exp 9, −0.950)
 
 ## Dimensions and weights (for reference)
 

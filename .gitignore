@@ -19,6 +19,9 @@ runs.jsonl
 # Eval suite generated outputs
 eval-*.md
 
+# Mined knowledge base (generated artifacts)
+knowledge_base/
+
 # Orchestrator temp files
 _sub_*.md
 
@@ -53,3 +56,32 @@ llama.cpp/
 # Knowledge graph outputs (generated artifacts)
 graphs/*.html
 graphs/*.png
+
+# Fine-tuning artifacts (large, rebuilt from training)
+finetune_output/
+finetune_metrics.jsonl
+finetune_dataset.jsonl
+finetune_dataset_v2.jsonl
+
+# Email drafts (generated output, may contain PII)
+email_drafts/
+
+# Trace and log files (generated runtime artifacts)
+traces/
+tinytroupe.*.log
+
+# HuggingFace dataset exports (rebuilt from runs.jsonl)
+hf_datasets/
+
+# SQLite WAL/SHM sidecar files
+*.db-shm
+*.db-wal
+
+# Annotated paper outputs (generated artifacts)
+annotate-test/
+*-annotated.md
+
+# Scratch CSVs and markdown exports
+3dgs-paper-markdown.csv
+_email_out.txt
+arxiv_agentic_papers.csv
