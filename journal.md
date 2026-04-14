@@ -1489,3 +1489,49 @@ Each component feeds the next. Memory means nothing useful is forgotten. Persona
 **The honest constraint:** the evaluator's blind spots compound. If wiggum has a systematic bias, the whole loop optimizes toward it. Rotating evaluators (Gemma 4 as second evaluator) and diverse persona panels break monoculture before it compounds. Diversity in judgment is a first-class architectural concern, not an afterthought.
 
 **Roadmap implication:** vLLM (7e) closes the training loop continuously; TinyTroupe persona curation (planned, Stage 6 extension) operationalizes taste as a selection function; structured event protocol (7h) gives the critic agent the telemetry it needs to reason about *why* something worked rather than just *that* it did. These three together are what separate a self-improving system from a self-reinforcing one.
+
+---
+
+## Session 6 — nanda-annotator v2, /github skill, token tracking, dashboard fixes (2026-04-13/14)
+
+### /github standalone skill
+
+Built `github_skill.py` — LLM-assisted GitHub operations via the `gh` CLI substrate.
+
+Supported operations: `push` (stage → LLM commit message → commit → push), `pr create/list/view/merge/review`, `issue create/list/view`, `repo view/clone`, `status`.
+
+Key design decisions:
+- Default model: `llama3.2:3b` via `GITHUB_MODEL` env var (falls back to `PRODUCER_MODEL`). Commit message generation with pi-qwen-32b took 620 seconds for a generic result; `llama3.2:3b` takes ~8 seconds and produces accurate messages.
+- Commit prompt uses `--stat` summary + first 2000 chars of raw diff — the stat carries most signal; the diff excerpt handles detail on the most-changed file.
+- All operations return `(text, tokens_in, tokens_out)` tuples so token counts reach the dashboard.
+- `_path_optional = {"email", "github"}` added to `agent.py` — standalone skills exempt from `.md` output path requirement.
+
+### Token tracking in standalone skills
+
+Email and GitHub runs were not appearing in dashboard token stats because both skills call `ollama.chat()` directly, outside `RunTrace.log_usage()`. Fixed by:
+- `email_skill.py`: `_ollama_chat()` returns `(text, in_tok, out_tok)`; accumulates `total_in`/`total_out` across all per-speaker calls; embeds `_tokens_in`/`_tokens_out` in result dicts.
+- `github_skill.py`: all `_llm()` calls return `(text, in_tok, out_tok)`; `_dispatch()` propagates tuples up to `run_github_standalone()`.
+- `agent.py`: both dispatch blocks write token totals into `trace.data["input_tokens"]`/`["output_tokens"]` before `trace.finish()`.
+
+### nanda-annotator output cleanup
+
+Three-layer post-processing in `run_annotate_standalone()` (`skills.py`):
+1. **Preamble strip** — everything before `# Annotated Abstract` or `**Topic**` removed (catches "Sure, here is…" preamble).
+2. **Broad impact truncation** — take at most 600 chars of content after the `**Broad impact**` header line, cut at the last sentence-ending punctuation (`./!/?`). Avoids dependence on blank lines or stop markers the model may not emit. Eliminates conversation loops, `--- EOF ---` fake boundaries, and `[truncated]` hallucinations.
+3. **Modelfile stop tokens** — `<|im_end|>`, `<|endoftext|>`, `--- EOF ---`, `--- End` added as Ollama-level stop strings; `num_predict 1200` cap.
+
+Root cause of repetition: model learned `--- EOF ---` as its "done" signal from training data, then continued generating a simulated conversation. The 600-char window cuts the loop at the paragraph level regardless of what the model emits.
+
+### Dashboard: annotate detail rows missing
+
+`log_wiggum()` was never called for annotate+wiggum runs. The annotate path in `agent.py` was doing `trace.data["wiggum"] = wiggum_result` (storing as nested dict) instead of `trace.log_wiggum(wiggum_result)`. Result: `wiggum_dims`, `wiggum_eval_log`, `wiggum_scores` all stayed as empty lists in `runs.jsonl`. Fixed with a one-line change.
+
+### nanda-annotator v2 dataset and training
+
+- Ran `run_annotations.py` on both arxiv markdown files (596 papers total) using `nanda-annotator` as annotator model.
+- Result: 251 annotated from `arxiv_agentic_papers.md`, 299 from `arxiv_agentic_harness_engineering_papers.md`, 49 skipped (existing), 1 failed.
+- `build_finetune_from_annotations.py` merged all sources: 121 gold + 597 agent-annotated = **718 examples** in `finetune_dataset_v2.jsonl`.
+- Training: `python -X utf8 finetune_annotate.py --dataset finetune_dataset_v2.jsonl --epochs 3` — 1938 steps, 646 train / 72 eval examples.
+- Added early stopping: `eval_strategy="epoch"`, `EarlyStoppingCallback`, `load_best_model_at_end=True` — stops if eval loss doesn't improve for N epochs (configurable via `--patience`).
+
+**Self-distillation note:** v2 training data includes v1 nanda-annotator's own outputs. This is intentional — v1 provides stylistic consistency while the 121 human-curated gold examples anchor quality. Worth comparing v2 eval loss and wiggum scores against v1 to check whether the self-distillation loop is tightening or degrading.

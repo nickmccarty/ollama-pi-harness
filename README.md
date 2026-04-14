@@ -22,6 +22,8 @@ orchestrator.py          ← compound tasks: decompose → run subtasks → asse
         ├── chunker.py       large-doc context extraction with provenance metadata
         ├── vision.py        image-to-text preprocessing (llama3.2-vision)
         ├── security.py      code scanner, path sandbox, injection scanner
+        ├── github_skill.py  /github — push, PR, issue, repo ops via gh CLI
+        ├── email_skill.py   /email — personalized .eml drafts from CSV + goal
         └── markitdown       rich document conversion + URL enrichment (optional)
 
 shared: logger.py / runs.jsonl + traces/, memory.py / memory.db
@@ -94,8 +96,15 @@ python agent.py --producer pi-qwen-32b "..."       # use alternative producer mo
 **Skills — prefix task with /skill tokens:**
 ```bash
 python agent.py "/annotate Search for RAG papers and save to output.md"   # Nanda 8-move framework
+python agent.py "/annotate /wiggum https://arxiv.org/abs/2308.04079 out.md"  # annotate + evaluate
 python agent.py "/cite /deep Comprehensive survey of LoRA fine-tuning techniques..."
 python agent.py "/kg Explain transformer attention mechanisms..."           # D3.js knowledge graph
+
+# Standalone skills (no .md path required):
+python agent.py "/github push add new feature"       # LLM commit message → git push
+python agent.py "/github pr create"                  # LLM PR title+body → gh pr create
+python agent.py "/github status"                     # branch + log + working tree
+python agent.py "/email speakers.csv reach out about our platform save to drafts/"
 
 # Auto-triggered (no prefix needed):
 #   /annotate  — task mentions "paper", "abstract", "survey", "review"
@@ -205,9 +214,11 @@ python inspect_run.py --all    # summary table of all runs
 |------|-------|-------|
 | Producer (default) | `pi-qwen-32b` (qwen2.5:32b Q4_K_M) | Custom Modelfile — ~20GB; confirmed upgrade over 7B on depth+specificity |
 | Producer (fallback) | `pi-qwen` (qwen2.5:7b) | Faster, lower quality; use with `--producer pi-qwen` |
+| Annotator | `nanda-annotator` | QLoRA fine-tuned Qwen2.5-7B on 718 Nanda-annotated abstracts; local GGUF |
 | Evaluator | `Qwen3-Coder:30b` | Must be larger/different than producer — drives revision loop |
 | Planner / Compressor | `glm4:9b` | Different architecture from producer; fast enough for planning and memory compression |
 | Vision | `llama3.2-vision` | Image-to-text preprocessing only; does not replace producer |
+| GitHub skill | `llama3.2:3b` | Fast commit/PR/issue generation; override with `GITHUB_MODEL` env var |
 
 **Producer candidates on-disk (not yet default):**
 
@@ -249,8 +260,15 @@ python inspect_run.py --all    # summary table of all runs
 | `analyze_exp04.py` | Experiment-04 analysis script |
 | `hf_export.py` | Export `runs.jsonl` to HuggingFace-ready SFT / preference / reward / trajectory datasets |
 | `dashboard.py` | Generate self-contained HTML analytics dashboard from `runs.jsonl` |
+| `github_skill.py` | /github standalone skill — push, PR, issue, repo ops via `gh` CLI + LLM |
+| `email_skill.py` | /email standalone skill — personalized `.eml` drafts from CSV + goal |
+| `finetune_annotate.py` | QLoRA fine-tune Qwen2.5-7B on Nanda annotated abstracts; early stopping, DashboardCallback |
+| `run_annotations.py` | Batch annotation runner — parse arxiv markdown → annotate → CSV |
+| `build_finetune_from_annotations.py` | Merge gold + agent CSVs → `finetune_dataset_v2.jsonl` |
+| `backfill_metrics.py` | Reconstruct `finetune_metrics.jsonl` from training log output |
 | `Modelfile` | Ollama Modelfile for `pi-qwen` (qwen2.5:7b) |
 | `Modelfile.32b` | Ollama Modelfile for `pi-qwen-32b` (qwen2.5:32b Q4_K_M) |
+| `finetune_output/Modelfile` | Ollama Modelfile for `nanda-annotator` (fine-tuned GGUF + stop tokens) |
 | `eval.sh` | Original filesystem-level eval (superseded by `eval_suite.py`) |
 
 **Runtime files (gitignored):**

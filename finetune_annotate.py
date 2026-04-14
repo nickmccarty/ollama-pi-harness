@@ -259,7 +259,7 @@ class DashboardCallback:
 # Step 3 — QLoRA fine-tune
 # ---------------------------------------------------------------------------
 
-def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Path):
+def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Path, patience: int = 1):
     try:
         import torch
         from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -317,7 +317,7 @@ def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Pat
     model.enable_input_require_grads()   # required for PEFT + gradient checkpointing
     model.print_trainable_parameters()
 
-    # Training args — minimal config for debugging
+    # Training args
     sft_config = SFTConfig(
         output_dir=str(output_dir / "checkpoints"),
         num_train_epochs=epochs,
@@ -327,8 +327,11 @@ def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Pat
         bf16=True,
         dataloader_num_workers=0,
         logging_steps=1,
-        eval_strategy="no",
-        save_strategy="no",
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         report_to="none",
         dataset_text_field="text",
     )
@@ -336,12 +339,19 @@ def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Pat
     # Clear previous metrics and start fresh
     METRICS_OUT.write_text("", encoding="utf-8")
 
+    try:
+        from transformers import EarlyStoppingCallback
+        early_stop = EarlyStoppingCallback(early_stopping_patience=patience)
+    except ImportError:
+        early_stop = None
+
     trainer = SFTTrainer(
         model=model,
         args=sft_config,
         train_dataset=train_ds,
+        eval_dataset=eval_ds,
         processing_class=tokenizer,
-        callbacks=[DashboardCallback(METRICS_OUT)],
+        callbacks=[DashboardCallback(METRICS_OUT)] + ([early_stop] if early_stop else []),
     )
 
     print("\n[finetune] training...")
@@ -370,6 +380,7 @@ def main():
     parser.add_argument("--fetch-only", action="store_true",    help="Only fetch arxiv data and build dataset, skip training")
     parser.add_argument("--skip-fetch", action="store_true",    help="Use existing finetune_dataset.jsonl, skip arxiv fetch")
     parser.add_argument("--dataset",    default=None,           help="Path to alternate JSONL dataset (e.g. finetune_dataset_v2.jsonl)")
+    parser.add_argument("--patience",   default=1, type=int,   help="Early stopping patience (epochs without eval_loss improvement)")
     args = parser.parse_args()
 
     ann_df = pd.read_csv(ANN_CSV)
@@ -395,7 +406,7 @@ def main():
         return
 
     # --- Fine-tune ---
-    merged_path = finetune(examples, args.model, args.epochs, MODEL_OUT)
+    merged_path = finetune(examples, args.model, args.epochs, MODEL_OUT, patience=args.patience)
 
     # --- Post-training instructions ---
     gguf_path = HERE / "finetune_output" / "nanda-annotator-q4.gguf"

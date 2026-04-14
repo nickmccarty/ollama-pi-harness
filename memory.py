@@ -347,6 +347,65 @@ class MemoryStore:
 
         return obs
 
+    def store_direct(
+        self,
+        task: str,
+        task_type: str,
+        title: str,
+        narrative: str,
+        facts: list[str],
+        timestamp: str = None,
+        final_score: float = None,
+        final: str = "PASS",
+        output_path: str = None,
+    ) -> int:
+        """
+        Write a pre-built observation directly to SQLite + ChromaDB,
+        bypassing LLM compression. Used for bulk imports (e.g. paper corpus).
+        Returns the new SQLite rowid, or -1 if the task is already indexed.
+        """
+        # Idempotency check — skip if this task is already stored
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM observations WHERE task = ?", (task,)
+            ).fetchone()
+            if existing:
+                return -1
+
+        facts_json = json.dumps(facts) if facts else None
+        ts = timestamp or datetime.now(timezone.utc).isoformat()
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO observations
+                   (timestamp, task, task_type, title, narrative, facts, output_path, final_score, final)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ts, task, task_type, title, narrative, facts_json, output_path, final_score, final),
+            )
+            rowid = cursor.lastrowid
+
+        col = self._get_chroma()
+        if col is not None:
+            try:
+                embed_text = _obs_embed_text({
+                    "title": title,
+                    "narrative": narrative,
+                    "facts": facts_json,
+                })
+                col.upsert(
+                    ids=[str(rowid)],
+                    documents=[embed_text],
+                    metadatas=[{
+                        "task_type": task_type,
+                        "final_score": final_score or 0.0,
+                        "timestamp": ts,
+                    }],
+                )
+            except Exception as e:
+                print(f"  [memory] ChromaDB upsert failed (non-fatal): {e}")
+
+        return rowid
+
     # ------------------------------------------------------------------
     # Read path
     # ------------------------------------------------------------------

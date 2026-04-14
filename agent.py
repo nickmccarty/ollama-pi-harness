@@ -746,9 +746,14 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 has_url_content = True
                 print(f"  [fetch_url] injecting {len(url_context)} chars of URL content")
 
-        # Standalone skill dispatch — short-circuits the full pipeline when /annotate is explicit.
-        # Must run after file/URL context is assembled so paper_context is available.
-        if "annotate" in explicit_skills:
+        # ---------------------------------------------------------------------------
+        # Standalone skill dispatch
+        # Each handler closes over local variables (trace, task, path, etc.).
+        # Must be defined after file/URL context is assembled.
+        # Add new standalone skills here — one function, one entry in _STANDALONE.
+        # ---------------------------------------------------------------------------
+
+        def _handle_annotate():
             print("\n[skill:annotate] standalone mode — annotating paper abstract...")
             if not file_context.strip():
                 print("[error] /annotate requires a paper URL or local file path in the task")
@@ -763,9 +768,6 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 return
             print("\n" + content + "\n")
             write_output(content, path, trace)
-
-            # /wiggum modifier — evaluate and iteratively improve the annotation
-            # against the original paper content as ground truth
             if "wiggum" in explicit_skills:
                 from wiggum import loop_annotate
                 wiggum_result = loop_annotate(
@@ -776,70 +778,59 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                     evaluator_model=_ann_eval_model,
                     parent_trace=trace,
                 )
-                final_status = wiggum_result.get("final", "FAIL")
-                trace.data["wiggum"] = wiggum_result
+                trace.log_wiggum(wiggum_result)
+                trace.finish(wiggum_result.get("final", "FAIL"))
             else:
-                final_status = "PASS"
-
-            trace.finish(final_status)
-            from wiggum import detect_task_type
+                trace.finish("PASS")
             _store_memory(memory, task, "annotate", trace.data, content)
-            return
 
-        # /email standalone — generate personalized .eml drafts from a CSV
-        if "email" in explicit_skills:
+        def _handle_email():
             print("\n[skill:email] standalone mode — generating email drafts...")
             from email_skill import run_email_standalone
-
-            # Parse: first path-like token = CSV, last path-like token = output dir
-            # Everything in between = goal
-            tokens = task.split()
+            tokens     = task.split()
             csv_token  = next((t for t in tokens if t.endswith(".csv")), "")
             out_token  = next((t for t in reversed(tokens) if "/" in t or t.endswith("/")), "email_drafts/")
-            goal_tokens = [t for t in tokens if t != csv_token and t != out_token]
-            goal = " ".join(goal_tokens).strip() or task
-
+            goal       = " ".join(t for t in tokens if t not in (csv_token, out_token)).strip() or task
             if not csv_token:
                 print("[error] /email requires a .csv path in the task string")
                 trace.finish("ERROR")
                 return
-
-            sender_name  = os.environ.get("SENDER_NAME", "")
-            sender_email = os.environ.get("SENDER_EMAIL", "")
-
             with trace.span("email_drafts", model=producer_model):
                 results = run_email_standalone(
                     csv_path=csv_token,
                     goal=goal,
                     output_dir=out_token,
                     producer_model=producer_model,
-                    sender_name=sender_name,
-                    sender_email=sender_email,
+                    sender_name=os.environ.get("SENDER_NAME", ""),
+                    sender_email=os.environ.get("SENDER_EMAIL", ""),
                 )
-
-            summary = f"Generated {len(results)} email drafts -> {out_token}"
-            print(f"\n{summary}")
+            print(f"\nGenerated {len(results)} email drafts -> {out_token}")
             tok_in  = results[0].get("_tokens_in",  0) if results else 0
             tok_out = results[0].get("_tokens_out", 0) if results else 0
-            trace.data["email_drafts"]     = len(results)
-            trace.data["email_output_dir"] = out_token
-            trace.data["input_tokens"]     = tok_in
-            trace.data["output_tokens"]    = tok_out
+            trace.data.update({"email_drafts": len(results), "email_output_dir": out_token,
+                               "input_tokens": tok_in, "output_tokens": tok_out})
             trace.finish("PASS")
-            return
 
-        # /github standalone — gh CLI operations (push, pr, issue, repo, status)
-        if "github" in explicit_skills:
+        def _handle_github():
             print("\n[skill:github] standalone mode...")
             from github_skill import run_github_standalone
-
             result, tok_in, tok_out = run_github_standalone(task, model=producer_model)
             if path:
                 write_output(result, path, trace)
             trace.data["input_tokens"]  = tok_in
             trace.data["output_tokens"] = tok_out
             trace.finish("PASS")
-            return
+
+        _STANDALONE = {
+            "annotate": _handle_annotate,
+            "email":    _handle_email,
+            "github":   _handle_github,
+        }
+
+        for _skill in explicit_skills:
+            if _skill in _STANDALONE:
+                _STANDALONE[_skill]()
+                return
 
         # Memory retrieval — before planning so the planner can use prior context
         with trace.span("memory_retrieval"):
