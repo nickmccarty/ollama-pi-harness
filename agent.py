@@ -46,7 +46,7 @@ def _estimate_keep_alive(task_type: str, explicit_skills: set, use_wiggum: bool)
     called in that case.
     """
     # Standalone skills with short, bounded durations
-    if explicit_skills & {"github", "email"}:
+    if explicit_skills & {"github", "email", "review"}:
         return 90
 
     # Try historical data
@@ -796,7 +796,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github"}
+        _path_optional = {"email", "github", "review"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -910,10 +910,21 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.data["output_tokens"] = tok_out
             trace.finish("PASS")
 
+        def _handle_review():
+            print("\n[skill:review] standalone mode — reviewing diff...")
+            from review_skill import run_review_standalone
+            result, tok_in, tok_out = run_review_standalone(task, model=producer_model)
+            if path:
+                write_output(result, path, trace)
+            trace.data["input_tokens"]  = tok_in
+            trace.data["output_tokens"] = tok_out
+            trace.finish("PASS")
+
         _STANDALONE = {
             "annotate": _handle_annotate,
             "email":    _handle_email,
             "github":   _handle_github,
+            "review":   _handle_review,
         }
 
         for _skill in explicit_skills:

@@ -109,6 +109,16 @@ REGISTRY: dict[str, dict] = {
         "auto":        None,   # explicit only — always opt-in
     },
 
+    "review": {
+        "description": (
+            "Review staged/unstaged/last/all diff against Karpathy rubric: "
+            "no magic, no speculative abstractions, no dead code, functions do one thing"
+        ),
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only
+    },
+
 }
 
 # Aliases — resolved during parse
