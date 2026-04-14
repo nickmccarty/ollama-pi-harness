@@ -1635,4 +1635,41 @@ Rubric iteration: started with 8 rules + INFO/WARN severity, progressively narro
 
 Wired into `agent.py` alongside `/github` and `/email` — dispatch table entry `_handle_review`, `_path_optional` set, keep_alive heuristic returns 90s (short bounded LLM call).
 
-**Self-distillation note:** v2 training data includes v1 nanda-annotator's own outputs. This is intentional — v1 provides stylistic consistency while the 121 human-curated gold examples anchor quality. Worth comparing v2 eval loss and wiggum scores against v1 to check whether the self-distillation loop is tightening or degrading.
+---
+
+## Session 8 — curator.py, eval_suite T_ANN+T_MEM, autoresearch Session 4 (2026-04-14)
+
+### Persona curator (`curator.py`)
+
+Built `curator.py` — a 5-persona paper filter that gates what goes into the fine-tuning dataset. Each paper annotation is scored by five LLM personas; papers that don't earn collective approval are excluded from training.
+
+**Personas:**
+- Pragmatic Engineer — values actionable implementation insights
+- Academic Rigorist — values methodological soundness and evidence quality
+- Synthesis Thinker — values cross-paper connectivity and conceptual clarity
+- Contrarian — looks for oversold claims and trivial contributions
+- Newcomer — values accessibility and field-entry value
+
+**Scoring:** each persona gives 1–5. Paper passes if mean ≥ 3.5 AND no single score < 2 (veto floor). Thresholds configurable via `--mean-threshold` / `--veto-floor`.
+
+**Output:** `*_curated.csv` (filtered rows, same columns as input) + `curation_log.jsonl` (per-paper decisions with per-persona scores and reasons). Idempotent — already-scored papers are skipped. `--dry-run` scores without writing CSV. `--stats` shows pass/fail counts and veto breakdown by persona.
+
+`build_finetune_from_annotations.py` updated to prefer `*_curated.csv` over `*_annotated.csv` when available — v3 dataset will automatically use curated papers if curation has been run.
+
+**Role in the self-improvement cycle:** the taste layer. Without curation, self-distillation loops can reinforce mediocre papers alongside strong ones. The Contrarian persona is the critical differentiator — it specifically hunts for overclaiming and incremental contributions that would dilute the training signal.
+
+### eval_suite: T_ANN and T_MEM
+
+Added two new regression tests:
+
+**T_ANN** — `/annotate` regression against `eval_suite_fixtures/ann_fixture.md` (ReAct paper abstract). Checks: all core Nanda sections present (Topic, Motivation, Contribution, Evidence/Broad impact), no conversation-loop artifacts (`--- EOF ---`, `[truncated]`), no placeholders, minimum length.
+
+**T_MEM** — memory retrieval smoke test (runs inline, no agent.py call). Checks: 739 papers indexed, `get_context()` returns results for a domain query, paper observations surface in the formatted output. Catches memory corruption or index wipe between sessions.
+
+New criterion helpers: `has_nanda_sections()`, `no_annotate_artifacts()`.
+
+### autoresearch Session 4 + keep_alive hang fix
+
+Updated `autoresearch_program.md` with what kills scores, unexplored angles for Session 4, and session history table. Session 4 running: `kimi-k2.5:cloud` proposer, tasks T_D + T_E, baseline 8.915.
+
+**Keep_alive hang:** `run_eval()` was passing `OLLAMA_KEEP_ALIVE=-1` to the eval subprocess, keeping producer and evaluator models loaded indefinitely and stalling the proposer call next iteration. Fixed to `OLLAMA_KEEP_ALIVE=120` — models release ~2 minutes after eval completes.

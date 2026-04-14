@@ -267,9 +267,10 @@ python inspect_run.py --all    # summary table of all runs
 | `github_skill.py` | /github standalone skill — push, PR, issue, repo ops via `gh` CLI + LLM |
 | `email_skill.py` | /email standalone skill — personalized `.eml` drafts from CSV + goal |
 | `review_skill.py` | /review standalone skill — diff review against dead-code/anti-pattern rubric (Qwen3-Coder:30b) |
+| `curator.py` | 5-persona paper filter — scores each annotation, writes `*_curated.csv` + `curation_log.jsonl` |
 | `finetune_annotate.py` | QLoRA fine-tune Qwen2.5-7B on Nanda annotated abstracts; early stopping, DashboardCallback |
 | `run_annotations.py` | Batch annotation runner — parse arxiv markdown → annotate → CSV |
-| `build_finetune_from_annotations.py` | Merge gold + agent CSVs → `finetune_dataset_v2.jsonl` |
+| `build_finetune_from_annotations.py` | Merge gold + agent CSVs → `finetune_dataset_v2.jsonl` (prefers `*_curated.csv` if available) |
 | `backfill_metrics.py` | Reconstruct `finetune_metrics.jsonl` from training log output |
 | `Modelfile` | Ollama Modelfile for `pi-qwen` (qwen2.5:7b) |
 | `Modelfile.32b` | Ollama Modelfile for `pi-qwen-32b` (qwen2.5:32b Q4_K_M) |
