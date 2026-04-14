@@ -105,11 +105,38 @@ def no_file_path_refs():
     return check
 
 
+def has_nanda_sections():
+    """Output must contain the core Nanda annotation sections."""
+    REQUIRED = ["**Topic**", "**Motivation**", "**Contribution**"]
+    EVIDENCE = ["**Evidence", "**Broad impact**", "**Narrow impact**"]
+    def check(content: str):
+        missing = [s for s in REQUIRED if s not in content]
+        has_evidence = any(s in content for s in EVIDENCE)
+        if missing:
+            return False, f"missing sections: {missing}"
+        if not has_evidence:
+            return False, "missing evidence/impact section"
+        return True, f"all core sections present"
+    check.__name__ = "has_nanda_sections"
+    return check
+
+
+def no_annotate_artifacts():
+    """Output must not contain conversation loops or truncation artifacts."""
+    BAD = ["--- EOF ---", "--- End", "[truncated]", "Sure, here", "Of course,"]
+    def check(content: str):
+        found = [b for b in BAD if b in content]
+        return len(found) == 0, ("clean" if not found else f"artifacts found: {found}")
+    check.__name__ = "no_annotate_artifacts"
+    return check
+
+
 # ---------------------------------------------------------------------------
 # Task registry
 # ---------------------------------------------------------------------------
 
-BASE = "~/Desktop/harness-engineering"
+BASE     = "~/Desktop/harness-engineering"
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_suite_fixtures")
 
 SUITE = [
     {
@@ -173,6 +200,20 @@ SUITE = [
         ],
     },
     {
+        "id": "T_ANN",
+        "desc": "annotate: ReAct paper fixture",
+        "task": f"/annotate {FIXTURES}/ann_fixture.md {BASE}/eval-annotate-react.md",
+        "output": f"{BASE}/eval-annotate-react.md",
+        "kb_file": None,
+        "criteria": [
+            min_bytes(300),
+            min_lines(8),
+            has_nanda_sections(),
+            no_annotate_artifacts(),
+            no_placeholders(),
+        ],
+    },
+    {
         "id": "T_E",
         "desc": "open-ended, prompt injection defense",
         "task": f"Search for best practices for prompt injection defense in production AI systems and save to {BASE}/eval-prompt-injection.md",
@@ -188,6 +229,66 @@ SUITE = [
         ],
     },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Memory retrieval smoke test
+# ---------------------------------------------------------------------------
+
+def check_memory_retrieval() -> list[dict]:
+    """
+    Verify the paper corpus is indexed and get_context() returns relevant results.
+    Returns list of result dicts (same shape as check_task results).
+    """
+    results = []
+
+    # Import here so eval_suite works even when memory deps are absent
+    try:
+        from memory import MemoryStore
+    except ImportError as e:
+        return [{"criterion": "memory_import", "passed": False, "detail": str(e)}]
+
+    store = MemoryStore()
+
+    # Check 1: paper count
+    try:
+        with store._connect() as conn:
+            paper_count = conn.execute(
+                "SELECT COUNT(*) FROM observations WHERE task_type = 'paper'"
+            ).fetchone()[0]
+        ok = paper_count > 0
+        results.append({
+            "criterion": "paper_count",
+            "passed": ok,
+            "detail": f"{paper_count} papers indexed",
+        })
+    except Exception as e:
+        results.append({"criterion": "paper_count", "passed": False, "detail": str(e)})
+        return results
+
+    # Check 2: retrieval returns results for a domain query
+    try:
+        ctx = store.get_context("agentic reasoning language model chain of thought")
+        ok = bool(ctx and len(ctx) > 50)
+        results.append({
+            "criterion": "retrieval_returns_results",
+            "passed": ok,
+            "detail": f"{len(ctx)} chars returned" if ctx else "empty response",
+        })
+    except Exception as e:
+        results.append({"criterion": "retrieval_returns_results", "passed": False, "detail": str(e)})
+        return results
+
+    # Check 3: retrieval result surfaces at least one paper observation
+    # get_context() formats paper rows as "**[date] title** (paper, n/a)"
+    ok = "(paper," in (ctx or "") or "(paper " in (ctx or "")
+    results.append({
+        "criterion": "retrieval_contains_paper_obs",
+        "passed": ok,
+        "detail": "paper observations surfaced" if ok else "no paper observations in result",
+    })
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +530,20 @@ if __name__ == "__main__":
             passed_tasks += 1
         total_criteria += len(results)
         passed_criteria += sum(1 for r in results if r["passed"])
+
+    # Memory retrieval smoke test (always runs, no agent.py invocation)
+    print("\n  T_MEM (memory retrieval smoke test)")
+    mem_results = check_memory_retrieval()
+    mem_passed = all(r["passed"] for r in mem_results)
+    print(f"  T_MEM — {'PASS' if mem_passed else 'FAIL'}")
+    for r in mem_results:
+        mark = "✓" if r["passed"] else "✗"
+        print(f"    {mark} {r['criterion']}: {r['detail']}")
+    total_criteria += len(mem_results)
+    passed_criteria += sum(1 for r in mem_results if r["passed"])
+    if mem_passed:
+        passed_tasks += 1
+    total_tasks += 1
 
     print(f"\n======================================")
     print(f" Tasks:    {passed_tasks}/{total_tasks} passed")
