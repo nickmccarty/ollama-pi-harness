@@ -1535,3 +1535,76 @@ Root cause of repetition: model learned `--- EOF ---` as its "done" signal from 
 - Added early stopping: `eval_strategy="epoch"`, `EarlyStoppingCallback`, `load_best_model_at_end=True` — stops if eval loss doesn't improve for N epochs (configurable via `--patience`).
 
 **Self-distillation note:** v2 training data includes v1 nanda-annotator's own outputs. This is intentional — v1 provides stylistic consistency while the 121 human-curated gold examples anchor quality. Worth comparing v2 eval loss and wiggum scores against v1 to check whether the self-distillation loop is tightening or degrading.
+
+### Agent dispatch refactor (Karpathy principle: explicit > implicit)
+
+Refactored standalone skill dispatch in `agent.py` from a chain of `if/elif` blocks into inner handler functions + a dispatch table (`_STANDALONE` dict). Motivated by Karpathy's "no magic" guideline — the intent of each branch is now explicit and the table is easy to extend.
+
+```python
+def _handle_annotate(): ...
+def _handle_email(): ...
+def _handle_github(): ...
+_STANDALONE = {"annotate": _handle_annotate, "email": _handle_email, "github": _handle_github}
+for _skill in explicit_skills:
+    if _skill in _STANDALONE:
+        _STANDALONE[_skill]()
+        return
+```
+
+### Paper corpus indexer (`index_papers.py`)
+
+Built `index_papers.py` to bulk-load the annotated paper corpus into ChromaDB memory as background knowledge, so `get_context()` can surface relevant prior papers before web search fires.
+
+- Parses arxiv markdown files → 598 title mappings (arxiv_id → title)
+- Loads all `*_annotated.csv` files; gold CSV rows take precedence over agent rows
+- Each paper stored with: `task_type="paper"`, `task="paper: {arxiv_id}"`, narrative = topic + motivation + contribution (≤600 chars), facts = ["Contribution: ...", "Evidence: ...", "Broad impact: ..."]
+- Fixed timestamp `2026-01-01T00:00:00+00:00` so papers sort before run observations in retrieval
+- Added `store_direct()` to `memory.py` — bulk import path bypassing LLM compression, idempotent by task key
+- Result: **739 papers indexed**, memory now contains 861 total observations
+
+`--dry-run` and `--stats` flags for inspection. Re-running is safe (idempotent).
+
+### Failure pattern aggregator (`failure_patterns.py`)
+
+Built `failure_patterns.py` to surface recurring wiggum issues across `runs.jsonl` without LLM or embeddings.
+
+Pipeline: extract all issue strings from `wiggum_eval_log` → normalize + tokenize to keyword/bigram sets → greedy single-linkage clustering by Jaccard similarity (threshold 0.15) → rank by frequency → write `wiki/failure-patterns.md`.
+
+Results: **645 issues extracted, 107 recurring clusters** found. Top failure patterns:
+1. Missing implementation notes / concrete steps (56×)
+2. Unclosed or malformed code fences (31×)
+3. Shallow synthesis without cross-paper synthesis (24×)
+4. Missing quantitative evidence (19×)
+5. Overly broad conclusions (14×)
+
+### SYNTH_INSTRUCTION updates
+
+Two targeted fixes to `SYNTH_INSTRUCTION` (both regular and count variants in `agent.py`) based on top failure patterns:
+
+1. **Implementation notes** — added explicit requirement: *"Each section MUST include concrete implementation notes — not just what was done but how: algorithms, hyperparameters, design decisions."*
+2. **Code fences** — added: *"Every section MUST include a complete runnable code example with both opening and closing triple-backtick fences — never leave a code block unclosed."*
+
+Also added a belt-and-suspenders fence repair in `clean_synthesis_output()`: counts triple-backtick markers; if odd (unclosed), appends a closing ` ``` ` before the output is returned. Catches cases where the model truncates mid-block.
+
+### Dynamic keep_alive (`_estimate_keep_alive`)
+
+`keep_alive=60` was arbitrary and blocked Ollama concurrency when models ran longer than the estimate. Replaced with a two-stage dynamic system in `agent.py`:
+
+**Stage 1** (after skill parsing, before planning): estimate from explicit_skills heuristic
+- Standalone `github`/`email`: 90s fixed (short LLM calls)
+- Otherwise: base 300s + 150s if wiggum + 200s if panel skill + ×1.5 if task contains "deep"
+
+**Stage 2** (after `make_plan()` + `merge_skills()`): refine from historical p90
+- Read last 100 `runs.jsonl` entries, filter to matching `task_type`
+- Compute p90 of wall-clock durations, add 20% buffer
+- Fall back to Stage 1 heuristic if <5 matching runs
+
+`OLLAMA_KEEP_ALIVE` env var overrides both stages at module load time (`_KEEP_ALIVE_OVERRIDE`). Ollama itself handles eviction; the estimate just sets the initial TTL so the model stays loaded through the full run without blocking indefinitely.
+
+### Ollama concurrency: `OLLAMA_NUM_PARALLEL=4`
+
+Root cause of concurrency blocking: `OLLAMA_NUM_PARALLEL` was unset (default 1 — single concurrent request). Set via `setx OLLAMA_NUM_PARALLEL 4` + Ollama restart via tray icon. Verified with `echo %OLLAMA_NUM_PARALLEL%`.
+
+The dynamic keep_alive + `OLLAMA_NUM_PARALLEL=4` together address the blocking pattern: models stay loaded long enough to serve concurrent requests without re-loading between tasks.
+
+**Self-distillation note:** v2 training data includes v1 nanda-annotator's own outputs. This is intentional — v1 provides stylistic consistency while the 121 human-curated gold examples anchor quality. Worth comparing v2 eval loss and wiggum scores against v1 to check whether the self-distillation loop is tightening or degrading.

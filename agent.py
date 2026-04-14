@@ -27,11 +27,85 @@ warnings.filterwarnings("ignore", message="Couldn't find ffmpeg", category=Runti
 import ollama as _ollama_raw
 
 # Keep models hot between calls — avoids 30-60s cold reload between pipeline stages.
-# OLLAMA_KEEP_ALIVE env var overrides the default; -1 means keep loaded forever.
-_KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
+# OLLAMA_KEEP_ALIVE env var pins keep_alive globally (e.g. -1 to force always-on).
+# If unset, _estimate_keep_alive() computes a per-run value from historical data.
+_KEEP_ALIVE_OVERRIDE = os.environ.get("OLLAMA_KEEP_ALIVE")
+_KEEP_ALIVE = int(_KEEP_ALIVE_OVERRIDE) if _KEEP_ALIVE_OVERRIDE is not None else None
+
+
+def _estimate_keep_alive(task_type: str, explicit_skills: set, use_wiggum: bool) -> int:
+    """
+    Estimate keep_alive (seconds) for this run.
+
+    Strategy:
+      1. Read last 100 runs from runs.jsonl, filter to matching task type.
+      2. Take the 90th-percentile run_duration_s + 20% buffer.
+      3. Fall back to skill-aware heuristics if history is thin (< 5 matching runs).
+
+    The env var OLLAMA_KEEP_ALIVE always wins if set — this function is never
+    called in that case.
+    """
+    # Standalone skills with short, bounded durations
+    if explicit_skills & {"github", "email"}:
+        return 90
+
+    # Try historical data
+    try:
+        import json as _json
+        _log = os.path.join(os.path.dirname(__file__), "runs.jsonl")
+        durations = []
+        with open(_log, encoding="utf-8") as _f:
+            lines = _f.readlines()
+        for line in lines[-100:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            dur = r.get("run_duration_s")
+            # Match on task_type if known; otherwise use all runs
+            if dur and dur > 0:
+                if task_type and r.get("task_type") == task_type:
+                    durations.append(dur)
+        # Fall back to all task types if too few matching
+        if len(durations) < 5:
+            durations = []
+            for line in lines[-100:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                dur = r.get("run_duration_s")
+                if dur and dur > 0:
+                    durations.append(dur)
+        if len(durations) >= 5:
+            durations.sort()
+            p90 = durations[int(len(durations) * 0.9)]
+            return int(p90 * 1.2)
+    except Exception:
+        pass
+
+    # Heuristic fallback
+    base = 300
+    if use_wiggum:
+        base += 150
+    if "panel" in explicit_skills:
+        base += 200
+    if "deep" in explicit_skills:
+        base = int(base * 1.5)
+    if "annotate" in explicit_skills:
+        base = max(base, 240)
+    return base
+
 
 def _ollama_chat(*args, **kwargs):
-    kwargs.setdefault("keep_alive", _KEEP_ALIVE)
+    if _KEEP_ALIVE is not None:
+        kwargs.setdefault("keep_alive", _KEEP_ALIVE)
     return _ollama_raw.chat(*args, **kwargs)
 
 ollama = type("_OllamaShim", (), {"chat": staticmethod(_ollama_chat)})()
@@ -699,6 +773,7 @@ def _store_memory(memory: MemoryStore, task: str, task_type: str, trace_data: di
 
 
 def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluator_model: str = None):
+    global _KEEP_ALIVE
     from wiggum import EVALUATOR_MODEL, ANNOTATE_EVALUATOR_MODEL
     _eval_model    = evaluator_model or EVALUATOR_MODEL
     _ann_eval_model = evaluator_model or ANNOTATE_EVALUATOR_MODEL
@@ -708,6 +783,15 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
     try:
         # Skill parsing — extract /skill tokens before anything else touches the task
         task, explicit_skills = parse_skills(task)
+
+        # Set dynamic keep_alive unless overridden by OLLAMA_KEEP_ALIVE env var
+        if _KEEP_ALIVE_OVERRIDE is None:
+            _KEEP_ALIVE = _estimate_keep_alive(
+                task_type=None,           # task_type not known yet; refined below after planning
+                explicit_skills=set(explicit_skills),
+                use_wiggum=use_wiggum,
+            )
+            print(f"[agent] keep_alive={_KEEP_ALIVE}s (dynamic)")
         mode = "+".join(explicit_skills) if explicit_skills else "research"
         print(f"[agent] model={producer_model}  mode={mode}")
 
@@ -859,6 +943,15 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         # Skill activation — merge explicit + auto-triggered
         auto_skills    = auto_activate(task, plan)
         active_skills  = merge_skills(explicit_skills, auto_skills)
+
+        # Refine keep_alive now that task_type and active_skills are known
+        if _KEEP_ALIVE_OVERRIDE is None:
+            _KEEP_ALIVE = _estimate_keep_alive(
+                task_type=plan.task_type,
+                explicit_skills=set(active_skills),
+                use_wiggum=use_wiggum,
+            )
+            print(f"  [agent] keep_alive refined to {_KEEP_ALIVE}s ({plan.task_type})")
         if auto_skills:
             print(f"  [skills] auto-activated: {auto_skills}")
         if active_skills:
