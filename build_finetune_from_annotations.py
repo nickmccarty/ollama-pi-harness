@@ -200,10 +200,17 @@ def main():
                 examples.append(ex)
         print(f"  seeded {len(examples)} examples from existing dataset")
 
-    # 2b. Load all annotation CSVs (markdown-sourced abstracts)
-    csv_files = sorted(HERE.glob("arxiv_*_annotated.csv"))
+    # 2b. Load all annotation CSVs (prefer *_curated.csv over *_annotated.csv if available)
+    # curator.py writes *_curated.csv as a filtered subset — use it when present so
+    # the training dataset only includes persona-approved papers.
+    annotated = sorted(HERE.glob("arxiv_*_annotated.csv"))
+    csv_files = []
+    for ann in annotated:
+        curated = ann.with_name(ann.stem.replace("_annotated", "_curated") + ".csv")
+        csv_files.append(curated if curated.exists() else ann)
     csv_files = [f for f in csv_files if f.exists()]
-    print(f"\nLoading {len(csv_files)} annotation CSV(s)...")
+    using_curated = sum(1 for f in csv_files if "_curated" in f.name)
+    print(f"\nLoading {len(csv_files)} annotation CSV(s)  ({using_curated} curated, {len(csv_files)-using_curated} raw)...")
 
     for csv_path in csv_files:
         rows = load_annotated_csv(csv_path)

@@ -503,7 +503,9 @@ def run_eval(task_ids: list[str]) -> float:
     """Run eval_suite --score --tasks <tasks> and return composite float."""
     tasks_arg = ",".join(task_ids)
     print(f"  [eval] running eval_suite on {tasks_arg}...")
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "WIGGUM_MAX_ROUNDS": "1", "OLLAMA_KEEP_ALIVE": "-1", "WIGGUM_PANEL": "1", "RESEARCH_CACHE": "1"}
+    # Use a bounded keep_alive (120s) instead of -1 so models unload after eval
+    # completes and don't occupy Ollama slots when the proposer runs next iteration.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "WIGGUM_MAX_ROUNDS": "1", "OLLAMA_KEEP_ALIVE": "120", "WIGGUM_PANEL": "1", "RESEARCH_CACHE": "1"}
     result = subprocess.run(
         [PYTHON, "eval_suite.py", "--score", "--tasks", tasks_arg],
         capture_output=True,
