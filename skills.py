@@ -440,6 +440,27 @@ def run_annotate_standalone(
         result = resp["message"]["content"].strip()
         # Strip Qwen3 chain-of-thought blocks if present
         result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+        # Strip Qwen2.5 end-of-turn tokens and anything after
+        result = re.split(r"<\|im_end\|>|<\|endoftext\|>", result)[0].strip()
+
+        # Strip preamble before the annotation heading or first section
+        preamble_m = re.search(r"(#\s*Annotated Abstract|\*\*Topic\*\*)", result)
+        if preamble_m:
+            result = result[preamble_m.start():].strip()
+
+        # Truncate after the Broad impact paragraph.
+        # Strategy: take at most 600 chars of content after the header line,
+        # then cut at the last sentence-ending punctuation in that window.
+        # This avoids dependence on blank lines or stop markers the model may not emit.
+        broad_idx = result.find("**Broad impact**")
+        if broad_idx != -1:
+            header_end = result.find("\n", broad_idx)
+            if header_end != -1:
+                content_start = header_end + 1
+                window = result[content_start : content_start + 600]
+                last_sent = max(window.rfind("."), window.rfind("!"), window.rfind("?"))
+                if last_sent != -1:
+                    result = result[: content_start + last_sent + 1].strip()
 
         if _is_valid_annotation(result):
             return result
