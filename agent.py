@@ -844,6 +844,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
 
         def _handle_annotate():
             print("\n[skill:annotate] standalone mode — annotating paper abstract...")
+            trace.data["task_type"] = "annotate"
             if not file_context.strip():
                 print("[error] /annotate requires a paper URL or local file path in the task")
                 trace.finish("ERROR")
@@ -896,7 +897,8 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             print(f"\nGenerated {len(results)} email drafts -> {out_token}")
             tok_in  = results[0].get("_tokens_in",  0) if results else 0
             tok_out = results[0].get("_tokens_out", 0) if results else 0
-            trace.data.update({"email_drafts": len(results), "email_output_dir": out_token,
+            trace.data.update({"task_type": "email", "email_drafts": len(results),
+                               "email_output_dir": out_token,
                                "input_tokens": tok_in, "output_tokens": tok_out})
             trace.finish("PASS")
 
@@ -906,6 +908,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             result, tok_in, tok_out = run_github_standalone(task, model=producer_model)
             if path:
                 write_output(result, path, trace)
+            trace.data["task_type"]     = "github"
             trace.data["input_tokens"]  = tok_in
             trace.data["output_tokens"] = tok_out
             trace.finish("PASS")
@@ -913,11 +916,19 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         def _handle_review():
             print("\n[skill:review] standalone mode — reviewing diff...")
             from review_skill import run_review_standalone
-            result, tok_in, tok_out = run_review_standalone(task, model=producer_model)
+            result = run_review_standalone(task, model=producer_model)
             if path:
-                write_output(result, path, trace)
-            trace.data["input_tokens"]  = tok_in
-            trace.data["output_tokens"] = tok_out
+                write_output(result["text"], path, trace)
+            trace.data["task_type"]        = "review"
+            trace.data["input_tokens"]     = result["tokens_in"]
+            trace.data["output_tokens"]    = result["tokens_out"]
+            trace.data["review_scope"]     = result["scope"]
+            trace.data["review_diff_chars"] = result["diff_chars"]
+            trace.data["review_warnings"]  = result["warnings"]
+            trace.data["review_warnings_count"] = result["warnings_count"]
+            trace.data["review_summary"]   = result["summary"]
+            if result["thinking"]:
+                trace.data["review_thinking"] = result["thinking"]
             trace.finish("PASS")
 
         _STANDALONE = {

@@ -126,7 +126,8 @@ def _get_diff(scope: str) -> tuple[str, str]:
 # LLM call
 # ---------------------------------------------------------------------------
 
-def _llm(diff: str, model: str) -> tuple[str, int, int]:
+def _llm(diff: str, model: str) -> tuple[str, int, int, str]:
+    """Returns (review_text, tokens_in, tokens_out, thinking_text)."""
     user_msg = f"Review this git diff:\n\n```diff\n{diff[:_MAX_DIFF_CHARS]}\n```"
     if len(diff) > _MAX_DIFF_CHARS:
         user_msg += f"\n\n[diff truncated — {len(diff):,} chars total, showing first {_MAX_DIFF_CHARS:,}]"
@@ -140,22 +141,35 @@ def _llm(diff: str, model: str) -> tuple[str, int, int]:
         options={"temperature": 0.1},
         keep_alive=_KEEP_ALIVE,
     )
-    text    = resp["message"]["content"].strip()
+    msg     = resp["message"]
+    text    = msg.get("content", "").strip()
     # Strip any markdown fences the model wraps around its output
     text    = re.sub(r"^```[a-z]*\n?", "", text).rstrip("`").strip()
+    # Capture reasoning trace if the model emitted one (Qwen3, deepseek-r1, etc.)
+    thinking = (msg.get("thinking") or "").strip()
     in_tok  = resp.get("prompt_eval_count", 0) or 0
     out_tok = resp.get("eval_count", 0) or 0
-    return text, in_tok, out_tok
+    return text, in_tok, out_tok, thinking
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def run_review_standalone(task: str, model: str = _DEFAULT_MODEL) -> tuple[str, int, int]:
+def run_review_standalone(task: str, model: str = _DEFAULT_MODEL) -> dict:
     """
     Parse scope from task string, get diff, run LLM review.
-    Returns (review_text, tokens_in, tokens_out).
+
+    Returns a result dict:
+      text          — full formatted review markdown
+      scope         — staged | unstaged | last | all
+      diff_chars    — size of diff reviewed
+      warnings      — list of WARN lines extracted from output
+      warnings_count — int
+      summary       — the SUMMARY: line
+      thinking      — reasoning trace text if model emitted one (else "")
+      tokens_in     — int
+      tokens_out    — int
     """
     tokens = task.lower().split()
 
@@ -174,12 +188,18 @@ def run_review_standalone(task: str, model: str = _DEFAULT_MODEL) -> tuple[str, 
     if not diff.strip():
         msg = f"[review] Nothing to review ({label} — diff is empty)."
         print(msg)
-        return msg, 0, 0
+        return {"text": msg, "scope": scope, "diff_chars": 0, "warnings": [],
+                "warnings_count": 0, "summary": "", "thinking": "", "tokens_in": 0, "tokens_out": 0}
 
     print(f"[review] Reviewing {label} ({len(diff):,} chars diff)...")
-    review, in_tok, out_tok = _llm(diff, model)
+    review, in_tok, out_tok, thinking = _llm(diff, model)
 
-    # Build output
+    # Parse structured fields from review text
+    warn_lines = [l.strip() for l in review.splitlines() if l.strip().startswith("WARN")]
+    summary_m  = re.search(r"^SUMMARY:.+$", review, re.MULTILINE)
+    summary    = summary_m.group(0) if summary_m else ""
+
+    # Build output markdown
     lines = [
         f"# Code Review — {label}",
         "",
@@ -191,7 +211,20 @@ def run_review_standalone(task: str, model: str = _DEFAULT_MODEL) -> tuple[str, 
 
     print("\n" + review + "\n")
     print(f"[review] tokens — in: {in_tok:,}  out: {out_tok:,}")
-    return output, in_tok, out_tok
+    if thinking:
+        print(f"[review] thinking: {len(thinking)} chars")
+
+    return {
+        "text":           output,
+        "scope":          scope,
+        "diff_chars":     len(diff),
+        "warnings":       warn_lines,
+        "warnings_count": len(warn_lines),
+        "summary":        summary,
+        "thinking":       thinking,
+        "tokens_in":      in_tok,
+        "tokens_out":     out_tok,
+    }
 
 
 # ---------------------------------------------------------------------------
