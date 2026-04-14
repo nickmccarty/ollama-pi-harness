@@ -819,8 +819,12 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
 
             summary = f"Generated {len(results)} email drafts -> {out_token}"
             print(f"\n{summary}")
-            trace.data["email_drafts"] = len(results)
+            tok_in  = results[0].get("_tokens_in",  0) if results else 0
+            tok_out = results[0].get("_tokens_out", 0) if results else 0
+            trace.data["email_drafts"]     = len(results)
             trace.data["email_output_dir"] = out_token
+            trace.data["input_tokens"]     = tok_in
+            trace.data["output_tokens"]    = tok_out
             trace.finish("PASS")
             return
 
@@ -829,9 +833,11 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             print("\n[skill:github] standalone mode...")
             from github_skill import run_github_standalone
 
-            result = run_github_standalone(task, model=producer_model)
+            result, tok_in, tok_out = run_github_standalone(task, model=producer_model)
             if path:
                 write_output(result, path, trace)
+            trace.data["input_tokens"]  = tok_in
+            trace.data["output_tokens"] = tok_out
             trace.finish("PASS")
             return
 

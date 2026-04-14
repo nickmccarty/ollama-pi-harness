@@ -37,7 +37,7 @@ import ollama as _ollama_raw
 
 HERE         = Path(__file__).parent
 _KEEP_ALIVE  = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
-_DEFAULT_MODEL = os.environ.get("PRODUCER_MODEL", "llama3.2:3b")
+_DEFAULT_MODEL = os.environ.get("GITHUB_MODEL", os.environ.get("PRODUCER_MODEL", "llama3.2:3b"))
 
 # ---------------------------------------------------------------------------
 # Shell helpers
@@ -77,7 +77,8 @@ def _require_git():
 # LLM helpers
 # ---------------------------------------------------------------------------
 
-def _llm(system: str, user: str, model: str) -> str:
+def _llm(system: str, user: str, model: str) -> tuple[str, int, int]:
+    """Returns (text, prompt_tokens, completion_tokens)."""
     resp = _ollama_raw.chat(
         model=model,
         messages=[
@@ -87,7 +88,10 @@ def _llm(system: str, user: str, model: str) -> str:
         options={"temperature": 0.3},
         keep_alive=_KEEP_ALIVE,
     )
-    return resp["message"]["content"].strip()
+    text    = resp["message"]["content"].strip()
+    in_tok  = resp.get("prompt_eval_count", 0) or 0
+    out_tok = resp.get("eval_count", 0) or 0
+    return text, in_tok, out_tok
 
 
 _PR_SYSTEM = """\
@@ -161,18 +165,29 @@ def op_push(args: list[str], model: str) -> str:
     _require_git()
 
     _, branch, _ = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    _, diff, _   = _run(["git", "diff", "--cached", "--stat"])
 
     # Stage everything not already staged
     _run(["git", "add", "-A"])
+
+    _, stat, _      = _run(["git", "diff", "--cached", "--stat"])
     _, diff_full, _ = _run(["git", "diff", "--cached"])
 
     if not diff_full.strip():
         return "[github] Nothing to commit — working tree is clean."
 
     task_hint = " ".join(args).strip()
-    user_msg  = f"Task: {task_hint}\n\nDiff:\n{diff_full[:6000]}"
-    commit_msg = _llm(_COMMIT_SYSTEM, user_msg, model)
+
+    # Give the model: task hint + file summary + first 2000 chars of actual diff
+    # The stat summary (which files changed, +/- lines) carries most of the signal;
+    # the raw diff excerpt gives detail on the most-changed file only.
+    user_msg = (
+        f"Task hint: {task_hint}\n\n"
+        f"Files changed:\n{stat}\n\n"
+        f"Diff excerpt (first 2000 chars):\n{diff_full[:2000]}"
+    )
+    commit_msg, in_tok, out_tok = _llm(_COMMIT_SYSTEM, user_msg, model)
+    # Strip quotes, newlines the model sometimes wraps around the message
+    commit_msg = commit_msg.strip().strip('"').strip("'").splitlines()[0][:72]
     print(f"[github] commit message: {commit_msg}")
 
     rc, out, err = _run(["git", "commit", "-m", commit_msg])
@@ -183,7 +198,7 @@ def op_push(args: list[str], model: str) -> str:
     if rc != 0:
         return f"[github] push failed:\n{err}"
 
-    return f"[github] pushed branch '{branch}'\n{out}"
+    return f"[github] pushed branch '{branch}'\n{out}", in_tok, out_tok
 
 
 def op_pr_create(args: list[str], model: str) -> str:
@@ -200,7 +215,7 @@ def op_pr_create(args: list[str], model: str) -> str:
         f"Commits:\n{log}\n\n"
         f"Diff (truncated to 6000 chars):\n{diff[:6000]}"
     )
-    raw = _llm(_PR_SYSTEM, user_msg, model)
+    raw, in_tok, out_tok = _llm(_PR_SYSTEM, user_msg, model)
     title, body = _parse_title_body(raw)
 
     print(f"[github] PR title: {title}")
@@ -212,8 +227,8 @@ def op_pr_create(args: list[str], model: str) -> str:
         "--body",  body,
     ])
     if rc != 0:
-        return f"[github] pr create failed:\n{err}"
-    return f"[github] PR created:\n{out}"
+        return f"[github] pr create failed:\n{err}", in_tok, out_tok
+    return f"[github] PR created:\n{out}", in_tok, out_tok
 
 
 def op_pr_list(args: list[str], model: str) -> str:
@@ -258,7 +273,7 @@ def op_issue_create(args: list[str], model: str) -> str:
     if not description:
         return "[github] issue create requires a description"
 
-    raw = _llm(_ISSUE_SYSTEM, f"Problem description: {description}", model)
+    raw, in_tok, out_tok = _llm(_ISSUE_SYSTEM, f"Problem description: {description}", model)
     title, body = _parse_title_body(raw)
 
     print(f"[github] issue title: {title}")
@@ -269,7 +284,7 @@ def op_issue_create(args: list[str], model: str) -> str:
         "--title", title,
         "--body",  body,
     ])
-    return out if rc == 0 else f"[github] issue create failed:\n{err}"
+    return (out if rc == 0 else f"[github] issue create failed:\n{err}"), in_tok, out_tok
 
 
 def op_issue_list(args: list[str], model: str) -> str:
@@ -331,26 +346,34 @@ _OPS = {
 }
 
 
-def _dispatch(tokens: list[str], model: str) -> str:
+def _dispatch(tokens: list[str], model: str) -> tuple[str, int, int]:
     """
     Match tokens to the longest known operation prefix.
     e.g. ["pr", "create", "fix", "bug"] -> op_pr_create(["fix", "bug"])
+    Returns (result_text, tokens_in, tokens_out).
     """
     # Try two-word key first, then one-word
     if len(tokens) >= 2:
         two = f"{tokens[0]} {tokens[1]}"
         if two in _OPS and _OPS[two] is not None:
-            return _OPS[two](tokens[2:], model)
+            result = _OPS[two](tokens[2:], model)
+            if isinstance(result, tuple):
+                return result
+            return result, 0, 0
 
     one = tokens[0] if tokens else ""
     if one in _OPS and _OPS[one] is not None:
-        return _OPS[one](tokens[1:], model)
+        result = _OPS[one](tokens[1:], model)
+        if isinstance(result, tuple):
+            return result
+        return result, 0, 0
 
     # Unknown — list available operations
     ops = [k for k, v in _OPS.items() if v is not None]
     return (
         f"[github] Unknown operation: '{' '.join(tokens[:2])}'\n"
-        f"Available: {', '.join(sorted(ops))}"
+        f"Available: {', '.join(sorted(ops))}",
+        0, 0,
     )
 
 
@@ -358,19 +381,23 @@ def _dispatch(tokens: list[str], model: str) -> str:
 # Entry point (called from agent.py dispatch)
 # ---------------------------------------------------------------------------
 
-def run_github_standalone(task: str, model: str = _DEFAULT_MODEL) -> str:
+def run_github_standalone(task: str, model: str = _DEFAULT_MODEL) -> tuple[str, int, int]:
     """
     Parse the task string and dispatch to the appropriate GitHub operation.
-    Returns a string result for agent.py to print/write.
+    Returns (result_text, tokens_in, tokens_out).
     """
     tokens = task.strip().split()
     if not tokens:
         ops = [k for k, v in _OPS.items() if v is not None]
-        return f"[github] No operation specified. Available: {', '.join(sorted(ops))}"
+        msg = f"[github] No operation specified. Available: {', '.join(sorted(ops))}"
+        print(msg)
+        return msg, 0, 0
 
-    result = _dispatch(tokens, model)
+    result, in_tok, out_tok = _dispatch(tokens, model)
     print(result)
-    return result
+    if in_tok or out_tok:
+        print(f"[github] tokens — in: {in_tok:,}  out: {out_tok:,}")
+    return result, in_tok, out_tok
 
 
 # ---------------------------------------------------------------------------
@@ -380,4 +407,4 @@ def run_github_standalone(task: str, model: str = _DEFAULT_MODEL) -> str:
 if __name__ == "__main__":
     import sys
     task = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "status"
-    run_github_standalone(task)
+    run_github_standalone(task)  # prints internally

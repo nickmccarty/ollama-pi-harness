@@ -114,7 +114,8 @@ def _parse_list_field(val: str) -> list[str]:
     return [x.strip() for x in val.strip("[]").split(",") if x.strip()]
 
 
-def _ollama_chat(model: str, messages: list[dict], num_predict: int = 512) -> str:
+def _ollama_chat(model: str, messages: list[dict], num_predict: int = 512) -> tuple[str, int, int]:
+    """Returns (text, prompt_tokens, completion_tokens)."""
     resp = _ollama_raw.chat(
         model=model,
         messages=messages,
@@ -124,7 +125,9 @@ def _ollama_chat(model: str, messages: list[dict], num_predict: int = 512) -> st
     text = resp["message"]["content"].strip()
     # Strip Qwen3 think blocks
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return text
+    in_tok  = resp.get("prompt_eval_count", 0) or 0
+    out_tok = resp.get("eval_count", 0) or 0
+    return text, in_tok, out_tok
 
 
 def _build_eml(
@@ -199,7 +202,9 @@ def run_email_standalone(
     rows = rows[:max_emails]
     print(f"  [email] generating {len(rows)} email draft(s) -> {out_dir}/")
 
-    results = []
+    results   = []
+    total_in  = 0
+    total_out = 0
 
     for i, row in enumerate(rows, 1):
         name        = row.get("name", "").strip()
@@ -243,7 +248,7 @@ def run_email_standalone(
             affiliation=affiliation,
             keywords=keywords,
         )
-        subject = _ollama_chat(
+        subject, s_in, s_out = _ollama_chat(
             producer_model,
             [
                 {"role": "system", "content": _SUBJECT_SYSTEM},
@@ -251,6 +256,8 @@ def run_email_standalone(
             ],
             num_predict=64,
         )
+        total_in  += s_in
+        total_out += s_out
 
         # --- Generate email body ---
         body_prompt = _EMAIL_PROMPT_TMPL.format(
@@ -264,7 +271,7 @@ def run_email_standalone(
             slide_excerpt=slide_excerpt,
             first_name=first_name,
         )
-        body = _ollama_chat(
+        body, b_in, b_out = _ollama_chat(
             producer_model,
             [
                 {"role": "system", "content": _EMAIL_SYSTEM},
@@ -272,6 +279,8 @@ def run_email_standalone(
             ],
             num_predict=512,
         )
+        total_in  += b_in
+        total_out += b_out
 
         # --- Write .eml ---
         eml_filename = f"{_safe_filename(name)}.eml"
@@ -300,4 +309,8 @@ def run_email_standalone(
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n  [email] {len(results)} drafts saved to {out_dir}/ (manifest: manifest.json)")
+    print(f"  [email] tokens — in: {total_in:,}  out: {total_out:,}  total: {total_in + total_out:,}")
+    for r in results:
+        r["_tokens_in"]  = total_in
+        r["_tokens_out"] = total_out
     return results
