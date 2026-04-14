@@ -24,6 +24,7 @@ orchestrator.py          ← compound tasks: decompose → run subtasks → asse
         ├── security.py      code scanner, path sandbox, injection scanner
         ├── github_skill.py  /github — push, PR, issue, repo ops via gh CLI
         ├── email_skill.py   /email — personalized .eml drafts from CSV + goal
+        ├── review_skill.py  /review — diff review against dead-code/anti-pattern rubric
         └── markitdown       rich document conversion + URL enrichment (optional)
 
 shared: logger.py / runs.jsonl + traces/, memory.py / memory.db
@@ -105,6 +106,9 @@ python agent.py "/github push add new feature"       # LLM commit message → gi
 python agent.py "/github pr create"                  # LLM PR title+body → gh pr create
 python agent.py "/github status"                     # branch + log + working tree
 python agent.py "/email speakers.csv reach out about our platform save to drafts/"
+python agent.py "/review"                            # review staged changes (Qwen3-Coder:30b)
+python agent.py "/review last"                       # review last commit
+python agent.py "/review all"                        # review all unpushed vs origin/main
 
 # Auto-triggered (no prefix needed):
 #   /annotate  — task mentions "paper", "abstract", "survey", "review"
@@ -262,6 +266,7 @@ python inspect_run.py --all    # summary table of all runs
 | `dashboard.py` | Generate self-contained HTML analytics dashboard from `runs.jsonl` |
 | `github_skill.py` | /github standalone skill — push, PR, issue, repo ops via `gh` CLI + LLM |
 | `email_skill.py` | /email standalone skill — personalized `.eml` drafts from CSV + goal |
+| `review_skill.py` | /review standalone skill — diff review against dead-code/anti-pattern rubric (Qwen3-Coder:30b) |
 | `finetune_annotate.py` | QLoRA fine-tune Qwen2.5-7B on Nanda annotated abstracts; early stopping, DashboardCallback |
 | `run_annotations.py` | Batch annotation runner — parse arxiv markdown → annotate → CSV |
 | `build_finetune_from_annotations.py` | Merge gold + agent CSVs → `finetune_dataset_v2.jsonl` |
