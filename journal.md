@@ -1881,3 +1881,76 @@ Previous v2 run died at step 1237 (OS update). Restarting with fixed config:
 - `--patience` flag kept in CLI but documented as unused
 - Run started: `python -X utf8 finetune_annotate.py --skip-fetch --dataset finetune_dataset_v2.jsonl`
 - Checkpoints every 100 steps (~15 min), `save_total_limit=3`
+
+---
+
+## Session 14 — 2026-04-15: token accounting fixes + vLLM integration + WSL2 setup
+
+### Token accounting fixes
+
+Two bugs fixed in the token/tok-s pipeline:
+
+**1. Planner tokens not counted.** `planner.py` called `ollama.chat()` but never returned the response for logging — typically 5-10 LLM calls per run were completely absent from `tokens_by_stage`. Fixed: `make_plan()` return type changed to `tuple[Plan, object]`. `agent.py` unpacks the response and calls `trace.log_usage(_planner_resp, stage="planner")`.
+
+**2. tok/s wrong denominator.** Dashboard was dividing total tokens by `total_ms`, which includes model load time (cold start). Fixed: `logger.py` now accumulates `eval_ms` (generation only) and `prompt_ms` (prompt-eval only) per stage. Dashboard uses `eval_ms` for output tok/s and `prompt_ms` for input tok/s, with `or total_ms` fallback for older runs. Cold-start inflation no longer deflates displayed tok/s.
+
+### vLLM integration
+
+**Problem:** Ollama serializes all `ollama.chat()` calls per model — `ThreadPoolExecutor(max_workers=4)` in the orchestrator gives process concurrency, but Ollama collapses it to a serial LLM queue. Three out of four parallel subtasks block waiting.
+
+**Solution:** `inference.py` — unified backend shim that routes all calls to either Ollama (default) or vLLM based on `INFERENCE_BACKEND` env var. Drop-in for the `_OllamaShim` pattern already in `agent.py`, `wiggum.py`, `autoresearch.py`:
+
+```python
+from inference import OllamaLike
+ollama = OllamaLike(keep_alive=_KEEP_ALIVE)   # keep_alive silently dropped for vLLM
+```
+
+`_OllamaResponse` wraps OpenAI ChatCompletion to expose the same attribute interface (`prompt_eval_count`, `eval_count`, `total_duration`, `eval_duration`, `prompt_eval_duration`, `message.thinking`) that `logger._extract_usage()` expects — no changes needed downstream.
+
+`VLLM_MODEL_MAP` env var (JSON dict) overrides the built-in Ollama-tag → HF-ID map at runtime, so the same `.env` works on both 16GB (one model) and 63.8GB (separate producer/evaluator) hardware.
+
+### WSL2 Ubuntu setup
+
+vLLM does not support native Windows pip installs (platform check + MAX_PATH build failure). WSL2 Ubuntu 24.04 is the correct path.
+
+Setup (from scratch on 2026-04-15):
+```bash
+# Install Miniconda in WSL2
+bash Miniconda3-latest-Linux-x86_64.sh -b -p ~/miniconda3
+~/miniconda3/bin/conda init bash && exec bash
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+conda create -n vllm python=3.12 -y && conda activate vllm
+pip install torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+pip install vllm==0.7.3
+pip install "transformers==4.49.0"   # 4.50+ removed all_special_tokens_extended from Qwen2Tokenizer
+
+export HF_HOME=/mnt/c/Users/nicho/.cache/huggingface
+vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --dtype half --quantization awq \
+  --max-model-len 16384 \
+  --enable-prefix-caching \
+  --gpu-memory-utilization 0.85
+```
+
+Model loads in ~15min on first run (downloads ~10GB), ~2min thereafter from cache. 9.4GB VRAM loaded, 9.7GB free for KV cache at `max-model-len 16384`.
+
+**Key gotcha:** `transformers==5.5.4` (installed by vLLM 0.7.3) removed `all_special_tokens_extended` from `Qwen2Tokenizer`, crashing the tokenizer init. Pin to `transformers==4.49.0`.
+
+### End-to-end validation
+
+`test_harness_vllm.bat` passed:
+- Inference shim: model map correct, live call returned `'vllm is working'`, all usage fields populated
+- Full agent run: 376.6s, in=7013 out=1063 tok — planner, search, novelty, markitdown, security, synthesis, write, memory all worked via vLLM backend
+- `runs.jsonl` entry logged correctly; trace written
+
+### Files added this session
+
+| File | Purpose |
+|------|---------|
+| `inference.py` | Unified Ollama/vLLM backend shim — `OllamaLike`, `_OllamaResponse`, `_MODEL_MAP` |
+| `requirements-vllm.txt` | Pinned vLLM dep tree for WSL2 isolated env |
+| `test_inference_shim.py` | Unit test: model map resolution, live call, usage field extraction |
+| `test_harness_vllm.bat` | End-to-end harness test: shim test + agent run + output check |
+| `test_vllm.sh` | WSL2 smoke test: `/health` + `/v1/chat/completions` curl |

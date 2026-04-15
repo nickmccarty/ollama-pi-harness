@@ -494,11 +494,11 @@ Current autoresearch mutates only `SYNTH_INSTRUCTION`. Full self-improvement req
 
 The coordination overhead — not VRAM — is now the binding constraint.
 
-### 4f: vLLM serving layer — DRAFTED (2026-04-15)
+### 4f: vLLM serving layer — ACTIVE (2026-04-15)
 
 **Problem:** Ollama processes one `ollama.chat()` request at a time per model. When 4 parallel subtask subprocesses all hit `pi-qwen-32b`, 3 block at the Ollama queue. `ThreadPoolExecutor(max_workers=4)` gives process concurrency; Ollama collapses it to serial LLM execution. The coordination overhead, not VRAM, is the binding constraint.
 
-**Solution:** vLLM continuous batching — multiple in-flight requests are batched at the attention kernel level. 63.8GB VRAM fits `pi-qwen-32b` + `Qwen3-Coder:30b` simultaneously with headroom for LoRA adapters.
+**Solution:** vLLM continuous batching — multiple in-flight requests are batched at the attention kernel level.
 
 **What's in place:**
 
@@ -515,7 +515,34 @@ ollama = OllamaLike(keep_alive=_KEEP_ALIVE)
 
 Routing controlled by `INFERENCE_BACKEND=vllm` in `.env`. All other call sites unchanged. `_OllamaResponse` adapter normalizes OpenAI response shape (token counts, timing) to match what `logger._extract_usage()` expects — no dashboard changes needed.
 
-`requirements-vllm.txt` — pinned vLLM dep tree, isolated from the main harness env to avoid torch/CUDA conflicts. Docker recommended path included.
+`requirements-vllm.txt` — pinned vLLM dep tree (vllm==0.7.3, transformers==4.49.0), isolated from the main harness env to avoid torch/CUDA conflicts.
+
+**Hardware note:** RTX 5000 Ada Laptop (16GB VRAM). Serving `Qwen/Qwen2.5-14B-Instruct-AWQ` (AWQ int4, ~9.4GB loaded). Model map in `.env` routes all harness model tags (`pi-qwen-32b`, `pi-qwen`, `Qwen3-Coder:30b`) to the served model while on 16GB hardware. On the desktop (63.8GB), run producer and evaluator on separate instances (:8000, :8001).
+
+**WSL2 setup (tested 2026-04-15):**
+```bash
+# In WSL2 Ubuntu 24.04:
+conda create -n vllm python=3.12 -y && conda activate vllm
+pip install torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+pip install vllm==0.7.3 "transformers==4.49.0"   # pin transformers — 4.50+ breaks Qwen2Tokenizer
+
+export HF_HOME=/mnt/c/Users/nicho/.cache/huggingface
+vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --dtype half \
+  --quantization awq_marlin \
+  --max-model-len 16384 \
+  --enable-prefix-caching \
+  --gpu-memory-utilization 0.85
+```
+
+**In `.env` (Windows harness):**
+```
+INFERENCE_BACKEND=vllm
+VLLM_BASE_URL=http://localhost:8000/v1
+VLLM_MODEL_MAP={"pi-qwen-32b":"Qwen/Qwen2.5-14B-Instruct-AWQ","pi-qwen":"Qwen/Qwen2.5-14B-Instruct-AWQ","Qwen3-Coder:30b":"Qwen/Qwen2.5-14B-Instruct-AWQ"}
+```
+
+**Validated end-to-end (2026-04-15):** `test_harness_vllm.bat` passed. Full research + write run: 376.6s, in=7013 out=1063 tok. All pipeline stages (planner, search, novelty, markitdown, security, synthesis, write, memory) worked correctly via vLLM backend.
 
 **Three unlocks at Stage 4:**
 
@@ -527,19 +554,13 @@ Routing controlled by `INFERENCE_BACKEND=vllm` in `.env`. All other call sites u
 
 **Timing approximation note:** The OpenAI API body doesn't expose per-phase latencies (`eval_duration`, `prompt_eval_duration`). `_OllamaResponse` approximates them as 88%/12% of wall-clock time. For tighter measurements, wire in vLLM's `/metrics` Prometheus endpoint post-hoc.
 
-**Remaining work before activation:**
+**Remaining work:**
 
-1. **Evaluator routing** — `wiggum.py` currently uses a single `VLLM_BASE_URL`. When running two vLLM instances (producer on :8000, evaluator on :8001), need `VLLM_EVALUATOR_BASE_URL` support in `inference.py` and a `chat_evaluator()` variant in the shim.
+1. **Evaluator routing** — when running two vLLM instances (producer :8000, evaluator :8001), need `VLLM_EVALUATOR_BASE_URL` support in `inference.py`.
 2. **Gradual migration** — `skills.py`, `email_skill.py`, `lit_review_skill.py`, `curator.py`, `review_skill.py` still call `_ollama_raw.chat()` directly. Replace with `from inference import chat as _llm_chat` as each file is touched.
-3. **`think` flag** — Qwen3's `options={"think": False}` is Ollama-specific. vLLM equivalent is excluding `/think` from the system prompt. Needs a thin translation layer in `_chat_vllm()` when `think=True` is requested.
-4. **Benchmark** — run eval_suite.py with `INFERENCE_BACKEND=vllm` and confirm tok/s figures from dashboard match expectation before promoting as default.
-
-**Activation:**
-```
-# .env additions
-INFERENCE_BACKEND=vllm
-VLLM_BASE_URL=http://localhost:8000/v1
-```
+3. **`think` flag** — Qwen3's `options={"think": False}` is Ollama-specific. Needs thin translation in `_chat_vllm()`.
+4. **`awq_marlin`** — switch from `--quantization awq` to `awq_marlin` for faster throughput (detected compatible at startup; was forced to `awq` during initial test).
+5. **Benchmark** — run `eval_suite.py` with `INFERENCE_BACKEND=vllm` and confirm tok/s figures before promoting as permanent default.
 
 ---
 

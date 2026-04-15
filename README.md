@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nickmccarty/ollama-pi-harness)
 
-A local Ollama agent harness built incrementally from failure. Research, verify, remember, plan, orchestrate — all running on local models with no external API keys.
+A local agent harness built incrementally from failure. Research, verify, remember, plan, orchestrate — running on local models via Ollama or vLLM with no external API keys.
 
 The central question: can open-source models running locally approach the utility of frontier models through harness engineering alone? The premise is that the model is not the 80% factor. The harness is.
 
@@ -28,6 +28,8 @@ orchestrator.py          ← compound tasks: decompose → run subtasks → asse
         └── markitdown       rich document conversion + URL enrichment (optional)
 
 shared: logger.py / runs.jsonl + traces/, memory.py / memory.db
+
+inference.py ← unified backend shim (Ollama default | vLLM via INFERENCE_BACKEND=vllm)
 ```
 
 **Run lifecycle (single-focus task):**
@@ -75,6 +77,32 @@ ollama pull phi4:14b                      # ~9GB  — compact, strong instructio
 ollama create pi-qwen -f Modelfile          # default 7B producer
 ollama create pi-qwen-32b -f Modelfile.32b  # 32B producer (requires Modelfile.32b)
 ```
+
+**vLLM (optional — unblocks parallel subtask execution):**
+
+Requires WSL2 Ubuntu or Docker. Does not work via native Windows pip install.
+
+```bash
+# In WSL2 Ubuntu:
+conda create -n vllm python=3.12 -y && conda activate vllm
+pip install torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+pip install vllm==0.7.3 "transformers==4.49.0"
+
+export HF_HOME=/mnt/c/Users/<you>/.cache/huggingface
+vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --dtype half --quantization awq_marlin \
+  --max-model-len 16384 --enable-prefix-caching \
+  --gpu-memory-utilization 0.85
+```
+
+Then in `.env` (Windows):
+```
+INFERENCE_BACKEND=vllm
+VLLM_BASE_URL=http://localhost:8000/v1
+VLLM_MODEL_MAP={"pi-qwen-32b":"Qwen/Qwen2.5-14B-Instruct-AWQ","pi-qwen":"Qwen/Qwen2.5-14B-Instruct-AWQ","Qwen3-Coder:30b":"Qwen/Qwen2.5-14B-Instruct-AWQ"}
+```
+
+See `requirements-vllm.txt` for pinned deps and known version constraints.
 
 **Python environment (conda):**
 ```bash
@@ -249,6 +277,7 @@ python inspect_run.py --all    # summary table of all runs
 | Planner / Compressor | `glm4:9b` | Different architecture from producer; fast enough for planning and memory compression |
 | Vision | `llama3.2-vision` | Image-to-text preprocessing only; does not replace producer |
 | GitHub skill | `llama3.2:3b` | Fast commit/PR/issue generation; override with `GITHUB_MODEL` env var |
+| vLLM (16GB laptop) | `Qwen/Qwen2.5-14B-Instruct-AWQ` | AWQ int4, ~9.4GB loaded; all harness tags remapped via `VLLM_MODEL_MAP` |
 
 **Producer candidates on-disk (not yet default):**
 
@@ -291,6 +320,11 @@ python inspect_run.py --all    # summary table of all runs
 | `hf_export.py` | Export `runs.jsonl` to HuggingFace-ready SFT / preference / reward / trajectory datasets |
 | `dashboard.py` | Generate self-contained HTML analytics dashboard from `runs.jsonl` |
 | `github_skill.py` | /github standalone skill — push, PR, issue, repo ops via `gh` CLI + LLM |
+| `inference.py` | Unified Ollama/vLLM backend shim — `OllamaLike`, `_OllamaResponse`, model map |
+| `requirements-vllm.txt` | Pinned vLLM dep tree for WSL2 isolated env (vllm==0.7.3, transformers==4.49.0) |
+| `test_inference_shim.py` | Unit test: model map, live vLLM call, usage field extraction |
+| `test_harness_vllm.bat` | End-to-end harness test against vLLM: shim + agent run + output check |
+| `test_vllm.sh` | WSL2 smoke test: `/health` + `/v1/chat/completions` |
 | `email_skill.py` | /email standalone skill — personalized `.eml` drafts from CSV + goal |
 | `review_skill.py` | /review standalone skill — diff review against dead-code/anti-pattern rubric (Qwen3-Coder:30b) |
 | `curator.py` | 5-persona paper filter — scores each annotation, writes `*_curated.csv` + `curation_log.jsonl` |

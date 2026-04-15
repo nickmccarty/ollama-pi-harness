@@ -51,8 +51,12 @@
 # =============================================================================
 
 # Core serving stack
-vllm==0.6.6
+vllm==0.7.3
 ray==2.38.0                  # vLLM's distributed backend; pin tightly
+
+# transformers 4.50+ removes all_special_tokens_extended from Qwen2Tokenizer,
+# which breaks vLLM 0.7.x tokenizer init. Pin below 4.50.
+transformers==4.49.0
 
 # CUDA kernels — must match the vLLM release exactly
 flashinfer-python==0.1.6     # attention kernels; breaking API changes between minor versions
@@ -78,8 +82,9 @@ openai==2.31.0
 # =============================================================================
 # Known version constraints
 # =============================================================================
-# vLLM 0.7+ requires CUDA 12.x. The harness uses torch 2.7.1+cu118 (CUDA 11.8),
-# so 0.6.x is the ceiling until the base env is migrated to CUDA 12.
+# vLLM 0.7+ requires CUDA 12.x and does not support native Windows pip installs
+# (platform check + MAX_PATH failures during wheel build). Use WSL2 or Docker.
+# Tested: vllm==0.7.3 + torch==2.6.0+cu124 in WSL2 Ubuntu 24.04 on RTX 5000 Ada.
 # Track: https://github.com/vllm-project/vllm/releases
 #
 # Security incident context (2024 supply-chain): unconstrained `pip install vllm`
