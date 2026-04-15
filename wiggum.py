@@ -403,6 +403,22 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
             _attach_token_stats(trace, _local_trace)
             return trace
 
+        # Cycling detection: if score + all dimension scores are identical to the
+        # previous round, the producer isn't making measurable progress — return
+        # best round immediately rather than burning another revision call.
+        if round_num >= 2:
+            prev = trace["rounds"][-2]
+            if score == prev["score"] and dims == prev.get("dims", {}):
+                print(f"  [cycling] score and dims unchanged from round {round_num - 1} — stopping early")
+                if best_round < round_num:
+                    print(f"\n[wiggum] restoring round {best_round} output (score {best_score:.1f})")
+                    with open(expanded, "w", encoding="utf-8") as f:
+                        f.write(best_content)
+                print(f"\n[wiggum] FAIL — cycling detected after round {round_num}")
+                trace["final"] = "FAIL"
+                _attach_token_stats(trace, _local_trace)
+                return trace
+
         if round_num == max_rounds:
             # Restore the best-scoring round's content if later rounds regressed
             if best_round < round_num:
@@ -660,6 +676,20 @@ def loop_annotate(
             trace["final"] = "PASS"
             _attach_token_stats(trace, _local_trace)
             return trace
+
+        # Cycling detection: identical score + dims → producer is stuck, stop early
+        if round_num >= 2:
+            prev = trace["rounds"][-2]
+            if score == prev["score"] and result["dims"] == prev.get("dims", {}):
+                print(f"  [cycling] score and dims unchanged from round {round_num - 1} — stopping early")
+                if best_round < round_num:
+                    print(f"\n[wiggum:annotate] restoring round {best_round} output (score {best_score:.1f})")
+                    with open(expanded, "w", encoding="utf-8") as f:
+                        f.write(best_content)
+                print(f"\n[wiggum:annotate] FAIL — cycling detected after round {round_num}")
+                trace["final"] = "FAIL"
+                _attach_token_stats(trace, _local_trace)
+                return trace
 
         if round_num == max_rounds:
             if best_round < round_num:
