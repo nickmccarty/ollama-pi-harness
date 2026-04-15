@@ -1851,3 +1851,33 @@ python -X utf8 finetune_annotate.py --dataset finetune_dataset_v2.jsonl --resume
 # Coarser checkpoints (every 200 steps, ~30 min)
 python -X utf8 finetune_annotate.py --dataset finetune_dataset_v2.jsonl --save-steps 200
 ```
+
+---
+
+## Session 13 — 2026-04-15: /email JSON output, per-draft traces, dashboard fixes, v2 finetune restart
+
+### /email: .eml → JSON output
+
+Switched `/email` output from `.eml` files to per-contact `.json` files. `.eml` couldn't be opened by the target email app and was harder to consume downstream. Each draft now writes `{name}.json` with structured fields: `name`, `affiliation`, `to_email`, `sender_name`, `sender_email`, `subject`, `body`, `generated_at` (UTC ISO 8601). `manifest.json` (array of all drafts) unchanged. Removed `_build_eml()` and the `email.mime`/`quopri` imports it required.
+
+### Per-draft trace logging
+
+Each email draft now emits its own `runs.jsonl` entry (`task_type="email_draft"`) so every contact gets a full dashboard row with reasoning details. Fields logged: recipient name/affiliation/email, subject, full body, subject prompt, body prompt (as `tool_calls`), token counts, duration. Batch email runs continue logging their aggregate entry (`task_type="email"`) alongside.
+
+### Dashboard: email run rendering
+
+- `email_draft` rows show `Email draft: {Name} <email>` with an expanded detail panel: recipient header, subject (green), full body block, and both prompts rendered as monospace blocks
+- `email` batch rows show `Email batch: {csv} → {dir} ({n} drafts)` instead of the MSYS2-mangled task string
+- `dashboard.py` passes `email_*` fields through to `recent_runs` for rendering
+
+### .env + SENDER_NAME/SENDER_EMAIL
+
+Created `.env` in project root (gitignored). Added `.env` loader to `agent.py` startup (`os.environ.setdefault` so shell vars always win). `SENDER_NAME=Nick McCarty` and `SENDER_EMAIL=nick@upskilled.consulting` now populate email JSON output automatically.
+
+### v2 finetune: EarlyStoppingCallback removed, run restarted
+
+Previous v2 run died at step 1237 (OS update). Restarting with fixed config:
+- `EarlyStoppingCallback` removed — it requires `load_best_model_at_end=True` which conflicts with `save_strategy="steps"`. Attempting to use it raised `AssertionError: EarlyStoppingCallback requires metric_for_best_model`.
+- `--patience` flag kept in CLI but documented as unused
+- Run started: `python -X utf8 finetune_annotate.py --skip-fetch --dataset finetune_dataset_v2.jsonl`
+- Checkpoints every 100 steps (~15 min), `save_total_limit=3`

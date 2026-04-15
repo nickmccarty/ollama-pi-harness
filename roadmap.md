@@ -655,22 +655,22 @@ Compare scores against Qwen3-Coder baseline. If Gemma 4 scores diverge significa
 
 ---
 
-### 7c: Nanda annotation fine-tuning — IN PROGRESS (2026-04-13)
+### 7c: Nanda annotation fine-tuning — IN PROGRESS (v2 run restarted 2026-04-15)
 
-**Status:** `finetune_annotate.py` running. Training `Qwen/Qwen2.5-7B-Instruct` with LoRA on 121 human-curated Nanda annotation examples from `annotated-abstracts.csv`.
+**Status:** v2 training run in progress. Training `Qwen/Qwen2.5-7B-Instruct` on 718 examples (`finetune_dataset_v2.jsonl` — 121 gold + 597 agent-annotated). Previous run was killed at step 1237/1938 (epoch 1.91) by an OS update reboot; no checkpoint survived (`save_strategy="epoch"` meant no mid-epoch saves).
 
-**Training setup:**
+**Training setup (v2):**
 - LoRA r=16, alpha=32, target projectors (q/k/v/o/gate/up/down)
-- bf16, no quantization (63.8GB VRAM, NVIDIA RTX 5000 Ada)
-- 3 epochs, batch size 2, grad accum 4 → 42 effective steps
-- TensorBoard at `http://localhost:6006`
+- bf16, no quantization (NVIDIA RTX 5000 Ada)
+- 3 epochs, 1938 steps, batch size 1
+- `save_strategy="steps"`, `save_steps=100`, `save_total_limit=3` — checkpoint every ~15 min
+- `EarlyStoppingCallback` removed (incompatible with step-based saves + epoch eval)
+- Resume: `python -X utf8 finetune_annotate.py --skip-fetch --dataset finetune_dataset_v2.jsonl --resume`
 
 **Next steps after training:**
-1. Convert to GGUF: `python llama.cpp/convert_hf_to_gguf.py finetune_output/merged --outfile nanda-annotator.gguf --outtype q8_0`
+1. Convert to GGUF: `python -X utf8 llama.cpp/convert_hf_to_gguf.py finetune_output/merged --outfile finetune_output/nanda-annotator.gguf --outtype q8_0`
 2. Register in Ollama: `ollama create nanda-annotator -f finetune_output/Modelfile`
 3. Benchmark: run `/annotate /wiggum --producer nanda-annotator` on held-out papers, compare wiggum scores vs base `pi-qwen-32b`
-
-**Round 2 training data:** `run_annotations.py` currently annotating 600 papers from `arxiv_agentic_papers.md` + `arxiv_agentic_harness_engineering_papers.md`. These will expand the training set from 121 → 700+ examples for a second fine-tuning run.
 
 ---
 
