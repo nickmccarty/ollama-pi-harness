@@ -21,6 +21,13 @@ import sys
 import time
 import json
 
+# Load .env so VLLM_BASE_URL etc. are available in the parent env and inherited by subprocesses
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except ImportError:
+    pass
+
 BASE   = os.path.expanduser("~/Desktop/harness-engineering")
 SCRIPT = os.path.join(BASE, "orchestrator.py")
 
