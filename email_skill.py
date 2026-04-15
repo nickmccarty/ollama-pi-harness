@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import ollama as _ollama_raw
+from inference import chat as _llm_chat
 
 _KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
 
@@ -113,7 +113,7 @@ def _parse_list_field(val: str) -> list[str]:
 
 def _ollama_chat(model: str, messages: list[dict], num_predict: int = 512) -> tuple[str, int, int]:
     """Returns (text, prompt_tokens, completion_tokens)."""
-    resp = _ollama_raw.chat(
+    resp = _llm_chat(
         model=model,
         messages=messages,
         options={"num_predict": num_predict, "temperature": 0.7},

@@ -23,7 +23,7 @@ Environment:
 import sys
 import os
 import base64
-import ollama
+import inference as ollama
 
 VISION_MODEL = "llama3.2-vision"
 

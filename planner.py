@@ -16,7 +16,7 @@ import json
 import re
 from dataclasses import dataclass, field, asdict
 
-import ollama
+import inference as ollama
 
 PLANNER_MODEL = "glm4:9b"
 

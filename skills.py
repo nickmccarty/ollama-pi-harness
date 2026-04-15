@@ -470,7 +470,7 @@ def run_annotate_standalone(
 
     Bypasses the normal research → synthesize → wiggum pipeline entirely.
     """
-    import ollama as _ollama_raw
+    from inference import chat as _llm_chat
     import os
 
     keep_alive = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
@@ -491,7 +491,7 @@ def run_annotate_standalone(
     prompt = system + "\n\n" + _ANNOTATE_PROMPT + context
 
     for attempt in range(1, max_retries + 1):
-        resp = _ollama_raw.chat(
+        resp = _llm_chat(
             model=producer_model,
             messages=[{"role": "user", "content": prompt}],
             options={"num_predict": 2048, "num_ctx": 8192},

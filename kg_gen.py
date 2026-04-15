@@ -25,7 +25,7 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
-import ollama
+import inference as ollama
 from jinja2 import Environment, FileSystemLoader, Markup
 
 MODEL = "pi-qwen-32b"

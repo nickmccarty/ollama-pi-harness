@@ -31,7 +31,7 @@ import re
 import subprocess
 from pathlib import Path
 
-import ollama as _ollama_raw
+from inference import chat as _llm_chat
 
 HERE          = Path(__file__).parent
 _KEEP_ALIVE   = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
@@ -132,7 +132,7 @@ def _llm(diff: str, model: str) -> tuple[str, int, int, str]:
     if len(diff) > _MAX_DIFF_CHARS:
         user_msg += f"\n\n[diff truncated — {len(diff):,} chars total, showing first {_MAX_DIFF_CHARS:,}]"
 
-    resp = _ollama_raw.chat(
+    resp = _llm_chat(
         model=model,
         messages=[
             {"role": "system", "content": _REVIEW_SYSTEM},

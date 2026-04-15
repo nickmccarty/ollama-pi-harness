@@ -36,7 +36,7 @@ import sys
 import argparse
 from pathlib import Path
 
-import ollama as _ollama_raw
+from inference import chat as _llm_chat
 
 HERE = Path(__file__).parent
 
@@ -180,7 +180,7 @@ def _format_annotation(row: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _llm(system: str, user: str, model: str) -> tuple[str, int, int]:
-    resp = _ollama_raw.chat(
+    resp = _llm_chat(
         model=model,
         messages=[
             {"role": "system", "content": system},

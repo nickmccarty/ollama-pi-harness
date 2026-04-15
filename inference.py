@@ -183,8 +183,12 @@ def chat(model: str, messages: list, **kwargs) -> object:
     Routes to vLLM or Ollama based on INFERENCE_BACKEND env var.
     Response is always compatible with logger._extract_usage() and the
     response["message"]["content"] access pattern used throughout the harness.
+
+    Automatic Ollama fallback: if INFERENCE_BACKEND=vllm but the model has no
+    entry in _MODEL_MAP (e.g. glm4:9b, llama3.2-vision, llama3.2:3b), the call
+    falls back to Ollama. Only mapped producer/evaluator models go to vLLM.
     """
-    if _BACKEND == "vllm":
+    if _BACKEND == "vllm" and model in _MODEL_MAP:
         return _chat_vllm(model=model, messages=messages, **kwargs)
     return _chat_ollama(model=model, messages=messages, **kwargs)
 
@@ -216,5 +220,6 @@ class OllamaLike:
 
 # Module-level shim so `import inference as ollama` works as a drop-in
 # for files that call `ollama.chat(model=..., messages=..., options=...)`.
-# OllamaLike() with no keep_alive is equivalent to a raw ollama.chat call.
+# `chat` is already defined as a module-level function above; this alias
+# makes `ollama.chat(...)` resolve correctly when the module is imported as ollama.
 _module_shim = OllamaLike()

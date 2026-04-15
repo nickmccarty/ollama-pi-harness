@@ -24,7 +24,7 @@ import os
 import re
 import sys
 
-import ollama
+import inference as ollama
 
 # ---------------------------------------------------------------------------
 # TinyTroupe availability check

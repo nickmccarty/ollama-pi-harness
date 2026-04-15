@@ -32,7 +32,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import ollama
+import inference as ollama
 
 from agent import (
     extract_path, write_output, count_output_items,

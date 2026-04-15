@@ -26,7 +26,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 
-import ollama as _ollama_raw
+from inference import OllamaLike as _OllamaLike
 
 
 @contextmanager
@@ -34,10 +34,7 @@ def _nullctx():
     yield
 
 _KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
-
-def _chat(*args, **kwargs):
-    kwargs.setdefault("keep_alive", _KEEP_ALIVE)
-    return _ollama_raw.chat(*args, **kwargs)
+_chat = _OllamaLike(keep_alive=_KEEP_ALIVE).chat
 
 
 # ---------------------------------------------------------------------------

@@ -26,19 +26,16 @@ import re
 import sys
 import time
 
-import ollama as _ollama_raw
 import pandas as pd
 from logger import RunTrace
+from inference import OllamaLike as _OllamaLike
 
 # ---------------------------------------------------------------------------
 # Ollama shim — keeps model hot between calls
 # ---------------------------------------------------------------------------
 
 _KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
-
-def _chat(*args, **kwargs):
-    kwargs.setdefault("keep_alive", _KEEP_ALIVE)
-    return _ollama_raw.chat(*args, **kwargs)
+_chat = _OllamaLike(keep_alive=_KEEP_ALIVE).chat
 
 
 # ---------------------------------------------------------------------------

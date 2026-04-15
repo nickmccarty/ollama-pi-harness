@@ -52,7 +52,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import ollama as _ollama_raw
+from inference import chat as _llm_chat
 
 HERE             = Path(__file__).parent
 TEMPLATES_DIR    = HERE / "templates"
@@ -308,7 +308,7 @@ def step_cluster(papers: list[dict], model: str = DEFAULT_CLUSTER_MODEL) -> list
     )
     prompt = f"Papers to cluster:\n{paper_list}"
 
-    resp = _ollama_raw.chat(
+    resp = _llm_chat(
         model=model,
         messages=[
             {"role": "system", "content": _CLUSTER_SYSTEM},
@@ -387,7 +387,7 @@ def step_synthesize(papers: list[dict], clusters: list[dict],
             for p in cluster_papers
         )
 
-        resp = _ollama_raw.chat(
+        resp = _llm_chat(
             model=model,
             messages=[
                 {"role": "system", "content": _SYNTH_CLUSTER_SYSTEM},
@@ -405,7 +405,7 @@ def step_synthesize(papers: list[dict], clusters: list[dict],
         for name, summary in cluster_summaries.items()
         if summary
     )
-    resp = _ollama_raw.chat(
+    resp = _llm_chat(
         model=model,
         messages=[
             {"role": "system", "content": _SYNTH_CROSS_SYSTEM},

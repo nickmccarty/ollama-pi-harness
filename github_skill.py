@@ -33,7 +33,7 @@ import json
 import subprocess
 from pathlib import Path
 
-import ollama as _ollama_raw
+from inference import chat as _llm_chat
 
 HERE         = Path(__file__).parent
 _KEEP_ALIVE  = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
@@ -79,7 +79,7 @@ def _require_git():
 
 def _llm(system: str, user: str, model: str) -> tuple[str, int, int]:
     """Returns (text, prompt_tokens, completion_tokens)."""
-    resp = _ollama_raw.chat(
+    resp = _llm_chat(
         model=model,
         messages=[
             {"role": "system",  "content": system},

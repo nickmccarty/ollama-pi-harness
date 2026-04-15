@@ -26,7 +26,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
-import ollama
+import inference as ollama
 
 COMPRESSION_MODEL   = "glm4:9b"
 DB_PATH             = os.path.join(os.path.dirname(__file__), "memory.db")
