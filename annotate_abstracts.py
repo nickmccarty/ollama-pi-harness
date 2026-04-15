@@ -28,6 +28,7 @@ import time
 
 import ollama as _ollama_raw
 import pandas as pd
+from logger import RunTrace
 
 # ---------------------------------------------------------------------------
 # Ollama shim — keeps model hot between calls
@@ -175,10 +176,11 @@ def is_valid(text: str) -> bool:
 # Core annotation
 # ---------------------------------------------------------------------------
 
-def annotate(context: str, model: str) -> str | None:
+def annotate(context: str, model: str, _trace=None) -> str | None:
     """
     Call the model to produce an annotated abstract for the given paper sections.
     Returns the annotation string, or None after MAX_RETRIES failures.
+    _trace: optional RunTrace — captures token usage per attempt.
     """
     # /no_think suppresses Qwen3 chain-of-thought, preserving token budget for output
     system = SYSTEM_PROMPT
@@ -201,6 +203,8 @@ def annotate(context: str, model: str) -> str | None:
                 ],
                 options={"temperature": 0.1, "num_predict": NUM_PREDICT},
             )
+            if _trace is not None:
+                _trace.log_usage(response, stage="annotate")
             result = response["message"]["content"].strip()
             # Strip Qwen3 <think>...</think> blocks if present
             result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
@@ -280,22 +284,37 @@ def main():
         context = extract_sections(markdown_content)
         print(f"  [{i}/{total}] {pdf_filename}: {title[:55]} ({len(context):,} chars)")
 
-        annotated = annotate(context, args.model)
+        trace = RunTrace(
+            task=f"/annotate {pdf_filename}",
+            producer_model=args.model,
+            evaluator_model="n/a",
+        )
+        trace.data["task_type"] = "annotate"
+
+        annotated = annotate(context, args.model, _trace=trace)
 
         if annotated is None:
             print(f"  [{i}/{total}] [FAILED] {pdf_filename} — no valid output after {MAX_RETRIES} tries")
             failed += 1
+            trace.finish("FAIL")
             continue
 
         os.makedirs(out_dir, exist_ok=True)
+        full_output = (
+            f"# {title}\n\n"
+            f"**Source:** {pdf_filename}  \n"
+            f"**Model:** {args.model}  \n"
+            "\n---\n\n"
+            "## Annotated Abstract\n\n"
+            f"{annotated}\n"
+        )
         with open(out_path, "w", encoding="utf-8") as f:
-            f.write(f"# {title}\n\n")
-            f.write(f"**Source:** {pdf_filename}  \n")
-            f.write(f"**Model:** {args.model}  \n")
-            f.write("\n---\n\n")
-            f.write("## Annotated Abstract\n\n")
-            f.write(annotated)
-            f.write("\n")
+            f.write(full_output)
+
+        trace.data["output_path"]  = os.path.abspath(out_path)
+        trace.data["output_bytes"] = len(full_output.encode())
+        trace.data["output_lines"] = full_output.count("\n") + 1
+        trace.finish("PASS")
 
         print(f"  [{i}/{total}] [done] → {out_path}")
         done += 1

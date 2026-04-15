@@ -157,6 +157,7 @@ def annotate_papers(
     sleep_s:      float,
 ):
     from skills import run_annotate_standalone
+    from logger import RunTrace
 
     # Load existing arxiv_ids if skip_existing
     existing = set()
@@ -195,22 +196,31 @@ def annotate_papers(
             # Build context: title + abstract (same as what the model sees)
             context = f"# {paper['title']}\n\n{paper['abstract']}"
 
+            task_str = f"/annotate {paper.get('abstract_url', arxiv_id)}"
+            trace = RunTrace(task=task_str, producer_model=model, evaluator_model="n/a")
+            trace.data["task_type"] = "annotate"
+
             annotation_text = run_annotate_standalone(
                 paper_context=context,
                 producer_model=model,
                 max_retries=3,
+                _trace=trace,
             )
 
             row = parse_annotation(annotation_text)
             if row is None:
                 print(f"  [warn] {arxiv_id}: annotation invalid, skipping")
                 failed += 1
+                trace.finish("FAIL")
                 continue
 
             row["filename"] = arxiv_id
             writer.writerow(row)
             out_f.flush()
             annotated += 1
+            trace.data["output_bytes"] = len(annotation_text.encode())
+            trace.data["output_lines"] = annotation_text.count("\n") + 1
+            trace.finish("PASS")
 
             if sleep_s > 0:
                 time.sleep(sleep_s)

@@ -410,6 +410,7 @@ def run_annotate_standalone(
     paper_context: str,
     producer_model: str,
     max_retries: int = 3,
+    _trace=None,          # optional RunTrace — captures token usage per attempt
 ) -> str:
     """
     Standalone /annotate handler.
@@ -447,6 +448,8 @@ def run_annotate_standalone(
             options={"num_predict": 2048, "num_ctx": 8192},
             keep_alive=keep_alive,
         )
+        if _trace is not None:
+            _trace.log_usage(resp, stage="annotate")
         result = resp["message"]["content"].strip()
         # Strip Qwen3 chain-of-thought blocks if present
         result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
