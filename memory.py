@@ -168,11 +168,24 @@ def _parse_compression(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _get_chroma_ef():
-    from chromadb.utils import embedding_functions
-    return embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=EMBED_MODEL,
-        device="cuda" if _cuda_available() else "cpu",
-    )
+    try:
+        from inference import get_embedding_function
+        return get_embedding_function(device="cuda" if _cuda_available() else "cpu")
+    except Exception:
+        from chromadb.utils import embedding_functions
+        return embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=EMBED_MODEL,
+            device="cuda" if _cuda_available() else "cpu",
+        )
+
+
+def _get_collection_name() -> str:
+    """Return backend-specific collection name to avoid dimension mismatch."""
+    try:
+        from inference import get_embed_collection_suffix
+        return CHROMA_COLLECTION + get_embed_collection_suffix()
+    except Exception:
+        return CHROMA_COLLECTION
 
 
 def _cuda_available() -> bool:
@@ -229,7 +242,7 @@ class MemoryStore:
             client = chromadb.PersistentClient(path=CHROMA_PATH)
             ef = _get_chroma_ef()
             col = client.get_or_create_collection(
-                name=CHROMA_COLLECTION,
+                name=_get_collection_name(),
                 embedding_function=ef,
                 metadata={"hnsw:space": "cosine"},
             )

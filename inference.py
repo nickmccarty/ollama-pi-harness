@@ -229,3 +229,79 @@ class OllamaLike:
 # `chat` is already defined as a module-level function above; this alias
 # makes `ollama.chat(...)` resolve correctly when the module is imported as ollama.
 _module_shim = OllamaLike()
+
+
+# ---------------------------------------------------------------------------
+# Embedding API
+# ---------------------------------------------------------------------------
+
+_LOCAL_EMBED_MODEL = "all-MiniLM-L6-v2"   # ~22MB, fast, 384 dims
+
+
+def _embed_vllm(texts: list[str]) -> list[list[float]]:
+    """Embed via vLLM /v1/embeddings using the first served model."""
+    from openai import OpenAI
+    client = OpenAI(base_url=_VLLM_BASE, api_key=_VLLM_API_KEY)
+    embed_model = next(iter(_MODEL_MAP.values())) if _MODEL_MAP else "default"
+    resp = client.embeddings.create(model=embed_model, input=texts)
+    return [d.embedding for d in resp.data]
+
+
+def _embed_local(texts: list[str]) -> list[list[float]]:
+    """Embed via sentence-transformers (all-MiniLM-L6-v2, local, no API)."""
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(_LOCAL_EMBED_MODEL)
+    return model.encode(texts, show_progress_bar=False).tolist()
+
+
+def embed(texts: list[str]) -> list[list[float]]:
+    """
+    Embed a list of texts using the current backend.
+
+    vLLM backend: uses /v1/embeddings with the served model (same Qwen instance,
+    no extra VRAM). Falls back to sentence-transformers on any error.
+    Ollama backend: uses sentence-transformers directly.
+
+    Returns list of float vectors, one per input text.
+    """
+    if _BACKEND == "vllm":
+        try:
+            return _embed_vllm(texts)
+        except Exception as e:
+            print(f"  [inference:embed] vLLM embed failed ({e}) — falling back to local")
+    return _embed_local(texts)
+
+
+def get_embedding_function(device: str = "cpu"):
+    """
+    Return a ChromaDB-compatible EmbeddingFunction for the current backend.
+
+    vLLM: wraps inference.embed() → vLLM /v1/embeddings (with local fallback).
+         Collection suffix "_vllm" isolates from local 384-dim collections.
+    Ollama/local: sentence-transformers all-MiniLM-L6-v2 (384 dims).
+    """
+    if _BACKEND == "vllm":
+        return _VLLMEmbeddingFunction()
+    from chromadb.utils import embedding_functions
+    return embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name=_LOCAL_EMBED_MODEL,
+        device=device,
+    )
+
+
+def get_embed_collection_suffix() -> str:
+    """
+    Collection name suffix for backend isolation.
+
+    vLLM embeddings have a different dimension than all-MiniLM-L6-v2 (384).
+    Using a suffix prevents ChromaDB dimension mismatch errors when switching
+    backends. Each backend maintains its own index.
+    """
+    return "_vllm" if _BACKEND == "vllm" else ""
+
+
+class _VLLMEmbeddingFunction:
+    """ChromaDB EmbeddingFunction that calls inference.embed()."""
+
+    def __call__(self, input: list[str]) -> list[list[float]]:  # noqa: A002
+        return embed(input)
