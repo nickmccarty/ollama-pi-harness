@@ -1717,3 +1717,73 @@ chosen_dims, rejected_dims, wiggum_feedback, timestamp
 - Stats mode (`--stats`) is non-destructive — useful for checking yield before committing
 
 **Growth trajectory:** corpus is currently thin for DPO. The revision path will grow automatically as wiggum runs accumulate. The cross-run path grows when the same task is retried (eval_suite, autoresearch reruns). After 10-20 autoresearch sessions on the same task set, cross-run pairs will become the dominant source.
+
+---
+
+## Session 10 — Dashboard fixes, batch annotation logging, arxiv_fetch, /lit-review (2026-04-14)
+
+### Dashboard: stub run flood + wiggum backfill
+
+Two issues found when inspecting the recent runs table:
+
+**Wiggum backfill**: 10 annotate runs stored the raw wiggum trace as `trace.data["wiggum"]` instead of going through `trace.log_wiggum()`. These runs had `wiggum_rounds=0` and no `wiggum_eval_log` in `runs.jsonl` despite having real evaluation data in the raw dict. Wrote a one-time backfill that processed the raw `wiggum` dict and populated `wiggum_rounds`, `wiggum_scores`, `wiggum_dims`, and `wiggum_eval_log` for all 10 runs.
+
+**Stub run filter**: 128 runs had `input_tokens=0`, `wiggum_rounds=0`, and no output — standalone skill calls (github status, review on empty diff) and autoresearch eval-suite sub-checks that wrote minimal trace data. These were flooding the recent runs table, pushing real research runs out of the 30-run window. Fixed with a `_is_substantive()` filter: only show runs with `input_tokens > 0` OR `wiggum_rounds > 0` OR `output_bytes > 0`. Window extended from 30 → 50.
+
+### Batch annotation logging
+
+`run_annotations.py` and `annotate_abstracts.py` both called LLM directly without creating a `RunTrace`, so batch annotation runs were completely invisible to `runs.jsonl` and the dashboard. Fixed:
+
+- `skills.py`: added `_trace=None` to `run_annotate_standalone()` — calls `trace.log_usage(resp, stage="annotate")` per attempt when a trace is provided
+- `run_annotations.py`: creates a `RunTrace` per paper with `task_type="annotate"`, passes it through, logs `output_bytes`/`output_lines`, calls `trace.finish(PASS/FAIL)`
+- `annotate_abstracts.py`: same pattern — `annotate()` gets `_trace` param, main loop creates and finishes a trace per paper
+
+Going forward every batch annotation run is visible in the dashboard as a substantive run with token counts, output size, and task type.
+
+### arxiv_fetch.py
+
+Built `arxiv_fetch.py` as a proper harness tool replacing the ad-hoc Jupyter notebook approach. Same column schema as existing `arxiv_agentic_papers.csv` so output feeds directly into `run_annotations.py` and `annotate_abstracts.py`.
+
+Key additions over the notebook: `--after`/`--before` date filters, `--append` deduplication (won't re-add papers already in the CSV), `--field ti` for title-only search, `--sort` for newest-first ordering, `--stats` for inspecting existing CSVs. The main motivation was recovering from missing data from previous batch runs by being able to fetch papers after a specific date.
+
+### semantic_scholar.py
+
+The core insight: arXiv papers cite each other, and tracking those citations turns a flat list of annotations into a connected knowledge graph. Built `semantic_scholar.py` against the Semantic Scholar Graph API (free, no auth key required).
+
+**What it produces for a corpus:**
+- `hub_scores`: in-corpus citation count per paper — which papers are foundational (cited by many others in the corpus)
+- `gap_candidates`: papers cited by corpus papers but not yet annotated, ranked by citation frequency — the corpus's known unknowns
+- `adjacency`: within-corpus citation edges (who cites whom)
+- `all_refs`: full reference list per paper including unresolved entries (books, proceedings without arXiv IDs)
+
+SQLite cache with 30-day TTL means re-running on the same corpus is free. CLI: enrich CSV with hub_score/ref_count columns, print hub rankings and gap table, optionally fetch gap paper metadata and append to the corpus CSV.
+
+**The compounding mechanism**: fetch 100 papers → run S2 enrichment → top 20 gap candidates are the papers the literature depends on most → `--fetch-gaps 20 --append` adds them to the corpus → annotate those too → repeat. Each iteration expands outward from the initial seed via citation chaining rather than keyword search.
+
+### /lit-review skill
+
+Built a 7-step literature review pipeline as a standalone skill:
+
+```
+fetch (arxiv_fetch.py)
+  → S2 enrich (hub scores, gap candidates)
+    → curate (curator.py — persona filter, hubs prioritized)
+      → annotate+wiggum (run_annotate_standalone + wiggum_annotate_loop, checkpointed)
+        → cluster (LLM groups into 3-5 thematic clusters)
+          → synthesize (cluster summaries + cross-cluster overview + open questions)
+            → render (Jinja2 template → .md)
+```
+
+**Design decisions:**
+
+*Checkpointing*: each paper's annotation is saved to `.lit_review_cache/{arxiv_id}.json`. A crash at paper 15 of 30 resumes at paper 16 — no wasted annotation budget.
+
+*Hub prioritization*: after curation, papers are sorted by `hub_score` descending so foundational papers get annotated first and with highest wiggum budget.
+
+*Jinja templates*: separates data (annotations, scores, graph) from rendering. `lit_review_survey.j2` produces academic-style output with hub callouts, cluster narratives, citation links, and a gap table. `lit_review_gaps.j2` focuses on open questions and what to read next. Adding new output formats is a file drop — no code change.
+
+*Synthesis as a separate LLM pass*: after all papers are annotated, a cluster-level synthesis pass writes a connecting paragraph per cluster (what the papers share, how they relate, what they disagree on). Then a cross-cluster pass writes the overview and surfaces open research questions. This is what makes the output a review rather than a dump of summaries.
+
+**The data flywheel**: every `/lit-review` run generates wiggum annotation pairs (→ DPO training data via `build_dpo_dataset.py`), curated CSV (→ fine-tuning dataset), and synthesized review (→ memory observations). The skill compounds each time it runs.
+
+**Registered as `/lit-review` in skills.py** with `hook="standalone"`. Agent dispatch in `_handle_lit_review` parses flags from the task string. Keep_alive set to -1 (indefinite) since the pipeline can run for minutes to hours depending on corpus size.

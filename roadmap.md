@@ -991,6 +991,92 @@ This pattern mirrors what Claude Code's `isolation: "worktree"` does for subagen
 
 ---
 
+### 7k: Knowledge mining pipeline — `/lit-review` skill
+
+**Motivation:** Batch annotation runs (run_annotations.py, annotate_abstracts.py) produce per-paper annotations but leave no aggregated synthesis — no signal about what a corpus *as a whole* says, what's missing, or what to read next. The `/lit-review` skill closes this loop.
+
+**Pipeline (7 stages):**
+
+```
+step_fetch      — arxiv_fetch.py queries arXiv Atom API, date-filters, deduplicates → CSV
+step_enrich     — semantic_scholar.py fetches reference lists per paper (S2 Graph API, SQLite-cached)
+step_curate     — hub prioritization: papers cited most within corpus annotated first
+step_annotate   — run_annotate_standalone() per paper with RunTrace, checkpoint to .lit_review_cache/
+step_cluster    — LLM groups papers into 3-5 named clusters (JSON output)
+step_synthesize — per-cluster summaries + cross-cluster overview + open questions extraction
+step_render     — Jinja2 template renders final document (survey / gaps / executive views)
+```
+
+**New files:**
+- `arxiv_fetch.py` — arXiv Atom API via feedparser; CLI with `--after/--before` date filtering, `--append` mode, same CSV schema as `arxiv_agentic_papers.csv`
+- `semantic_scholar.py` — S2 Graph API references per paper; builds `GraphResult` (adjacency, hub_scores, gap_candidates); SQLite TTL cache (30-day); `fetch_gap_arxiv_rows()` for gap metadata
+- `lit_review_skill.py` — 7-step orchestrator; per-paper checkpoint; RunTrace per annotation; Jinja template dispatch
+- `templates/lit_review_survey.j2` — cluster sections with hub callout, per-paper annotation details, gap table
+- `templates/lit_review_gaps.j2` — gap-focused: open questions, gap candidates ranked by citation count, cluster blind spots
+
+**Key design decisions:**
+- Checkpointing: `.lit_review_cache/{arxiv_id}.json` — long corpus runs survive crashes and resume mid-annotation
+- Hub prioritization: papers cited most within corpus surface first; guarantees the most-connected work is annotated when `--max-annotate` is less than total corpus size
+- Jinja separation: annotations are data; rendering is a template decision — same annotation pass, multiple output formats
+- S2 API is free, no-auth; 429-backoff with 10s sleep + retry; 404 cached as empty (paper not indexed)
+
+**Agent integration:** `agent.py` routes `/lit-review <query> [flags]` → `_handle_lit_review()` → `run_lit_review()`. Keep-alive `-1` (infinite) for lit-review sessions. Flags parsed from task string via regex: `--max-fetch`, `--max-annotate`, `--after`, `--before`, `--template survey|gaps|executive`, `--no-s2`, `--no-wiggum`.
+
+**Status:** DONE (Session 10) — functional but not yet field-tested on a real corpus run. Test with a 20-paper agentic survey query.
+
+---
+
+### 7l: DPO preference dataset pipeline — `build_dpo_dataset.py`
+
+**Motivation:** Every run already generates implicit preference signal — wiggum rounds that improve a synthesis are a (rejected, chosen) pair; cross-run comparisons on the same task are another. Extracting these into a DPO dataset closes the loop between runtime evals and fine-tuning.
+
+**Two signal sources:**
+
+| Source | Signal | Available |
+|--------|--------|-----------|
+| `cross_run` | Same task + same producer model; higher-scoring run is chosen, lower is rejected | Now — 3 pairs from existing runs.jsonl |
+| `wiggum_revision` | Round-1 synthesis vs best-round synthesis within a single run | Future — requires `content` field in wiggum_eval_log (added Session 10) |
+
+**Output schema:**
+```json
+{
+  "prompt": "...", "chosen": "...", "rejected": "...",
+  "chosen_score": 7.8, "rejected_score": 5.2, "score_delta": 2.6,
+  "source": "cross_run|wiggum_revision",
+  "task_type": "research", "producer_model": "...", "evaluator_model": "...",
+  "chosen_dims": {...}, "rejected_dims": {...},
+  "wiggum_feedback": "...", "timestamp": "..."
+}
+```
+
+**Key implementation details:**
+- Task normalization: `_normalize_task()` strips `/skill` prefixes, takes first 120 chars — groups semantically identical tasks across runs
+- Cross-run pairs: filter to same producer_model, score_delta ≥ `--min-delta` (default 1.0), require content in both runs
+- Revision pairs: require `wiggum_eval_log` entries to have `"content"` field (only runs after 2026-04-14 have this)
+- wiggum.py modified: `"content": content[:8_000]` added to `round_record` in both standard and annotate wiggum loops
+- logger.py modified: `log_wiggum()` propagates `content` field into `wiggum_eval_log` in runs.jsonl
+
+**CLI:** `python build_dpo_dataset.py [--min-delta N] [--source cross|revision|all] [--stats] [--runs path] [--out path]`
+
+**Status:** DONE (Sessions 9–10). Cross-run pairs active; revision pairs accumulate as future runs generate content-tagged eval logs. Feed output to `finetune_annotate.py` DPO training mode when N ≥ 50 pairs.
+
+---
+
+### 7m: Batch annotation run logging — DONE
+
+**What was missing:** `run_annotations.py` and `annotate_abstracts.py` called the LLM directly via `run_annotate_standalone()` with no `RunTrace` instrumentation. Batch annotation runs were invisible in the dashboard and `runs.jsonl`.
+
+**Fix (Session 10):**
+- `run_annotate_standalone()` signature extended with optional `_trace=None` parameter; calls `_trace.log_usage(resp, stage="annotate")` after each LLM call
+- `run_annotations.py`: creates `RunTrace` per paper, passes to `run_annotate_standalone`, calls `trace.finish("PASS"/"FAIL")`
+- `annotate_abstracts.py`: same pattern — `RunTrace` per paper, token logging, output_bytes/output_lines, `trace.finish()`
+- Backfilled 10 historical annotate runs in `runs.jsonl` that stored raw `wiggum` dict instead of processed logger fields
+- Dashboard `_is_substantive()` filter excludes stub runs (0 tokens, 0 wiggum_rounds, 0 output_bytes) that were flooding the recent runs table
+
+**Status:** DONE (Session 10).
+
+---
+
 ## Guiding Principles
 
 **1. Build for deletion.**
