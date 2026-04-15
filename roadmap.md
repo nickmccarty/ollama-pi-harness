@@ -673,7 +673,7 @@ Cleanest reproducible experiments for a paper/report:
 
 ## Stage 7 - Capability Upgrades (sourced 2026-04-12)
 
-### 7a: OCR preprocessing for document ingestion — NEXT (low effort, high value)
+### 7a: OCR preprocessing for document ingestion — DONE (Session 11)
 
 **Problem:** `read_file_context()` routes PDFs through MarkItDown. For scanned or image-heavy documents, MarkItDown extracts garbage or nothing — the chunker receives corrupt input, synthesis quality collapses.
 
