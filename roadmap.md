@@ -530,9 +530,9 @@ export HF_HOME=/mnt/c/Users/nicho/.cache/huggingface
 vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
   --dtype half \
   --quantization awq_marlin \
-  --max-model-len 16384 \
+  --max-model-len 8192 \
   --enable-prefix-caching \
-  --gpu-memory-utilization 0.85
+  --gpu-memory-utilization 0.90
 ```
 
 **In `.env` (Windows harness):**
@@ -557,9 +557,9 @@ VLLM_MODEL_MAP={"pi-qwen-32b":"Qwen/Qwen2.5-14B-Instruct-AWQ","pi-qwen":"Qwen/Qw
 **Remaining work:**
 
 1. **Evaluator routing** — when running two vLLM instances (producer :8000, evaluator :8001), need `VLLM_EVALUATOR_BASE_URL` support in `inference.py`.
-2. **Gradual migration** — `skills.py`, `email_skill.py`, `lit_review_skill.py`, `curator.py`, `review_skill.py` still call `_ollama_raw.chat()` directly. Replace with `from inference import chat as _llm_chat` as each file is touched.
+2. **Gradual migration** — all `_ollama_raw.chat()` call sites migrated to `inference.py` in Session 11.
 3. **`think` flag** — Qwen3's `options={"think": False}` is Ollama-specific. Needs thin translation in `_chat_vllm()`.
-4. **`awq_marlin`** — switch from `--quantization awq` to `awq_marlin` for faster throughput (detected compatible at startup; was forced to `awq` during initial test).
+4. **`awq_marlin`** — ✅ switched to `awq_marlin` in Session 11; requires `--max-model-len 8192 --gpu-memory-utilization 0.90` (awq_marlin activation peaks leave insufficient KV cache at 16384).
 5. **Benchmark** — run `eval_suite.py` with `INFERENCE_BACKEND=vllm` and confirm tok/s figures before promoting as permanent default.
 
 ---

@@ -91,8 +91,8 @@ pip install vllm==0.7.3 "transformers==4.49.0"
 export HF_HOME=/mnt/c/Users/<you>/.cache/huggingface
 vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
   --dtype half --quantization awq_marlin \
-  --max-model-len 16384 --enable-prefix-caching \
-  --gpu-memory-utilization 0.85
+  --max-model-len 8192 --enable-prefix-caching \
+  --gpu-memory-utilization 0.90
 ```
 
 Then in `.env` (Windows):
