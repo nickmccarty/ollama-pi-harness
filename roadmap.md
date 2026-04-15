@@ -558,7 +558,7 @@ VLLM_MODEL_MAP={"pi-qwen-32b":"Qwen/Qwen2.5-14B-Instruct-AWQ","pi-qwen":"Qwen/Qw
 
 1. **Evaluator routing** — when running two vLLM instances (producer :8000, evaluator :8001), need `VLLM_EVALUATOR_BASE_URL` support in `inference.py`.
 2. **Gradual migration** — all `_ollama_raw.chat()` call sites migrated to `inference.py` in Session 11.
-3. **`think` flag** — Qwen3's `options={"think": False}` is Ollama-specific. Needs thin translation in `_chat_vllm()`.
+3. **`think` flag** — ✅ translated in Session 11: `options={"think": bool}` → `extra_body={"chat_template_kwargs": {"enable_thinking": bool}}` (vLLM ≥0.6.4).
 4. **`awq_marlin`** — ✅ switched to `awq_marlin` in Session 11; requires `--max-model-len 8192 --gpu-memory-utilization 0.90` (awq_marlin activation peaks leave insufficient KV cache at 16384).
 5. **Benchmark** — run `eval_suite.py` with `INFERENCE_BACKEND=vllm` and confirm tok/s figures before promoting as permanent default.
 

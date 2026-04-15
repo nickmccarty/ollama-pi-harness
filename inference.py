@@ -158,8 +158,10 @@ def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
     if "num_predict" in options:
         oai_kwargs["max_tokens"] = options["num_predict"]
     # num_ctx is a server-startup concern for vLLM (--max-model-len), not per-request
-    # think=False: Qwen3 thinking mode — vLLM equivalent is not passing /think in prompt
-    # think=True would require prepending a /think system message; leave for future work
+    if "think" in options:
+        # Qwen3 thinking mode: translate Ollama options={"think": bool} →
+        # vLLM extra_body chat_template_kwargs (supported since vLLM 0.6.4)
+        oai_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(options["think"])}}
 
     vllm_model = _resolve_model(model)
     t0 = time.monotonic_ns()
