@@ -129,6 +129,16 @@ REGISTRY: dict[str, dict] = {
         "auto":        None,   # explicit only
     },
 
+    "recall": {
+        "description": (
+            "Standalone: semantic search over agent memory. "
+            "Usage: /recall <query> [--n N] [--facts] [--scores]"
+        ),
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only
+    },
+
 }
 
 # Aliases — resolved during parse
@@ -149,7 +159,15 @@ def parse_skills(task: str) -> tuple[str, list[str]]:
     skill_names: list[str] = []
     clean      = []
 
+    _drop_next_windows_fragment = False
     for part in parts:
+        # Git Bash (MSYS2) converts /skillname → C:/Program Files/Git/skillname.
+        # The path splits across two tokens: "C:/Program" and "Files/Git/skillname".
+        # Drop the leading Windows drive fragment when we know the next token held the skill.
+        if _drop_next_windows_fragment:
+            _drop_next_windows_fragment = False
+            continue
+
         if part.startswith("/"):
             raw  = part[1:]
             name = _ALIASES.get(raw, raw)
@@ -157,6 +175,17 @@ def parse_skills(task: str) -> tuple[str, list[str]]:
                 if name not in skill_names:
                     skill_names.append(name)
                 continue   # strip from task
+        elif "/" in part or "\\" in part:
+            # Could be a MSYS2-mangled skill token (e.g. "Files/Git/recall")
+            stem = part.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+            name = _ALIASES.get(stem, stem)
+            if name in REGISTRY:
+                if name not in skill_names:
+                    skill_names.append(name)
+                # Also drop the preceding "C:/Program"-style fragment we already appended
+                if clean and clean[-1].startswith(("C:/", "C:\\", "D:/")):
+                    clean.pop()
+                continue   # strip mangled token from task
         clean.append(part)
 
     return " ".join(clean), skill_names

@@ -1787,3 +1787,32 @@ fetch (arxiv_fetch.py)
 **The data flywheel**: every `/lit-review` run generates wiggum annotation pairs (→ DPO training data via `build_dpo_dataset.py`), curated CSV (→ fine-tuning dataset), and synthesized review (→ memory observations). The skill compounds each time it runs.
 
 **Registered as `/lit-review` in skills.py** with `hook="standalone"`. Agent dispatch in `_handle_lit_review` parses flags from the task string. Keep_alive set to -1 (indefinite) since the pipeline can run for minutes to hours depending on corpus size.
+
+---
+
+## Session 11 — 2026-04-14: /recall skill + MSYS2 path fix
+
+### /recall — semantic memory search slash command
+
+Added `/recall <query> [--n N] [--facts] [--scores]` as a standalone skill. Motivation: the agent's memory store (`memory.db`) has 862 observations accumulated across all runs — paper annotations, research tasks, eval results — but there was no way to query it directly from the command line. Previously the only access was automatic (injected into the synthesis context before each run via `get_context()`).
+
+**Implementation:**
+- `skills.py`: added `"recall"` to REGISTRY with `hook="standalone"`
+- `memory.py`: added `search()` as a public alias for `_search()` — semantic + quality ranked retrieval via ChromaDB, FTS5 fallback
+- `agent.py`: added `_handle_recall()` standalone handler; parses `--n`, `--facts`, `--scores` flags from task string; added `"recall"` to `_path_optional` set
+
+**Output format:** ranked hit list with title, date, narrative, and optionally facts bullets and wiggum score. Confirmed working — `/recall trading multi-agent` surfaced *TradingAgents* and *When Agents Trade* papers that had been annotated in the batch corpus.
+
+### MSYS2 path mangling fix — affects all /skill tokens from bash
+
+**Root cause:** Git Bash (MSYS2) converts any argument starting with `/` to a Windows absolute path. `/recall trading multi-agent` → `C:/Program Files/Git/recall trading multi-agent`. This split across two tokens when Python splits the arg by spaces: `["C:/Program", "Files/Git/recall", "trading", ...]`.
+
+This was a latent bug affecting every skill invoked from the bash terminal (vs the dashboard server which passes tasks via `AGENT_TASK` env var, bypassing shell expansion).
+
+**Fix in `parse_skills()`:**
+- Added a second branch: if a token contains `/` or `\` and its basename (last path segment) is a registered skill name, treat it as a mangled skill token and strip it
+- Also pops the preceding `C:/...` drive fragment from the clean list if present
+
+**Diagnosis method:** `python -c "import sys; print(sys.argv)"` revealed the conversion in action.
+
+**Side note:** `-X utf8` Python flag (UTF-8 mode) eliminates the cp1252 `UnicodeEncodeError` on the `→` character in logger.py's `trace.finish()` print — should be added to any bash invocation wrapper.

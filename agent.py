@@ -798,7 +798,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -984,12 +984,57 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.data["lit_review_clusters"] = result.get("clusters", 0)
             trace.finish("PASS")
 
+        def _handle_recall():
+            import re as _re
+            import json as _json
+
+            # Parse: /recall <query> [--n N] [--facts] [--scores]
+            raw = task.strip()
+            n_match = _re.search(r"--n\s+(\d+)", raw)
+            n = int(n_match.group(1)) if n_match else 10
+            show_facts  = "--facts"  in raw
+            show_scores = "--scores" in raw
+            query = _re.sub(r"--n\s+\d+|--facts|--scores", "", raw).strip()
+
+            if not query:
+                print("[recall] usage: /recall <query> [--n N] [--facts] [--scores]")
+                trace.finish("ERROR")
+                return
+
+            print(f"\n[recall] searching memory for: {query!r}  (top {n})")
+            hits = memory.search(query, n=n)
+
+            if not hits:
+                print("[recall] no matching observations found.")
+                trace.finish("PASS")
+                return
+
+            for i, row in enumerate(hits, 1):
+                score_str = f"  score={row['final_score']:.1f}" if show_scores and row["final_score"] else ""
+                date = (row["timestamp"] or "")[:10]
+                print(f"\n{'─'*60}")
+                print(f"[{i}] {row['title']}")
+                print(f"     {date}{score_str}")
+                print(f"     {row['narrative']}")
+                if show_facts and row["facts"]:
+                    try:
+                        facts = _json.loads(row["facts"]) if isinstance(row["facts"], str) else row["facts"]
+                        for f in (facts or []):
+                            print(f"     • {f}")
+                    except Exception:
+                        print(f"     {row['facts']}")
+
+            print(f"\n{'─'*60}")
+            print(f"[recall] {len(hits)} result(s) for {query!r}")
+            trace.finish("PASS")
+
         _STANDALONE = {
             "annotate":   _handle_annotate,
             "email":      _handle_email,
             "github":     _handle_github,
             "review":     _handle_review,
             "lit-review": _handle_lit_review,
+            "recall":     _handle_recall,
         }
 
         for _skill in explicit_skills:

@@ -1026,6 +1026,23 @@ step_render     — Jinja2 template renders final document (survey / gaps / exec
 
 ---
 
+### 7k-ii: /recall — semantic memory search — DONE
+
+**What it does:** `/recall <query> [--n N] [--facts] [--scores]` queries the agent's memory store directly from the command line. Returns top-N observations ranked by semantic similarity (ChromaDB) + quality score blend, with optional facts bullets and wiggum scores.
+
+**Why it matters:** 862 observations in `memory.db` with no direct query interface. The only previous access was automatic injection into the synthesis context before each run. `/recall` makes the corpus searchable on demand — useful for finding past research before starting a new task, or verifying what the agent already knows about a topic.
+
+**Files changed:**
+- `skills.py`: `"recall"` added to REGISTRY with `hook="standalone"`; MSYS2 path mangling fix in `parse_skills()` (strips `C:/Program Files/Git/skillname` → `skillname` for all skills)
+- `memory.py`: `search()` added as public alias for `_search()`
+- `agent.py`: `_handle_recall()` standalone handler; `"recall"` added to `_path_optional`
+
+**Bonus fix — MSYS2 path conversion (Session 11):** Git Bash converts `/skillname` args to Windows absolute paths (`C:/Program Files/Git/skillname`), breaking skill detection for all terminal invocations. Fixed in `parse_skills()` — now strips mangled path tokens and their preceding drive fragments. Latent bug affecting all skills; caught when testing `/recall` from bash.
+
+**Status:** DONE (Session 11).
+
+---
+
 ### 7l: DPO preference dataset pipeline — `build_dpo_dataset.py`
 
 **Motivation:** Every run already generates implicit preference signal — wiggum rounds that improve a synthesis are a (rejected, chosen) pair; cross-run comparisons on the same task are another. Extracting these into a DPO dataset closes the loop between runtime evals and fine-tuning.

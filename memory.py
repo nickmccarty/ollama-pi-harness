@@ -438,6 +438,10 @@ class MemoryStore:
 
         return "\n".join(lines).strip()
 
+    def search(self, task: str, n: int = 10) -> list[sqlite3.Row]:
+        """Public alias for _search — semantic + quality ranked retrieval."""
+        return self._search(task, n)
+
     def _search(self, task: str, n: int) -> list[sqlite3.Row]:
         """
         Semantic retrieval via ChromaDB with SQLite metadata join.
