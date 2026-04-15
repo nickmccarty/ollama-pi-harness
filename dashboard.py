@@ -239,12 +239,27 @@ def build_payload(runs):
         scores = r.get("wiggum_scores") or []
         score_trajectory = [s for s in scores if s is not None]
 
+        task_raw  = r.get("task") or ""
+        task_type = r.get("task_type") or "?"
+        # For email runs the task string is mangled by MSYS2 path expansion.
+        # Build a clean label from the structured fields instead.
+        if task_type == "email":
+            drafts   = r.get("email_drafts", 0)
+            out_dir  = r.get("email_output_dir", "")
+            # Extract CSV filename from raw task (last *.csv token before mangling)
+            import re as _re
+            csv_match = _re.search(r'([\w\-\.]+\.csv)', task_raw)
+            csv_name  = csv_match.group(1) if csv_match else "?"
+            task_label = f"Email: {csv_name} → {out_dir} ({drafts} draft{'s' if drafts != 1 else ''})"
+        else:
+            task_label = task_raw[:70]
+
         recent.append({
             "ts":       fmt_ts(r.get("timestamp")),
-            "task":     (r.get("task") or "")[:70],
-            "task_full": (r.get("task") or ""),
+            "task":     task_label,
+            "task_full": task_raw,
             "model":    r.get("producer_model") or "",
-            "type":     r.get("task_type") or "?",
+            "type":     task_type,
             "score":    first_wiggum_score(r),
             "rounds":   r.get("wiggum_rounds"),
             "duration": round((r.get("run_duration_s") or 0) / 60, 1),
@@ -262,6 +277,9 @@ def build_payload(runs):
             "novelty_scores":    r.get("novelty_scores") or [],
             "output_bytes":      r.get("output_bytes") or 0,
             "output_lines":      r.get("output_lines") or 0,
+            # Email-specific detail fields
+            "email_drafts":     r.get("email_drafts"),
+            "email_output_dir": r.get("email_output_dir"),
         })
     recent.reverse()
 
@@ -1111,6 +1129,20 @@ function buildDetailInner(r) {
       <div style="font-size:22px;font-weight:700;color:${memColor};line-height:1.1">${r.memory_hits}</div>
       <div style="color:var(--muted);font-size:11px;margin-top:4px">${r.memory_hits === 1 ? 'prior observation retrieved' : r.memory_hits > 1 ? 'prior observations retrieved' : 'no prior context'}</div>
     </div>`);
+
+  // Card: Email drafts (email runs only)
+  if (r.email_drafts != null) {
+    const manifestPath = (r.email_output_dir || '').replace(/\\/g, '/').replace(/\/?$/, '/') + 'manifest.json';
+    cards.push(`
+      <div class="detail-card">
+        <div class="detail-card-title">Email Drafts</div>
+        <div style="font-size:22px;font-weight:700;color:var(--blue);line-height:1.1">${r.email_drafts}</div>
+        <div style="color:var(--muted);font-size:11px;margin-top:4px">draft${r.email_drafts !== 1 ? 's' : ''} generated</div>
+        <div style="color:var(--muted);font-size:11px;margin-top:6px">&#128193; ${r.email_output_dir || '—'}</div>
+        <div style="margin-top:8px"><a href="${manifestPath}" target="_blank"
+          style="font-size:11px;color:var(--blue);text-decoration:none">manifest.json &#8599;</a></div>
+      </div>`);
+  }
 
   // Card: Score trajectory + flags
   const trajectory = (r.score_trajectory || []);
