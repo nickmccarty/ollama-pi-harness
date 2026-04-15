@@ -243,14 +243,15 @@ def build_payload(runs):
         task_type = r.get("task_type") or "?"
         # For email runs the task string is mangled by MSYS2 path expansion.
         # Build a clean label from the structured fields instead.
-        if task_type == "email":
-            drafts   = r.get("email_drafts", 0)
-            out_dir  = r.get("email_output_dir", "")
-            # Extract CSV filename from raw task (last *.csv token before mangling)
+        if task_type == "email_draft":
+            task_label = (r.get("task") or "")[:70]
+        elif task_type == "email":
+            drafts  = r.get("email_drafts", 0)
+            out_dir = r.get("email_output_dir", "")
             import re as _re
             csv_match = _re.search(r'([\w\-\.]+\.csv)', task_raw)
             csv_name  = csv_match.group(1) if csv_match else "?"
-            task_label = f"Email: {csv_name} → {out_dir} ({drafts} draft{'s' if drafts != 1 else ''})"
+            task_label = f"Email batch: {csv_name} → {out_dir} ({drafts} draft{'s' if drafts != 1 else ''})"
         else:
             task_label = task_raw[:70]
 
@@ -277,9 +278,18 @@ def build_payload(runs):
             "novelty_scores":    r.get("novelty_scores") or [],
             "output_bytes":      r.get("output_bytes") or 0,
             "output_lines":      r.get("output_lines") or 0,
-            # Email-specific detail fields
+            # Email batch fields
             "email_drafts":     r.get("email_drafts"),
             "email_output_dir": r.get("email_output_dir"),
+            # Email draft (per-contact) fields
+            "email_to":          r.get("email_to"),
+            "email_name":        r.get("email_name"),
+            "email_affiliation": r.get("email_affiliation"),
+            "email_subject":     r.get("email_subject"),
+            "email_body":        r.get("email_body"),
+            "email_goal":        r.get("email_goal"),
+            "email_subject_prompt": (r.get("tool_calls") or [{}])[0].get("query") if task_type == "email_draft" else None,
+            "email_body_prompt":    (r.get("tool_calls") or [{}, {}])[1].get("query") if task_type == "email_draft" and len(r.get("tool_calls") or []) > 1 else None,
         })
     recent.reverse()
 
@@ -1130,12 +1140,45 @@ function buildDetailInner(r) {
       <div style="color:var(--muted);font-size:11px;margin-top:4px">${r.memory_hits === 1 ? 'prior observation retrieved' : r.memory_hits > 1 ? 'prior observations retrieved' : 'no prior context'}</div>
     </div>`);
 
-  // Card: Email drafts (email runs only)
+  // Card: Email draft details (per-contact trace)
+  if (r.email_subject) {
+    const esc = s => (s||'').replace(/</g,'&lt;').replace(/\n/g,'<br>');
+    cards.push(`
+      <div class="detail-card" style="grid-column: 1 / -1">
+        <div class="detail-card-title">Email Draft</div>
+        <div style="margin-bottom:8px">
+          <span style="color:var(--muted);font-size:11px">To</span>
+          <span style="margin-left:8px;font-weight:600">${esc(r.email_name)}</span>
+          <span style="color:var(--muted);font-size:11px;margin-left:6px">${esc(r.email_affiliation)}</span>
+          <span style="color:var(--blue);font-size:11px;margin-left:8px">&lt;${esc(r.email_to)}&gt;</span>
+        </div>
+        <div style="margin-bottom:10px">
+          <span style="color:var(--muted);font-size:11px">Subject</span>
+          <span style="margin-left:8px;font-weight:600;color:var(--green)">${esc(r.email_subject)}</span>
+        </div>
+        <div style="background:var(--bg2);border-radius:4px;padding:10px;font-size:12px;line-height:1.6;white-space:pre-wrap;border:1px solid var(--border)">${esc(r.email_body)}</div>
+      </div>`);
+
+    if (r.email_subject_prompt || r.email_body_prompt) {
+      cards.push(`
+        <div class="detail-card" style="grid-column: 1 / -1">
+          <div class="detail-card-title">Prompts</div>
+          ${r.email_subject_prompt ? `
+            <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Subject prompt</div>
+            <div style="background:var(--bg2);border-radius:4px;padding:8px;font-size:11px;font-family:monospace;white-space:pre-wrap;border:1px solid var(--border);margin-bottom:10px">${esc(r.email_subject_prompt)}</div>` : ''}
+          ${r.email_body_prompt ? `
+            <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Body prompt</div>
+            <div style="background:var(--bg2);border-radius:4px;padding:8px;font-size:11px;font-family:monospace;white-space:pre-wrap;border:1px solid var(--border)">${esc(r.email_body_prompt)}</div>` : ''}
+        </div>`);
+    }
+  }
+
+  // Card: Email batch summary
   if (r.email_drafts != null) {
     const manifestPath = (r.email_output_dir || '').replace(/\\/g, '/').replace(/\/?$/, '/') + 'manifest.json';
     cards.push(`
       <div class="detail-card">
-        <div class="detail-card-title">Email Drafts</div>
+        <div class="detail-card-title">Email Batch</div>
         <div style="font-size:22px;font-weight:700;color:var(--blue);line-height:1.1">${r.email_drafts}</div>
         <div style="color:var(--muted);font-size:11px;margin-top:4px">draft${r.email_drafts !== 1 ? 's' : ''} generated</div>
         <div style="color:var(--muted);font-size:11px;margin-top:6px">&#128193; ${r.email_output_dir || '—'}</div>

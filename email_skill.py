@@ -17,6 +17,7 @@ import os
 import re
 import csv
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -127,6 +128,55 @@ def _ollama_chat(model: str, messages: list[dict], num_predict: int = 512) -> tu
 
 
 # ---------------------------------------------------------------------------
+# Per-draft trace logger
+# ---------------------------------------------------------------------------
+
+def _log_draft_trace(
+    name, affiliation, to_email, subject, body,
+    subject_prompt, body_prompt,
+    producer_model, tokens_in, tokens_out, duration_s,
+    json_path, goal,
+):
+    """Append one runs.jsonl entry per email draft so each gets its own dashboard row."""
+    from logger import LOG_PATH
+    record = {
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
+        "task":           f"Email draft: {name} <{to_email}>",
+        "producer_model": producer_model,
+        "evaluator_model": None,
+        "run_duration_s": duration_s,
+        "input_tokens":   tokens_in,
+        "output_tokens":  tokens_out,
+        "tokens_by_stage": {
+            "subject": {"input": 0, "output": 0},
+            "body":    {"input": 0, "output": 0},
+        },
+        "tool_calls": [
+            {"name": "subject_prompt", "query": subject_prompt, "result_chars": len(subject)},
+            {"name": "body_prompt",    "query": body_prompt,    "result_chars": len(body)},
+        ],
+        "vision_images": [], "total_search_chars": 0, "quality_floor_hit": False,
+        "files_read": [], "code_executions": 0, "injection_stripped": 0, "memory_hits": 0,
+        "plan": None, "orchestrated": False, "subtask_count": 0, "synth_forced": False,
+        "output_path":  json_path,
+        "output_lines": len(body.splitlines()),
+        "output_bytes": len(body.encode()),
+        "count_check_retry": False,
+        "wiggum_rounds": 0, "wiggum_scores": [], "wiggum_dims": [], "wiggum_eval_log": [],
+        "final": "PASS",
+        "task_type":   "email_draft",
+        "email_to":    to_email,
+        "email_name":  name,
+        "email_affiliation": affiliation,
+        "email_subject": subject,
+        "email_body":    body,
+        "email_goal":    goal,
+    }
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -200,6 +250,7 @@ def run_email_standalone(
         slide_excerpt = slide_md[:_SLIDE_CHAR_LIMIT] if slide_md else "(no slide content available)"
 
         print(f"  [{i}/{len(rows)}] drafting email for {name} ({affiliation})...")
+        draft_start = time.monotonic()
 
         # Build goal string — append platform URL if provided
         goal_full = goal
@@ -250,6 +301,8 @@ def run_email_standalone(
         total_in  += b_in
         total_out += b_out
 
+        draft_duration = round(time.monotonic() - draft_start, 1)
+
         # --- Write per-contact JSON ---
         record = {
             "name":          name,
@@ -265,6 +318,18 @@ def run_email_standalone(
         json_path     = out_dir / json_filename
         json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
         record["json_path"] = str(json_path.resolve())
+
+        # --- Log individual draft trace to runs.jsonl ---
+        _log_draft_trace(
+            name=name, affiliation=affiliation, to_email=to_email,
+            subject=subject, body=body,
+            subject_prompt=subject_prompt, body_prompt=body_prompt,
+            producer_model=producer_model,
+            tokens_in=s_in + b_in, tokens_out=s_out + b_out,
+            duration_s=draft_duration,
+            json_path=str(json_path.resolve()),
+            goal=goal_full,
+        )
 
         results.append(record)
         print(f"    -> {json_path.name}  subject: {subject[:50]}")
