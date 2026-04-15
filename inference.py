@@ -59,7 +59,11 @@ _MODEL_MAP: dict[str, str] = {
 _env_map = os.environ.get("VLLM_MODEL_MAP")
 if _env_map:
     try:
-        _MODEL_MAP.update(json.loads(_env_map))
+        _env_parsed = json.loads(_env_map)
+        # When VLLM_MODEL_MAP is explicitly set, it defines exactly which models
+        # route to vLLM. Replace the built-in map so that models listed in the
+        # built-in defaults but NOT in the env map fall back to Ollama.
+        _MODEL_MAP = _env_parsed
     except Exception as _e:
         print(f"  [inference] VLLM_MODEL_MAP parse error: {_e}")
 

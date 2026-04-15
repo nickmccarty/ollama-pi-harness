@@ -51,8 +51,8 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
-PRODUCER_MODEL = "pi-qwen-32b"
-EVALUATOR_MODEL = "Qwen3-Coder:30b"
+PRODUCER_MODEL = os.environ.get("WIGGUM_PRODUCER_MODEL", "pi-qwen-32b")
+EVALUATOR_MODEL = os.environ.get("WIGGUM_EVALUATOR_MODEL", "Qwen3-Coder:30b")
 MAX_ROUNDS = 3
 PASS_THRESHOLD = 9.0
 
