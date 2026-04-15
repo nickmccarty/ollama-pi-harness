@@ -49,6 +49,27 @@ def run_backend(task: str, backend: str, label: str) -> dict:
     env["INFERENCE_BACKEND"] = backend
     env["WIGGUM_MAX_ROUNDS"] = "1"   # cap wiggum to 1 round so timing reflects parallel work
 
+    if backend == "vllm":
+        # When running vLLM-only (Ollama stopped), map ALL harness models to the
+        # served model so no call silently falls back to a dead Ollama daemon.
+        # Planner (glm4:9b) and evaluator both use the same served model.
+        served = env.get("VLLM_MODEL_MAP", "")
+        import json as _json
+        try:
+            served_map = _json.loads(served)
+            served_model = next(iter(served_map.values())) if served_map else "Qwen/Qwen2.5-14B-Instruct-AWQ"
+        except Exception:
+            served_model = "Qwen/Qwen2.5-14B-Instruct-AWQ"
+        full_map = {
+            "pi-qwen-32b":              served_model,
+            "pi-qwen":                  served_model,
+            "Qwen3-Coder:30b":          served_model,
+            "glm4:9b":                  served_model,
+            "llama3.2:3b":              served_model,
+        }
+        env["VLLM_MODEL_MAP"] = _json.dumps(full_map)
+        print(f"  [bench] vLLM full model map active (served={served_model})")
+
     print(f"\n{'='*60}")
     print(f" {label}  (backend={backend})")
     print(f"{'='*60}")
