@@ -15,6 +15,10 @@ Endpoints:
     GET  /api/stream/<run_id>     SSE: agent stdout line-by-line
     GET  /api/runs                active + recent completed runs
     POST /api/run/<run_id>/cancel kill a running task
+    POST /api/queue               enqueue a task        {task, name?}  → {queue_id, position}
+    GET  /api/queue               list pending queue items
+    DELETE /api/queue/<queue_id>  remove a pending item
+    POST /api/queue/clear         remove all pending items
     POST /api/schedule            create recurring task {task, cron, name?}
     GET  /api/schedule            list scheduled tasks
     DELETE /api/schedule/<id>     remove a scheduled task
@@ -48,10 +52,20 @@ app  = Flask(__name__)
 
 _active : dict[str, dict] = {}           # run_id → run
 _recent : deque           = deque(maxlen=100)
+_queue  : deque           = deque()      # pending queue items (FIFO)
 _sched  : dict[str, dict] = {}           # sched_id → schedule
 _lock   = threading.Lock()
 
 # ── Task runner ──────────────────────────────────────────────────────────────
+
+def _maybe_launch_next():
+    """If the queue has items and nothing is active, launch the next queued task."""
+    with _lock:
+        if _active or not _queue:
+            return
+        item = _queue.popleft()
+    _launch(item["task"], f"queue:{item['queue_id']}")
+
 
 def _launch(task: str, triggered_by: str = "manual") -> str:
     """Spawn agent.py, stream its stdout into log_lines. Returns run_id."""
@@ -108,6 +122,9 @@ def _launch(task: str, triggered_by: str = "manual") -> str:
             snap = {k: v for k, v in run.items() if k not in ("log_event", "proc")}
             _recent.appendleft(snap)
             _active.pop(run_id, None)
+
+        # Kick off the next queued task now that this slot is free
+        _maybe_launch_next()
 
     with _lock:
         _active[run_id] = run
@@ -217,6 +234,59 @@ def api_cancel(run_id):
         return jsonify({"error": "not found or already done"}), 404
     run["proc"].terminate()
     return jsonify({"cancelled": run_id})
+
+
+@app.route("/api/queue", methods=["POST"])
+def api_queue_add():
+    body = request.get_json(force=True, silent=True) or {}
+    task = (body.get("task") or "").strip()
+    if not task:
+        return jsonify({"error": "task required"}), 400
+    queue_id = uuid.uuid4().hex[:8]
+    item = {
+        "queue_id":   queue_id,
+        "task":       task,
+        "name":       (body.get("name") or task[:60]).strip(),
+        "queued_at":  datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "triggered_by": "ui",
+    }
+    with _lock:
+        _queue.append(item)
+        position = len(_queue)
+    # If nothing is running, launch immediately
+    _maybe_launch_next()
+    return jsonify({"queue_id": queue_id, "position": position}), 202
+
+
+@app.route("/api/queue", methods=["GET"])
+def api_queue_list():
+    with _lock:
+        items = [
+            {**item, "position": i + 1}
+            for i, item in enumerate(_queue)
+        ]
+    return jsonify({"pending": len(items), "items": items})
+
+
+@app.route("/api/queue/<queue_id>", methods=["DELETE"])
+def api_queue_delete(queue_id):
+    with _lock:
+        before = len(_queue)
+        new_q  = deque(item for item in _queue if item["queue_id"] != queue_id)
+        removed = before - len(new_q)
+        _queue.clear()
+        _queue.extend(new_q)
+    if not removed:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"deleted": queue_id})
+
+
+@app.route("/api/queue/clear", methods=["POST"])
+def api_queue_clear():
+    with _lock:
+        count = len(_queue)
+        _queue.clear()
+    return jsonify({"cleared": count})
 
 
 @app.route("/api/schedule", methods=["GET"])

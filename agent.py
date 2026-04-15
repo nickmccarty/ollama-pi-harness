@@ -46,7 +46,7 @@ def _estimate_keep_alive(task_type: str, explicit_skills: set, use_wiggum: bool)
     called in that case.
     """
     # Standalone skills with short, bounded durations
-    if explicit_skills & {"github", "email", "review"}:
+    if explicit_skills & {"github", "email", "review", "recall", "queue"}:
         return 90
     if explicit_skills & {"lit-review"}:
         return -1   # keep alive indefinitely — pipeline runs for minutes to hours
@@ -798,7 +798,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1028,6 +1028,38 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             print(f"[recall] {len(hits)} result(s) for {query!r}")
             trace.finish("PASS")
 
+        def _handle_queue():
+            import urllib.request as _urllib
+            import json as _json
+
+            # tasks separated by ;; in the task string
+            subtasks = [t.strip() for t in task.split(";;") if t.strip()]
+            if not subtasks:
+                print("[queue] usage: /queue <task1> ;; <task2> ;; ...")
+                trace.finish("ERROR")
+                return
+
+            server_url = os.environ.get("HARNESS_SERVER", "http://127.0.0.1:8765")
+            queued = []
+            for i, subtask in enumerate(subtasks, 1):
+                body = _json.dumps({"task": subtask}).encode()
+                req  = _urllib.Request(
+                    f"{server_url}/api/queue",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with _urllib.urlopen(req, timeout=10) as resp:
+                        d = _json.loads(resp.read())
+                    print(f"[queue] [{i}/{len(subtasks)}] position={d.get('position')}  id={d.get('queue_id')}  {subtask[:60]}")
+                    queued.append(d)
+                except Exception as exc:
+                    print(f"[queue] [{i}/{len(subtasks)}] FAILED: {exc}  task={subtask[:60]}")
+
+            print(f"[queue] {len(queued)}/{len(subtasks)} task(s) enqueued.")
+            trace.finish("PASS")
+
         _STANDALONE = {
             "annotate":   _handle_annotate,
             "email":      _handle_email,
@@ -1035,6 +1067,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "review":     _handle_review,
             "lit-review": _handle_lit_review,
             "recall":     _handle_recall,
+            "queue":      _handle_queue,
         }
 
         for _skill in explicit_skills:

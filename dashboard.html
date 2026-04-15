@@ -1198,7 +1198,13 @@ new Chart($('cumulCostChart'), {
   .live-btn:hover { opacity: .85; }
   .live-btn:disabled { opacity: .4; cursor: default; }
   .btn-run    { background: var(--blue);   color: #fff; }
+  .btn-queue  { background: var(--orange); color: #fff; }
   .btn-sched  { background: var(--purple); color: #fff; }
+  .queue-item { display:flex; align-items:center; gap:8px; padding:5px 8px; font-size:12px; border-bottom:1px solid var(--border); }
+  .queue-item:last-child { border-bottom: none; }
+  .queue-pos  { color:var(--muted); min-width:20px; font-family:monospace; }
+  .queue-task { flex:1; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .queue-item .btn-del-sched { font-size:11px; padding:1px 5px; }
   .live-msg { font-size: 12px; margin-top: 8px; min-height: 18px; }
 
   /* Active run cards */
@@ -1270,13 +1276,24 @@ new Chart($('cumulCostChart'), {
       <span class="live-cron-hint">min hour day month weekday &nbsp;·&nbsp; * = any</span>
     </div>
     <button class="live-btn btn-run"   id="liveBtnRun">&#9654; Run now</button>
+    <button class="live-btn btn-queue" id="liveBtnQueue">&#9776; Queue</button>
     <button class="live-btn btn-sched" id="liveBtnSched">&#128197; Schedule</button>
   </div>
   <div class="live-msg" id="liveMsg"></div>
 </div>
 
+<!-- Queue -->
+<div class="live-heading" style="margin-top:24px;font-size:12px">
+  Queue <span id="queueCount" style="color:var(--muted);font-size:11px"></span>
+  <button id="btnClearQueue" style="display:none;float:right;font-size:11px;background:none;border:1px solid var(--border);color:var(--muted);cursor:pointer;padding:1px 6px;border-radius:3px" onclick="clearQueue()">Clear all</button>
+</div>
+<div id="queueList" style="margin-bottom:8px">
+  <div style="color:var(--muted);font-size:12px" id="noQueue">Queue is empty.</div>
+  <div id="queueItems"></div>
+</div>
+
 <!-- Active runs -->
-<div class="live-heading" style="margin-top:24px;font-size:12px">Active runs</div>
+<div class="live-heading" style="margin-top:16px;font-size:12px">Active runs</div>
 <div class="run-cards" id="activeRunCards">
   <div style="color:var(--muted);font-size:12px" id="noActiveRuns">No active runs.</div>
 </div>
@@ -1418,6 +1435,27 @@ new Chart($('cumulCostChart'), {
     .finally(() => $('liveBtnRun').disabled = false);
   });
 
+  $('liveBtnQueue').addEventListener('click', () => {
+    const task = $('liveTaskInput').value.trim();
+    if (!task) { setMsg('Enter a task first.', 'var(--orange)'); return; }
+    $('liveBtnQueue').disabled = true;
+    setMsg('Queueing…');
+    fetch('/api/queue', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({task}),
+    })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { setMsg(d.error, 'var(--red)'); return; }
+      setMsg(`Queued at position ${d.position} (${d.queue_id}).`, 'var(--orange)');
+      $('liveTaskInput').value = '';
+      refreshQueue();
+    })
+    .catch(e => setMsg(String(e), 'var(--red)'))
+    .finally(() => $('liveBtnQueue').disabled = false);
+  });
+
   $('liveBtnSched').addEventListener('click', () => {
     const task = $('liveTaskInput').value.trim();
     const cron = $('liveCronInput').value.trim();
@@ -1477,6 +1515,42 @@ new Chart($('cumulCostChart'), {
     .then(() => refreshSchedule());
   };
 
+  // ── Queue management ─────────────────────────────────────────────────────
+  function refreshQueue() {
+    fetch('/api/queue')
+    .then(r => r.json())
+    .then(d => {
+      const items = d.items || [];
+      $('noQueue').style.display      = items.length ? 'none' : '';
+      $('btnClearQueue').style.display = items.length ? '' : 'none';
+      $('queueCount').textContent     = items.length ? `(${items.length} pending)` : '';
+      const container = $('queueItems');
+      container.innerHTML = '';
+      items.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'queue-item';
+        div.id = `qitem-${item.queue_id}`;
+        div.innerHTML = `
+          <span class="queue-pos">#${item.position}</span>
+          <span class="queue-task" title="${item.task.replace(/"/g,'&quot;')}">${item.task}</span>
+          <span style="color:var(--muted);font-size:11px">${fmtTs(item.queued_at)}</span>
+          <button class="btn-del-sched" onclick="removeQueued('${item.queue_id}')">&#10005;</button>`;
+        container.appendChild(div);
+      });
+    })
+    .catch(() => {});
+  }
+
+  window.removeQueued = function(queue_id) {
+    fetch(`/api/queue/${queue_id}`, {method:'DELETE'})
+    .then(() => refreshQueue());
+  };
+
+  window.clearQueue = function() {
+    fetch('/api/queue/clear', {method:'POST'})
+    .then(() => refreshQueue());
+  };
+
   // ── Polling: pick up runs started externally (autoresearch, CLI, etc.) ────
   function pollActive() {
     fetch('/api/runs')
@@ -1489,8 +1563,9 @@ new Chart($('cumulCostChart'), {
 
   // Initial load + refresh every 10s
   refreshSchedule();
+  refreshQueue();
   pollActive();
-  setInterval(() => { refreshSchedule(); pollActive(); }, 10_000);
+  setInterval(() => { refreshSchedule(); refreshQueue(); pollActive(); }, 10_000);
 
   // Update elapsed time on active cards every second
   setInterval(() => {

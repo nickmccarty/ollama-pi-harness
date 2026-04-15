@@ -259,7 +259,7 @@ class DashboardCallback:
 # Step 3 — QLoRA fine-tune
 # ---------------------------------------------------------------------------
 
-def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Path, patience: int = 1):
+def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Path, patience: int = 1, resume: bool = False, save_steps: int = 100):
     try:
         import torch
         from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -269,10 +269,24 @@ def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Pat
     except ImportError as e:
         sys.exit(f"[error] missing dependency: {e}\n  pip install transformers peft trl datasets accelerate")
 
+    ckpt_dir = output_dir / "checkpoints"
+
+    # Auto-detect last checkpoint for resume
+    resume_from = None
+    if resume:
+        import glob as _glob
+        ckpts = sorted(_glob.glob(str(ckpt_dir / "checkpoint-*")))
+        if ckpts:
+            resume_from = ckpts[-1]
+            print(f"[finetune] resuming from {resume_from}")
+        else:
+            print("[finetune] --resume requested but no checkpoints found; starting fresh")
+
     print(f"\n[finetune] base model : {base_model}")
     print(f"[finetune] examples   : {len(examples)}")
     print(f"[finetune] epochs     : {epochs}")
     print(f"[finetune] output     : {output_dir}")
+    print(f"[finetune] save_steps : every {save_steps} steps")
 
     # Build HF Dataset with formatted chat strings
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -317,9 +331,12 @@ def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Pat
     model.enable_input_require_grads()   # required for PEFT + gradient checkpointing
     model.print_trainable_parameters()
 
-    # Training args
+    # Training args — save_strategy="steps" with a frequent interval guards against
+    # mid-epoch interruptions (OS updates, crashes).  save_total_limit=3 keeps disk
+    # usage bounded.  eval_strategy stays epoch-based; load_best_model_at_end is
+    # omitted because HF Trainer requires it to align with save_strategy.
     sft_config = SFTConfig(
-        output_dir=str(output_dir / "checkpoints"),
+        output_dir=str(ckpt_dir),
         num_train_epochs=epochs,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=1,
@@ -328,16 +345,16 @@ def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Pat
         dataloader_num_workers=0,
         logging_steps=1,
         eval_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
+        save_strategy="steps",
+        save_steps=save_steps,
+        save_total_limit=3,
         report_to="none",
         dataset_text_field="text",
     )
 
-    # Clear previous metrics and start fresh
-    METRICS_OUT.write_text("", encoding="utf-8")
+    # Clear previous metrics only on fresh runs
+    if not resume_from:
+        METRICS_OUT.write_text("", encoding="utf-8")
 
     try:
         from transformers import EarlyStoppingCallback
@@ -356,7 +373,7 @@ def finetune(examples: list[dict], base_model: str, epochs: int, output_dir: Pat
 
     print("\n[finetune] training...")
     print(f"[finetune] metrics -> {METRICS_OUT}")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from)
 
     # Merge LoRA weights and save
     merged_path = output_dir / "merged"
@@ -381,6 +398,8 @@ def main():
     parser.add_argument("--skip-fetch", action="store_true",    help="Use existing finetune_dataset.jsonl, skip arxiv fetch")
     parser.add_argument("--dataset",    default=None,           help="Path to alternate JSONL dataset (e.g. finetune_dataset_v2.jsonl)")
     parser.add_argument("--patience",   default=1, type=int,   help="Early stopping patience (epochs without eval_loss improvement)")
+    parser.add_argument("--resume",     action="store_true",   help="Resume from the last checkpoint in finetune_output/checkpoints/")
+    parser.add_argument("--save-steps", default=100, type=int, help="Save a checkpoint every N steps (default: 100)")
     args = parser.parse_args()
 
     ann_df = pd.read_csv(ANN_CSV)
@@ -406,7 +425,9 @@ def main():
         return
 
     # --- Fine-tune ---
-    merged_path = finetune(examples, args.model, args.epochs, MODEL_OUT, patience=args.patience)
+    merged_path = finetune(examples, args.model, args.epochs, MODEL_OUT,
+                           patience=args.patience, resume=args.resume,
+                           save_steps=args.save_steps)
 
     # --- Post-training instructions ---
     gguf_path = HERE / "finetune_output" / "nanda-annotator-q4.gguf"

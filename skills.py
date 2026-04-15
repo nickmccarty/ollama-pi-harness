@@ -139,6 +139,16 @@ REGISTRY: dict[str, dict] = {
         "auto":        None,   # explicit only
     },
 
+    "queue": {
+        "description": (
+            "Standalone: add one or more tasks to the server run queue. "
+            "Usage: /queue <task1> ;; <task2> ;; ... — tasks execute sequentially"
+        ),
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only
+    },
+
 }
 
 # Aliases — resolved during parse

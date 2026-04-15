@@ -1816,3 +1816,38 @@ This was a latent bug affecting every skill invoked from the bash terminal (vs t
 **Diagnosis method:** `python -c "import sys; print(sys.argv)"` revealed the conversion in action.
 
 **Side note:** `-X utf8` Python flag (UTF-8 mode) eliminates the cp1252 `UnicodeEncodeError` on the `→` character in logger.py's `trace.finish()` print — should be added to any bash invocation wrapper.
+
+---
+
+## Session 12 — 2026-04-15: training interruption + checkpointing fix
+
+### OS update killed v2 fine-tune mid-run
+
+The v2 training run (`finetune_dataset_v2.jsonl`, 3 epochs, 1938 steps) was stopped at **step 1237 (epoch 1.9149, 63.8% complete)** by a Windows OS update reboot. ~20.4h of compute elapsed; ~15.2h remaining at time of interruption.
+
+**Root cause of total loss:** `save_strategy="epoch"` only writes checkpoints at epoch boundaries (steps 646, 1292, 1938). The run was 55 steps short of completing epoch 2. `finetune_output/checkpoints/` contained no recoverable checkpoint from this run — likely the epoch 1 checkpoint was either flushed incomplete by the sudden reboot, or cleaned up as epoch 2 began writing.
+
+**`finetune_metrics.jsonl`** preserved the full loss/accuracy history (1237 entries). Loss was trending well (~0.56 on last step, mean_token_accuracy ~0.84).
+
+### Fix: step-based checkpointing + `--resume`
+
+Changed `finetune_annotate.py` to save checkpoints every N steps rather than at epoch end only:
+
+- `save_strategy="steps"`, `save_steps=100` (default) — checkpoint every ~15 min at current step rate, giving 19 recovery points across a 1938-step run instead of 2
+- `save_total_limit=3` — keeps only the 3 most recent checkpoints to bound disk usage (~8GB per LoRA checkpoint)
+- Removed `load_best_model_at_end=True` — requires `save_strategy` and `eval_strategy` to match; since eval remains epoch-based this would error
+- Added `--resume` flag — auto-detects the latest `checkpoint-*` in `finetune_output/checkpoints/` and passes it to `trainer.train(resume_from_checkpoint=...)`; metrics file is preserved (not wiped) on resume
+- Added `--save-steps N` CLI arg to tune interval
+- `METRICS_OUT` is only cleared on fresh (non-resume) runs
+
+**Usage going forward:**
+```bash
+# Fresh run
+python -X utf8 finetune_annotate.py --dataset finetune_dataset_v2.jsonl
+
+# Resume after interruption
+python -X utf8 finetune_annotate.py --dataset finetune_dataset_v2.jsonl --resume
+
+# Coarser checkpoints (every 200 steps, ~30 min)
+python -X utf8 finetune_annotate.py --dataset finetune_dataset_v2.jsonl --save-steps 200
+```
