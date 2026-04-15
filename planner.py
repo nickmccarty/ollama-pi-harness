@@ -20,11 +20,42 @@ import inference as ollama
 
 PLANNER_MODEL = "glm4:9b"
 
+# ---------------------------------------------------------------------------
+# Prior knowledge pass
+# ---------------------------------------------------------------------------
+
+PRIOR_KNOWLEDGE_PROMPT = """\
+You are a research assistant assessing your existing knowledge before running web searches.
+
+Task: {task}
+
+Without searching the web, answer honestly:
+1. What specific facts are you CONFIDENT about regarding this topic?
+2. What specific aspects would you NEED to look up to answer this authoritatively?
+
+Focus on gaps that a web search would actually resolve — not vague uncertainties.
+
+Respond with ONLY valid JSON — no explanation, no markdown fences:
+{{
+  "known_facts": ["specific fact 1", "specific fact 2"],
+  "gaps": ["specific gap requiring lookup 1", "specific gap requiring lookup 2"]
+}}
+
+Rules:
+- known_facts: 2-5 concrete, specific facts you are confident about
+- gaps: 2-4 specific aspects that need current/authoritative sources to answer well
+- Both lists should be concrete enough that they could inform a search query
+"""
+
+# ---------------------------------------------------------------------------
+# Main plan prompt
+# ---------------------------------------------------------------------------
+
 PLAN_PROMPT = """\
 You are a task planner for an AI research agent.
 
 Task: {task}
-{memory_block}
+{memory_block}{knowledge_block}
 Produce a structured execution plan. Respond with ONLY valid JSON — no explanation, no markdown fences:
 
 {{
@@ -41,7 +72,7 @@ Rules:
 - task_type: "enumerated" if task says "top N" or "N most/common/key/best"; "best_practices" if asking for practices/strategies/guidelines; "research" otherwise
 - complexity: "low" for simple factual lookups; "medium" for standard research; "high" for tasks requiring synthesis across 2+ distinct domains
 - expected_sections: the integer N from "top N" / "N most", null if not specified
-- search_queries: exactly 2 specific, complementary queries — make them concrete and distinct from each other
+- search_queries: exactly 2 specific, complementary queries targeting the identified knowledge GAPS — do not search for things already known
 - prior_work_summary: one sentence summarising what the memory shows, or "" if no relevant history
 - notes: one specific actionable note (e.g. "specificity was weak last time — include concrete tool names and version numbers")
 - subtasks: EMPTY ARRAY [] for single-focus tasks. Populate with 2-3 items ONLY when the task explicitly asks to research multiple distinct domains and combine/synthesize/integrate them. Each item must be a self-contained WEB RESEARCH directive (e.g. "Research the top 3 failure modes in multi-agent AI systems") — NO synthesis, assembly, or writing steps (the orchestrator handles final assembly). NO file paths.
@@ -61,6 +92,8 @@ class Plan:
     prior_work_summary: str = ""
     notes: str = ""
     subtasks: list[str] = field(default_factory=list)
+    known_facts: list[str] = field(default_factory=list)
+    knowledge_gaps: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -72,6 +105,9 @@ class Plan:
             lines.append(f"**Prior work:** {self.prior_work_summary}")
         if self.notes:
             lines.append(f"**Planner note:** {self.notes}")
+        if self.known_facts:
+            facts_block = "\n".join(f"- {f}" for f in self.known_facts)
+            lines.append(f"**Verified facts (no search needed):**\n{facts_block}")
         return "\n".join(lines)
 
 
@@ -79,14 +115,66 @@ class Plan:
 # Planning
 # ---------------------------------------------------------------------------
 
+def prior_knowledge_pass(task: str) -> tuple[list[str], list[str]]:
+    """
+    Ask the planner model what it already knows and what gaps need web search.
+
+    Returns (known_facts, gaps) — both are lists of strings.
+    Returns ([], []) on any failure — never raises.
+    Used by make_plan() to seed targeted search queries.
+    """
+    prompt = PRIOR_KNOWLEDGE_PROMPT.format(task=task)
+    try:
+        response = ollama.chat(
+            model=PLANNER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.1},
+        )
+        text = response["message"]["content"].strip()
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+        json_match = re.search(r'\{.*\}', text.strip(), re.DOTALL)
+        if not json_match:
+            return [], []
+        data = json.loads(json_match.group(0))
+        known = [str(f).strip() for f in data.get("known_facts", []) if str(f).strip()]
+        gaps  = [str(g).strip() for g in data.get("gaps", []) if str(g).strip()]
+        return known, gaps
+    except Exception as e:
+        print(f"  [planner:prior] failed ({e}) — skipping")
+        return [], []
+
+
 def make_plan(task: str, memory_context: str = "") -> tuple["Plan", object]:
     """
     Analyse the task and memory context to produce a Plan.
+
+    Runs a prior knowledge pass first: asks the model what it already knows
+    and what gaps need web search. Gaps seed query generation so searches
+    target unknowns rather than topics the model already handles well.
+
     Returns (Plan, response) — response is the raw ollama ChatResponse for token logging.
     Returns (Plan(), None) on any failure — never raises.
     """
+    # Prior knowledge pass — fast single call, informs query targeting
+    known_facts, gaps = prior_knowledge_pass(task)
+    if known_facts or gaps:
+        print(f"  [planner:prior] {len(known_facts)} known fact(s), {len(gaps)} gap(s) identified")
+
+    # Build knowledge block for the main plan prompt
+    knowledge_block = ""
+    if known_facts or gaps:
+        lines = []
+        if known_facts:
+            lines.append("Already known (skip searching for these):")
+            lines.extend(f"  - {f}" for f in known_facts)
+        if gaps:
+            lines.append("Gaps to fill via web search:")
+            lines.extend(f"  - {g}" for g in gaps)
+        knowledge_block = "\n".join(lines) + "\n\n"
+
     memory_block = f"Relevant past work:\n{memory_context}\n\n" if memory_context else ""
-    prompt = PLAN_PROMPT.format(task=task, memory_block=memory_block)
+    prompt = PLAN_PROMPT.format(task=task, memory_block=memory_block, knowledge_block=knowledge_block)
 
     try:
         response = ollama.chat(
@@ -96,10 +184,13 @@ def make_plan(task: str, memory_context: str = "") -> tuple["Plan", object]:
         )
         text = response["message"]["content"].strip()
         plan = _parse_plan(text)
+        # Attach prior knowledge to the plan for downstream use
+        plan.known_facts = known_facts
+        plan.knowledge_gaps = gaps
         return plan, response
     except Exception as e:
         print(f"  [planner] failed ({e}) — using defaults")
-        return Plan(), None
+        return Plan(known_facts=known_facts, knowledge_gaps=gaps), None
 
 
 def _parse_plan(text: str) -> Plan:
@@ -184,6 +275,12 @@ if __name__ == "__main__":
         print(f"    - {q}")
     print(f"  prior_work_summary: {plan.prior_work_summary!r}")
     print(f"  notes:              {plan.notes!r}")
+    print(f"  known_facts ({len(plan.known_facts)}):")
+    for f in plan.known_facts:
+        print(f"    - {f}")
+    print(f"  knowledge_gaps ({len(plan.knowledge_gaps)}):")
+    for g in plan.knowledge_gaps:
+        print(f"    - {g}")
     print(f"  subtasks ({len(plan.subtasks)}):")
     for s in plan.subtasks:
         print(f"    - {s}")
