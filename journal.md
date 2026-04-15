@@ -1673,3 +1673,47 @@ New criterion helpers: `has_nanda_sections()`, `no_annotate_artifacts()`.
 Updated `autoresearch_program.md` with what kills scores, unexplored angles for Session 4, and session history table. Session 4 running: `kimi-k2.5:cloud` proposer, tasks T_D + T_E, baseline 8.915.
 
 **Keep_alive hang:** `run_eval()` was passing `OLLAMA_KEEP_ALIVE=-1` to the eval subprocess, keeping producer and evaluator models loaded indefinitely and stalling the proposer call next iteration. Fixed to `OLLAMA_KEEP_ALIVE=120` — models release ~2 minutes after eval completes.
+
+Session 4 uncovered two hang modes. First: `OLLAMA_KEEP_ALIVE=-1` in the eval subprocess kept the producer and evaluator models loaded permanently, blocking the proposer from loading on the next iteration. Fixed by setting `OLLAMA_KEEP_ALIVE=120` in `autoresearch.py`'s eval env. Second: GPU VRAM fully consumed by concurrent v2 fine-tuning job — Ollama couldn't load `pi-qwen-32b` for eval at all. Root cause is GPU contention, not a code bug. Paused autoresearch until training completes.
+
+---
+
+## Session 9 — DPO dataset builder (2026-04-14)
+
+### Signal audit
+
+Inspected `runs.jsonl` (239 runs, 141 with wiggum, 45 with `final_content`) to understand what preference signal was available. Key findings:
+
+- `wiggum_eval_log` carries `{round, score, dims, issues, feedback}` per round but **no synthesis text** — only the final content (`final_content`, truncated 16k) was stored
+- 35 runs show improving wiggum scores across rounds (useful revision signal, but text unavailable historically)
+- 3 cross-run pairs exist: same task, same producer, different final scores (delta 0.8–1.0)
+- `wiggum_dims` available on recent runs (per-dimension scores: relevance, completeness, depth, specificity, structure)
+
+### wiggum.py: capture synthesis text per round
+
+Added `"content": content[:8_000]` to `round_record` in both the standard and annotate wiggum loops. Updated `logger.py` to propagate `content` into `wiggum_eval_log` entries. Going forward, each round in `wiggum_eval_log` carries the actual synthesis text at that revision step — enabling within-run chosen/rejected pairs from the best-scoring round vs round 1.
+
+This is a zero-cost observability change: it adds ~8k chars per round to runs.jsonl but unlocks high-quality revision pairs that would otherwise require re-running historical tasks.
+
+### build_dpo_dataset.py
+
+Built `build_dpo_dataset.py` with two signal sources:
+
+**Source 1 — cross_run** (available now): groups runs by normalized task (first 120 chars, /skill prefixes stripped), emits chosen/rejected pairs where both have `final_content`, same `producer_model`, and score delta ≥ `--min-delta`. 3 pairs in current corpus.
+
+**Source 2 — wiggum_revision** (available for runs post 2026-04-14): within a single run, uses round 1 content as rejected and the best-scoring round's content as chosen. Includes `wiggum_feedback` from the evaluator — the signal that triggered the revision. 0 pairs currently (no runs yet with content-per-round).
+
+**Output schema** (`hf_datasets/dpo.jsonl`):
+```
+prompt, chosen, rejected, chosen_score, rejected_score, score_delta,
+source, task_type, producer_model, evaluator_model,
+chosen_dims, rejected_dims, wiggum_feedback, timestamp
+```
+
+**Design notes:**
+- Cross-run pairs filtered to same producer_model — avoids conflating model quality differences with output quality differences
+- Revision pairs prefer round 1 as rejected (maximally divergent from final, captures the full improvement arc)
+- `--min-delta` defaults to 0.5; set to 1.0+ for cleaner signal at the cost of fewer pairs
+- Stats mode (`--stats`) is non-destructive — useful for checking yield before committing
+
+**Growth trajectory:** corpus is currently thin for DPO. The revision path will grow automatically as wiggum runs accumulate. The cross-run path grows when the same task is retried (eval_suite, autoresearch reruns). After 10-20 autoresearch sessions on the same task set, cross-run pairs will become the dominant source.

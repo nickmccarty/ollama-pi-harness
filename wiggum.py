@@ -393,6 +393,7 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
             "passed":   passed,
             "issues":   issues,
             "feedback": feedback,
+            "content":  content[:8_000],   # capture synthesis text for DPO pairs
         }
         if result.get("thinking"):
             round_record["thinking"] = result["thinking"]
@@ -654,6 +655,7 @@ def loop_annotate(
             "passed":   passed,
             "issues":   issues,
             "feedback": feedback,
+            "content":  content[:8_000],   # capture synthesis text for DPO pairs
         }
         trace["rounds"].append(round_record)
 

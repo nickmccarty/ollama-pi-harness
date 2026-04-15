@@ -182,6 +182,15 @@ python hf_export.py --sft-min-score 8.0           # stricter SFT quality filter
 python hf_export.py --push nickmccarty/ollama-pi-harness-datasets  # push to Hub (requires HF_TOKEN)
 ```
 
+**DPO preference dataset:**
+```bash
+python build_dpo_dataset.py                       # build hf_datasets/dpo.jsonl (default min_delta=0.5)
+python build_dpo_dataset.py --min-delta 1.0       # stricter preference gap
+python build_dpo_dataset.py --source cross        # cross-run pairs only
+python build_dpo_dataset.py --source revision     # wiggum-revision pairs only (requires runs post 2026-04-14)
+python build_dpo_dataset.py --stats               # stats only, no file write
+```
+
 **Dashboard:**
 ```bash
 python dashboard.py --open  # generate dashboard.html and open in browser
@@ -271,6 +280,7 @@ python inspect_run.py --all    # summary table of all runs
 | `finetune_annotate.py` | QLoRA fine-tune Qwen2.5-7B on Nanda annotated abstracts; early stopping, DashboardCallback |
 | `run_annotations.py` | Batch annotation runner — parse arxiv markdown → annotate → CSV |
 | `build_finetune_from_annotations.py` | Merge gold + agent CSVs → `finetune_dataset_v2.jsonl` (prefers `*_curated.csv` if available) |
+| `build_dpo_dataset.py` | Build DPO preference pairs from `runs.jsonl` — cross-run pairs + wiggum-revision pairs |
 | `backfill_metrics.py` | Reconstruct `finetune_metrics.jsonl` from training log output |
 | `Modelfile` | Ollama Modelfile for `pi-qwen` (qwen2.5:7b) |
 | `Modelfile.32b` | Ollama Modelfile for `pi-qwen-32b` (qwen2.5:32b Q4_K_M) |

@@ -248,6 +248,7 @@ class RunTrace:
                 "dims":     r.get("dims", {}),
                 "issues":   r.get("issues", []),
                 "feedback": r.get("feedback", ""),
+                **({"content": r["content"]} if r.get("content") else {}),
                 **({"thinking": r["thinking"]} if r.get("thinking") else {}),
             }
             for r in rounds
