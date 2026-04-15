@@ -171,13 +171,16 @@ class RunTrace:
         self.data["output_tokens"] += u["output_tokens"]
 
         s = self.data["tokens_by_stage"].setdefault(
-            stage, {"input": 0, "output": 0, "thinking_chars": 0, "calls": 0, "total_ms": 0}
+            stage, {"input": 0, "output": 0, "thinking_chars": 0, "calls": 0,
+                    "total_ms": 0, "eval_ms": 0, "prompt_ms": 0}
         )
         s["input"]          += u["input_tokens"]
         s["output"]         += u["output_tokens"]
         s["thinking_chars"] += u["thinking_chars"]
         s["calls"]          += 1
         s["total_ms"]       += u["total_ms"]
+        s["eval_ms"]        += u["eval_ms"]    # generation time only — correct denominator for output tok/s
+        s["prompt_ms"]      += u["prompt_ms"]  # prompt-eval time only — correct denominator for input tok/s
 
         # Emit trace event using Ollama's reported timing (more accurate than wall-clock wrap)
         if u["total_ms"] > 0:

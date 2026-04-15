@@ -129,13 +129,15 @@ def build_payload(runs):
     token_output = [by_date_output[d] for d in dates_sorted]
 
     # --- Tokens by stage (aggregate across all runs) ---
-    stage_totals = defaultdict(lambda: {"input": 0, "output": 0, "total_ms": 0, "calls": 0})
+    stage_totals = defaultdict(lambda: {"input": 0, "output": 0, "total_ms": 0, "eval_ms": 0, "prompt_ms": 0, "calls": 0})
     for r in runs:
         for stage, vals in (r.get("tokens_by_stage") or {}).items():
-            stage_totals[stage]["input"]    += vals.get("input", 0)
-            stage_totals[stage]["output"]   += vals.get("output", 0)
-            stage_totals[stage]["total_ms"] += vals.get("total_ms", 0)
-            stage_totals[stage]["calls"]    += vals.get("calls", 1)
+            stage_totals[stage]["input"]     += vals.get("input", 0)
+            stage_totals[stage]["output"]    += vals.get("output", 0)
+            stage_totals[stage]["total_ms"]  += vals.get("total_ms", 0)
+            stage_totals[stage]["eval_ms"]   += vals.get("eval_ms", 0)
+            stage_totals[stage]["prompt_ms"] += vals.get("prompt_ms", 0)
+            stage_totals[stage]["calls"]     += vals.get("calls", 1)
     stage_names  = sorted(stage_totals)
     stage_tokens = [stage_totals[s]["input"] + stage_totals[s]["output"] for s in stage_names]
     stage_colors = [STAGE_COLORS.get(s, "#94a3b8") for s in stage_names]
@@ -167,12 +169,17 @@ def build_payload(runs):
     stage_tps_out = []
     stage_tps_in  = []
     for s in stage_names:
-        ms = stage_totals[s]["total_ms"]
-        if ms > 0:
-            stage_tps_out.append(round(stage_totals[s]["output"] / (ms / 1000), 1))
-            stage_tps_in.append(round(stage_totals[s]["input"]  / (ms / 1000), 1))
+        # Use eval_ms (generation only) for output tok/s; prompt_ms for input tok/s.
+        # Fall back to total_ms for runs logged before these fields existed.
+        eval_ms   = stage_totals[s]["eval_ms"]   or stage_totals[s]["total_ms"]
+        prompt_ms = stage_totals[s]["prompt_ms"] or stage_totals[s]["total_ms"]
+        if eval_ms > 0:
+            stage_tps_out.append(round(stage_totals[s]["output"] / (eval_ms   / 1000), 1))
         else:
             stage_tps_out.append(0)
+        if prompt_ms > 0:
+            stage_tps_in.append(round(stage_totals[s]["input"]   / (prompt_ms / 1000), 1))
+        else:
             stage_tps_in.append(0)
 
     run_tps_labels = []
@@ -182,11 +189,16 @@ def build_payload(runs):
         tbs = r.get("tokens_by_stage") or {}
         total_out_tok = sum(v.get("output", 0) for v in tbs.values())
         total_in_tok  = sum(v.get("input",  0) for v in tbs.values())
-        total_ms      = sum(v.get("total_ms", 0) for v in tbs.values())
-        if total_ms > 0:
+        # Use stage-specific eval_ms/prompt_ms sums; fall back to total_ms for older runs
+        eval_ms   = sum(v.get("eval_ms",   0) for v in tbs.values())
+        prompt_ms = sum(v.get("prompt_ms", 0) for v in tbs.values())
+        total_ms  = sum(v.get("total_ms",  0) for v in tbs.values())
+        denom_out = eval_ms   or total_ms
+        denom_in  = prompt_ms or total_ms
+        if denom_out > 0 or denom_in > 0:
             run_tps_labels.append(fmt_ts(r.get("timestamp")))
-            run_tps_out.append(round(total_out_tok / (total_ms / 1000), 1))
-            run_tps_in.append(round(total_in_tok  / (total_ms / 1000), 1))
+            run_tps_out.append(round(total_out_tok / (denom_out / 1000), 1) if denom_out > 0 else 0)
+            run_tps_in.append(round(total_in_tok   / (denom_in  / 1000), 1) if denom_in  > 0 else 0)
 
     avg_out_tps = round(sum(run_tps_out) / len(run_tps_out), 1) if run_tps_out else 0
 

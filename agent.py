@@ -1098,8 +1098,10 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         # Planning — analyse task + memory; produces search queries and synthesis notes
         print("  [planner] generating plan...")
         with trace.span("planner"):
-            plan = make_plan(task, memory_context)
+            plan, _planner_resp = make_plan(task, memory_context)
         trace.log_plan(plan.to_dict())
+        if _planner_resp is not None:
+            trace.log_usage(_planner_resp, stage="planner")
         print(f"  [planner] {plan.task_type} / {plan.complexity}"
               + (f" / {plan.expected_sections} sections" if plan.expected_sections else "")
               + (f"\n  [planner] note: {plan.notes}" if plan.notes else ""))

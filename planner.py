@@ -79,10 +79,11 @@ class Plan:
 # Planning
 # ---------------------------------------------------------------------------
 
-def make_plan(task: str, memory_context: str = "") -> Plan:
+def make_plan(task: str, memory_context: str = "") -> tuple["Plan", object]:
     """
     Analyse the task and memory context to produce a Plan.
-    Returns a default Plan on any failure — never raises.
+    Returns (Plan, response) — response is the raw ollama ChatResponse for token logging.
+    Returns (Plan(), None) on any failure — never raises.
     """
     memory_block = f"Relevant past work:\n{memory_context}\n\n" if memory_context else ""
     prompt = PLAN_PROMPT.format(task=task, memory_block=memory_block)
@@ -95,10 +96,10 @@ def make_plan(task: str, memory_context: str = "") -> Plan:
         )
         text = response["message"]["content"].strip()
         plan = _parse_plan(text)
-        return plan
+        return plan, response
     except Exception as e:
         print(f"  [planner] failed ({e}) — using defaults")
-        return Plan()
+        return Plan(), None
 
 
 def _parse_plan(text: str) -> Plan:
@@ -172,7 +173,7 @@ if __name__ == "__main__":
     print(f"Memory hits: {memory_ctx.count('**[') if memory_ctx else 0}\n")
     print("[planner] generating plan...")
 
-    plan = make_plan(task, memory_ctx)
+    plan, _ = make_plan(task, memory_ctx)
 
     print(f"\nPlan:")
     print(f"  task_type:         {plan.task_type}")
