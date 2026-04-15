@@ -205,9 +205,18 @@ def build_payload(runs):
     hour_labels = [f"{h:02d}:00" for h in range(24)]
     hour_values = [hour_counts[h] for h in range(24)]
 
-    # --- Recent runs table (last 30) ---
+    # --- Recent runs table (last 50 substantive runs) ---
+    # Exclude stub runs: no LLM tokens, no wiggum evaluation, no output produced.
+    # These are typically quick standalone-skill calls (github status, review on empty diff)
+    # or eval_suite sub-checks that shouldn't crowd out real research runs.
+    def _is_substantive(r: dict) -> bool:
+        return bool(
+            (r.get("input_tokens") or 0) > 0
+            or (r.get("wiggum_rounds") or 0) > 0
+            or (r.get("output_bytes") or 0) > 0
+        )
     recent = []
-    for r in runs[-30:]:
+    for r in [x for x in runs if _is_substantive(x)][-50:]:
         # Wiggum dims — first round's dimension scores
         dims_raw = r.get("wiggum_dims")
         dims = None
