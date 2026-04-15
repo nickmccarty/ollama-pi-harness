@@ -2,7 +2,7 @@
 email_skill.py — /email standalone skill.
 
 Given a CSV of contacts + slide content and a stated goal, generates a
-personalized email draft (.eml) per speaker and saves them to an output directory.
+personalized email draft (JSON) per speaker and saves them to an output directory.
 
 CSV expectations:
   Required : name, affiliation
@@ -17,12 +17,8 @@ import os
 import re
 import csv
 import json
-import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.utils import formatdate
 
 import ollama as _ollama_raw
 
@@ -130,34 +126,6 @@ def _ollama_chat(model: str, messages: list[dict], num_predict: int = 512) -> tu
     return text, in_tok, out_tok
 
 
-def _build_eml(
-    subject: str,
-    body: str,
-    to_name: str,
-    to_email: str,
-    sender_name: str,
-    sender_email: str,
-) -> str:
-    """Build a human-readable .eml string (quoted-printable encoding)."""
-    from email import encoders
-    from email.mime.nonmultipart import MIMENonMultipart
-    import quopri
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"{sender_name} <{sender_email}>" if sender_name else sender_email
-    msg["To"] = f"{to_name} <{to_email}>" if to_email else to_name
-    msg["Date"] = formatdate(localtime=True)
-
-    # quoted-printable keeps the body human-readable in the .eml file
-    part = MIMEText(body, "plain", "utf-8")
-    part.replace_header("Content-Transfer-Encoding", "quoted-printable")
-    encoded = quopri.encodestring(body.encode("utf-8")).decode("ascii")
-    part.set_payload(encoded)
-    msg.attach(part)
-    return msg.as_string()
-
-
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -175,10 +143,10 @@ def run_email_standalone(
     filter_keyword: str = "",
 ) -> list[dict]:
     """
-    Generate personalized .eml drafts for speakers in csv_path.
+    Generate personalized email JSON drafts for speakers in csv_path.
 
     Returns a list of result dicts:
-      {name, affiliation, eml_path, subject, body, to_email}
+      {name, affiliation, json_path, subject, body, to_email, generated_at}
     """
     csv_path = Path(csv_path)
     out_dir  = Path(output_dir)
@@ -282,28 +250,24 @@ def run_email_standalone(
         total_in  += b_in
         total_out += b_out
 
-        # --- Write .eml ---
-        eml_filename = f"{_safe_filename(name)}.eml"
-        eml_path     = out_dir / eml_filename
-        eml_content  = _build_eml(
-            subject=subject,
-            body=body,
-            to_name=name,
-            to_email=to_email,
-            sender_name=sender_name,
-            sender_email=sender_email,
-        )
-        eml_path.write_text(eml_content, encoding="utf-8")
+        # --- Write per-contact JSON ---
+        record = {
+            "name":          name,
+            "affiliation":   affiliation,
+            "to_email":      to_email,
+            "sender_name":   sender_name,
+            "sender_email":  sender_email,
+            "subject":       subject,
+            "body":          body,
+            "generated_at":  datetime.now(timezone.utc).isoformat(),
+        }
+        json_filename = f"{_safe_filename(name)}.json"
+        json_path     = out_dir / json_filename
+        json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+        record["json_path"] = str(json_path.resolve())
 
-        results.append({
-            "name":        name,
-            "affiliation": affiliation,
-            "to_email":    to_email,
-            "subject":     subject,
-            "body":        body,
-            "eml_path":    str(eml_path.resolve()),
-        })
-        print(f"    -> {eml_path.name}  subject: {subject[:50]}")
+        results.append(record)
+        print(f"    -> {json_path.name}  subject: {subject[:50]}")
 
     # Write manifest
     manifest_path = out_dir / "manifest.json"
