@@ -243,7 +243,7 @@ def orchestrate(task: str, use_wiggum: bool = True):
         print("[orchestrator] memory: no relevant history")
 
     print("[orchestrator] planning...")
-    plan = make_plan(task, memory_context)
+    plan, _ = make_plan(task, memory_context)
     print(f"[orchestrator] plan: {plan.task_type} / {plan.complexity} / "
           f"{len(plan.subtasks)} subtask(s)")
     if plan.subtasks:
