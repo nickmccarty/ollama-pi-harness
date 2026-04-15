@@ -165,22 +165,13 @@ Analysis of 123 eval runs found 12/57 multi-round runs regressed: final score < 
 
 Also: `expected_count` is now extracted before the first `synthesize()` call, routing enumerated tasks directly to `synthesize_with_count()` rather than running a wasted first synthesis pass.
 
-### Closed-book prior knowledge pass — NEXT
+### Closed-book prior knowledge pass — DONE (Session 11)
 
-**Motivation:** MagenticOne architecture review (2026-04-12) identified a gap: we go straight to web search without auditing what the producer already knows. Searches for well-known topics retrieve content the model already knows, inflating novelty scores with no synthesis gain. Gap queries generated from the task string alone; no grounding in actual model knowledge.
+`prior_knowledge_pass()` added to `planner.py`. One LLM call before main planning asks what the model already knows vs what needs web search. Gaps feed into `PLAN_PROMPT` so queries target unknowns; `known_facts` injected into `synthesis_context()` as a verified-facts block. Logged on `Plan.known_facts` / `Plan.knowledge_gaps`.
 
-**Design:** before `gather_research()`, add a `prior_knowledge_pass()` call in `planner.py`:
-> "What do you already know about: {task}? List: (1) facts you're confident about, (2) specific gaps you'd need to look up to answer authoritatively."
+### Wiggum cycling detection — DONE (Session 11)
 
-The gap list seeds `plan_query()` instead of generic topic queries. Known facts injected as a "verified facts" block in the synthesis prompt. Novelty scoring calibrated against gaps rather than blank slate.
-
-**Expected benefit:** more targeted searches, fewer redundant rounds, cleaner synthesis context. Addresses the synthesis gap (no reflect step between search and synthesis) without a full ReAct loop inside synthesis.
-
-**Effort:** one new LLM call in `planner.py`, minor changes to `gather_research()` query seeding and `synthesize()` prompt assembly.
-
-### Wiggum cycling detection — NEXT
-
-After round 2, ask the evaluator: "Are the issues in this round substantively different from round 1, or is the revision cycling on the same problems?" If cycling → return best round immediately, no third revision call. Saves ~580s avg wiggum_revise call on the 30/57 multi-round runs that are flat or regressing.
+Score + all dimension scores identical across consecutive rounds → return best-round content immediately, no further revision calls. Implemented in both `loop()` and `loop_annotate()` in `wiggum.py`.
 
 ### Autoresearch stall replan — NEXT
 
