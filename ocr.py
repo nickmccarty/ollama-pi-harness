@@ -1,10 +1,12 @@
 """
 ocr.py — OCR preprocessing fallback for scanned/image-heavy PDFs.
 
-Cascade:
+Cascade (in order):
   1. MarkItDown (pdfminer) — current default; caller already runs this
-  2. PyMuPDF (fitz) — better two-column / complex-layout extraction
-  3. Vision model (llama3.2-vision via Ollama) — for truly scanned pages
+  2. PyMuPDF (fitz) — better two-column / complex-layout extraction, no model cost
+  3. llama-server OCR — dedicated OCR model (GLM-OCR, Deepseek-OCR, etc.)
+                        via llama-server at LLAMA_OCR_BASE_URL (optional)
+  4. Vision model (llama3.2-vision via Ollama) — last-resort for truly scanned pages
 
 Integration point: agent.py read_file_context() calls is_sparse() after
 MarkItDown conversion; if sparse, calls ocr_pdf() for a better extraction.
@@ -17,10 +19,20 @@ Usage (module):
 
 Usage (standalone smoke test):
     python ocr.py <path/to/paper.pdf>
+
+Environment variables:
+    LLAMA_OCR_BASE_URL   llama-server base URL, e.g. http://localhost:8080
+                         If not set, the llama-server backend is skipped.
+    LLAMA_OCR_MODEL      model name reported by llama-server (default: auto-detect
+                         from /v1/models, fallback to "default")
+
+llama-server quickstart:
+    llama-server -hf ggml-org/GLM-OCR-GGUF
+    # launches at http://localhost:8080
+    # supports prompts: "OCR", "OCR markdown", "OCR HTML table"
 """
 
 import base64
-import io
 import os
 import sys
 
@@ -33,6 +45,9 @@ try:
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False
+
+# llama-server OCR backend — optional, controlled by env var
+LLAMA_OCR_BASE_URL = os.environ.get("LLAMA_OCR_BASE_URL", "").rstrip("/")
 
 # Vision model (llama3.2-vision via Ollama) — already in the harness
 VISION_MODEL = "llama3.2-vision"
@@ -97,7 +112,7 @@ def _extract_pymupdf(pdf_path: str) -> str:
     doc = fitz.open(pdf_path)
     pages = list(doc)[:MAX_PAGES]
     blocks = []
-    for i, page in enumerate(pages, 1):
+    for page in pages:
         try:
             text = page.get_text("markdown")
         except Exception:
@@ -110,45 +125,123 @@ def _extract_pymupdf(pdf_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Backend 2: Vision model OCR
+# Backend 2: llama-server OCR (dedicated OCR model)
 # ---------------------------------------------------------------------------
 
+# Prompt format for GLM-OCR and most other llama.cpp OCR models.
+# Models trained with specific prompts: "OCR", "OCR markdown", "OCR HTML table"
+# General-purpose models need a more explicit instruction.
+_LLAMA_OCR_PROMPT = "OCR markdown"
+
 OCR_DPI = 150           # render resolution — 150 dpi is fast and readable
-MAX_OCR_PAGES = 10      # cap pages sent to the vision model (expensive)
-
-OCR_PROMPT = """\
-This is page {page_num} of a research paper PDF. Extract all text content as clean markdown.
-Preserve: section headings (## level), paragraph structure, bullet lists, code/math blocks.
-Output ONLY the extracted text — no commentary, no page number header."""
+MAX_OCR_PAGES = 10      # cap pages sent to any model-based OCR (expensive)
 
 
-def _page_to_b64(page) -> str:
+def _get_llama_ocr_model(base_url: str) -> str:
+    """Query /v1/models to find the loaded model ID, or return 'default'."""
+    try:
+        import requests as _req
+        resp = _req.get(f"{base_url}/v1/models", timeout=3)
+        data = resp.json()
+        models = data.get("data", [])
+        if models:
+            return models[0]["id"]
+    except Exception:
+        pass
+    return "default"
+
+
+def _page_to_b64_png(page) -> str:
     """Render a PyMuPDF page to a base64-encoded PNG."""
     mat = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)
     pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
     return base64.b64encode(pix.tobytes("png")).decode("utf-8")
 
 
-def _extract_vision(pdf_path: str, task: str = "") -> str:
+def _extract_llama_ocr(pdf_path: str) -> str:
     """
-    OCR a PDF by rendering each page to an image and sending to llama3.2-vision.
-    Used as last-resort fallback when PyMuPDF also yields sparse output.
-    """
-    import inference as _inf
+    OCR via a dedicated llama-server OCR model (e.g. GLM-OCR-GGUF).
 
+    Uses the OpenAI-compatible /v1/chat/completions endpoint with
+    multipart image_url content — the format llama-server expects.
+    Renders each PDF page to a grayscale PNG and sends it with prompt "OCR markdown".
+
+    Requires: LLAMA_OCR_BASE_URL env var set to running llama-server URL.
+    Requires: PyMuPDF (for page rendering).
+    """
     if not PYMUPDF_AVAILABLE:
         return ""
+
+    import requests as _req
+
+    model_id = _get_llama_ocr_model(LLAMA_OCR_BASE_URL)
+    url = f"{LLAMA_OCR_BASE_URL}/v1/chat/completions"
 
     doc = fitz.open(pdf_path)
     pages = list(doc)[:MAX_OCR_PAGES]
     blocks = []
 
+    for i, page in enumerate(pages, 1):
+        print(f"    [ocr:llama] page {i}/{len(pages)}...")
+        b64 = _page_to_b64_png(page)
+        data_uri = f"data:image/png;base64,{b64}"
+
+        payload = {
+            "model": model_id,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                    {"type": "text", "text": _LLAMA_OCR_PROMPT},
+                ],
+            }],
+            "temperature": 0.1,
+            "top_k": 1,
+        }
+
+        try:
+            resp = _req.post(url, json=payload, timeout=120)
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+            if text:
+                blocks.append(text)
+        except Exception as e:
+            print(f"    [ocr:llama] page {i} failed: {e}")
+
+    doc.close()
+    return "\n\n".join(blocks)
+
+
+# ---------------------------------------------------------------------------
+# Backend 3: Ollama vision model (last resort)
+# ---------------------------------------------------------------------------
+
+_OLLAMA_OCR_PROMPT = """\
+This is page {page_num} of a research paper PDF. Extract all text content as clean markdown.
+Preserve: section headings (## level), paragraph structure, bullet lists, code/math blocks.
+Output ONLY the extracted text — no commentary, no page number header."""
+
+
+def _extract_vision(pdf_path: str, task: str = "") -> str:
+    """
+    OCR a PDF by rendering each page to an image and sending to llama3.2-vision.
+    Used as last-resort fallback when PyMuPDF also yields sparse output and
+    llama-server is not configured.
+    """
+    if not PYMUPDF_AVAILABLE:
+        return ""
+
+    import inference as _inf
+
+    doc = fitz.open(pdf_path)
+    pages = list(doc)[:MAX_OCR_PAGES]
+    blocks = []
     task_hint = f"\nTask context: {task[:200]}" if task else ""
 
     for i, page in enumerate(pages, 1):
         print(f"    [ocr:vision] page {i}/{len(pages)}...")
-        b64 = _page_to_b64(page)
-        prompt = OCR_PROMPT.format(page_num=i) + task_hint
+        b64 = _page_to_b64_png(page)
+        prompt = _OLLAMA_OCR_PROMPT.format(page_num=i) + task_hint
         try:
             response = _inf.chat(
                 model=VISION_MODEL,
@@ -178,8 +271,9 @@ def ocr_pdf(pdf_path: str, task: str = "", markitdown_content: str = "") -> str:
     Attempt a better text extraction from a PDF that MarkItDown rendered sparsely.
 
     Cascade:
-      1. PyMuPDF — fast, handles multi-column layouts well
-      2. Vision model — for truly scanned / image-only pages
+      1. PyMuPDF — fast, no model cost, handles multi-column layouts
+      2. llama-server OCR — dedicated OCR model if LLAMA_OCR_BASE_URL is set
+      3. llama3.2-vision via Ollama — last resort for truly scanned pages
 
     Returns the best extraction found, or the original markitdown_content
     if all backends fail or produce no improvement.
@@ -194,25 +288,45 @@ def ocr_pdf(pdf_path: str, task: str = "", markitdown_content: str = "") -> str:
             if pymupdf_text and not is_sparse(pymupdf_text, expanded):
                 print(f"  [ocr:pymupdf] {basename} → {len(pymupdf_text)} chars")
                 return pymupdf_text
-            # PyMuPDF got something but still sparse — try vision if markedly better
+            # Still sparse but markedly better than MarkItDown — accept it
             if pymupdf_text and len(pymupdf_text) > len(markitdown_content) * 1.5:
                 print(f"  [ocr:pymupdf] {basename} → {len(pymupdf_text)} chars (partial improvement)")
                 return pymupdf_text
-            print(f"  [ocr:pymupdf] {basename} still sparse ({len(pymupdf_text)} chars) — trying vision")
+            print(f"  [ocr:pymupdf] {basename} still sparse ({len(pymupdf_text)} chars) — trying next backend")
         except Exception as e:
-            print(f"  [ocr:pymupdf] {basename} failed: {e} — trying vision")
+            print(f"  [ocr:pymupdf] {basename} failed: {e} — trying next backend")
     else:
-        print(f"  [ocr] PyMuPDF not available — trying vision")
+        print(f"  [ocr] PyMuPDF not available — skipping to model-based OCR")
 
-    # --- Stage 2: Vision model ---
-    print(f"  [ocr:vision] sending {min(MAX_OCR_PAGES, _estimate_page_count(expanded))} page(s) to {VISION_MODEL}...")
-    vision_text = _extract_vision(expanded, task=task)
-    if vision_text and len(vision_text) > len(markitdown_content):
-        print(f"  [ocr:vision] {basename} → {len(vision_text)} chars")
-        return vision_text
+    # --- Stage 2: llama-server OCR (if configured) ---
+    if LLAMA_OCR_BASE_URL:
+        print(f"  [ocr:llama] {basename} → {LLAMA_OCR_BASE_URL} ({MAX_OCR_PAGES} page(s) max)...")
+        try:
+            llama_text = _extract_llama_ocr(expanded)
+            if llama_text and not is_sparse(llama_text, expanded):
+                print(f"  [ocr:llama] {basename} → {len(llama_text)} chars")
+                return llama_text
+            if llama_text and len(llama_text) > len(markitdown_content):
+                print(f"  [ocr:llama] {basename} → {len(llama_text)} chars (partial improvement)")
+                return llama_text
+            print(f"  [ocr:llama] still sparse — falling back to vision")
+        except Exception as e:
+            print(f"  [ocr:llama] failed: {e} — falling back to vision")
+    else:
+        print(f"  [ocr] LLAMA_OCR_BASE_URL not set — skipping llama-server backend")
 
-    # All backends failed or produced no improvement — return original
-    print(f"  [ocr] all backends failed for {basename} — using original MarkItDown output")
+    # --- Stage 3: Ollama vision model ---
+    print(f"  [ocr:vision] {_estimate_page_count(expanded)} page(s) → {VISION_MODEL}...")
+    try:
+        vision_text = _extract_vision(expanded, task=task)
+        if vision_text and len(vision_text) > len(markitdown_content):
+            print(f"  [ocr:vision] {basename} → {len(vision_text)} chars")
+            return vision_text
+    except Exception as e:
+        print(f"  [ocr:vision] failed: {e}")
+
+    # All backends failed or produced no improvement
+    print(f"  [ocr] all backends exhausted for {basename} — using original MarkItDown output")
     return markitdown_content
 
 
@@ -223,13 +337,17 @@ def ocr_pdf(pdf_path: str, task: str = "", markitdown_content: str = "") -> str:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: python ocr.py <path/to/paper.pdf> [task description]")
+        print(f"\nBackends available:")
+        print(f"  PyMuPDF:      {'yes' if PYMUPDF_AVAILABLE else 'no (pip install pymupdf)'}")
+        print(f"  llama-server: {'yes — ' + LLAMA_OCR_BASE_URL if LLAMA_OCR_BASE_URL else 'no (set LLAMA_OCR_BASE_URL)'}")
+        print(f"  Ollama vision: yes (llama3.2-vision)")
         sys.exit(1)
 
     path = sys.argv[1]
     task_desc = sys.argv[2] if len(sys.argv) > 2 else ""
 
     print(f"[ocr] testing on: {path}")
-    print(f"[ocr] PyMuPDF available: {PYMUPDF_AVAILABLE}")
+    print(f"[ocr] backends: pymupdf={PYMUPDF_AVAILABLE}  llama-server={bool(LLAMA_OCR_BASE_URL)}  vision=yes")
 
     # Simulate MarkItDown baseline
     try:
