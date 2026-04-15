@@ -494,6 +494,53 @@ Current autoresearch mutates only `SYNTH_INSTRUCTION`. Full self-improvement req
 
 The coordination overhead — not VRAM — is now the binding constraint.
 
+### 4f: vLLM serving layer — DRAFTED (2026-04-15)
+
+**Problem:** Ollama processes one `ollama.chat()` request at a time per model. When 4 parallel subtask subprocesses all hit `pi-qwen-32b`, 3 block at the Ollama queue. `ThreadPoolExecutor(max_workers=4)` gives process concurrency; Ollama collapses it to serial LLM execution. The coordination overhead, not VRAM, is the binding constraint.
+
+**Solution:** vLLM continuous batching — multiple in-flight requests are batched at the attention kernel level. 63.8GB VRAM fits `pi-qwen-32b` + `Qwen3-Coder:30b` simultaneously with headroom for LoRA adapters.
+
+**What's in place:**
+
+`inference.py` — unified backend shim. Drop-in replacement for `import ollama`:
+
+```python
+# Before (agent.py, wiggum.py, autoresearch.py):
+ollama = type("_OllamaShim", (), {"chat": staticmethod(_ollama_chat)})()
+
+# After:
+from inference import OllamaLike
+ollama = OllamaLike(keep_alive=_KEEP_ALIVE)
+```
+
+Routing controlled by `INFERENCE_BACKEND=vllm` in `.env`. All other call sites unchanged. `_OllamaResponse` adapter normalizes OpenAI response shape (token counts, timing) to match what `logger._extract_usage()` expects — no dashboard changes needed.
+
+`requirements-vllm.txt` — pinned vLLM dep tree, isolated from the main harness env to avoid torch/CUDA conflicts. Docker recommended path included.
+
+**Three unlocks at Stage 4:**
+
+| Bottleneck | Unlock |
+|---|---|
+| Serial Ollama queue blocks 4 parallel subtasks | Continuous batching — all 4 requests batched simultaneously |
+| Prefix re-processing on every autoresearch iteration | Prefix caching (`--enable-prefix-caching`) eliminates repeated system prompt eval |
+| Checkpoint promotion requires Ollama model pull + server restart | `--enable-lora` + `POST /v1/load_lora_adapter` — integrator agent hot-swaps adapters live |
+
+**Timing approximation note:** The OpenAI API body doesn't expose per-phase latencies (`eval_duration`, `prompt_eval_duration`). `_OllamaResponse` approximates them as 88%/12% of wall-clock time. For tighter measurements, wire in vLLM's `/metrics` Prometheus endpoint post-hoc.
+
+**Remaining work before activation:**
+
+1. **Evaluator routing** — `wiggum.py` currently uses a single `VLLM_BASE_URL`. When running two vLLM instances (producer on :8000, evaluator on :8001), need `VLLM_EVALUATOR_BASE_URL` support in `inference.py` and a `chat_evaluator()` variant in the shim.
+2. **Gradual migration** — `skills.py`, `email_skill.py`, `lit_review_skill.py`, `curator.py`, `review_skill.py` still call `_ollama_raw.chat()` directly. Replace with `from inference import chat as _llm_chat` as each file is touched.
+3. **`think` flag** — Qwen3's `options={"think": False}` is Ollama-specific. vLLM equivalent is excluding `/think` from the system prompt. Needs a thin translation layer in `_chat_vllm()` when `think=True` is requested.
+4. **Benchmark** — run eval_suite.py with `INFERENCE_BACKEND=vllm` and confirm tok/s figures from dashboard match expectation before promoting as default.
+
+**Activation:**
+```
+# .env additions
+INFERENCE_BACKEND=vllm
+VLLM_BASE_URL=http://localhost:8000/v1
+```
+
 ---
 
 ---

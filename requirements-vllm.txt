@@ -1,0 +1,90 @@
+# requirements-vllm.txt — vLLM serving dependencies
+#
+# IMPORTANT: install in a SEPARATE virtual environment (or use Docker).
+# Do NOT pip install into the main harness env — vLLM pins its own torch/triton/
+# flashinfer versions that conflict with the harness's torch==2.7.1+cu118.
+#
+# =============================================================================
+# RECOMMENDED: Docker (avoids all build-time conflicts)
+# =============================================================================
+#
+# Pull the pinned release image:
+#   docker pull vllm/vllm-openai:v0.6.6
+#
+# Serve pi-qwen-32b (producer):
+#   docker run --gpus all --ipc=host -p 8000:8000 \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     vllm/vllm-openai:v0.6.6 \
+#     --model Qwen/Qwen2.5-32B-Instruct \
+#     --dtype half \
+#     --max-model-len 32768 \
+#     --enable-prefix-caching \
+#     --gpu-memory-utilization 0.75
+#
+# Serve evaluator alongside (second container, second port):
+#   docker run --gpus all --ipc=host -p 8001:8000 \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     vllm/vllm-openai:v0.6.6 \
+#     --model Qwen/Qwen2.5-Coder-32B-Instruct \
+#     --dtype half \
+#     --max-model-len 16384 \
+#     --enable-prefix-caching \
+#     --gpu-memory-utilization 0.24
+#
+# LoRA hot-swap (integrator agent):
+#   Add --enable-lora --max-lora-rank 64 to the startup flags above.
+#   Load at runtime: POST /v1/load_lora_adapter {"lora_name": "v2", "lora_path": "..."}
+#
+# =============================================================================
+# Pip install (CUDA 11.8 build — matches harness torch+cu118)
+# =============================================================================
+#
+# In a fresh venv:
+#   python -m venv .venv-vllm
+#   source .venv-vllm/bin/activate   (or .venv-vllm\Scripts\activate on Windows)
+#   pip install -r requirements-vllm.txt
+#
+# Version policy: pin to a specific release; do NOT use `vllm>=x.y` in production.
+# Run `pip-compile --generate-hashes requirements-vllm.in` after any version bump
+# to get SHA256-pinned hashes for the full transitive closure.
+#
+# =============================================================================
+
+# Core serving stack
+vllm==0.6.6
+ray==2.38.0                  # vLLM's distributed backend; pin tightly
+
+# CUDA kernels — must match the vLLM release exactly
+flashinfer-python==0.1.6     # attention kernels; breaking API changes between minor versions
+triton==3.0.0                # OpenAI Triton compiler; vLLM 0.6.x requires 3.0.x
+
+# OpenAI client — used by inference.py to talk to vLLM's /v1 endpoint
+# Already in main requirements.txt; listed here for the isolated venv case
+openai==2.31.0
+
+# =============================================================================
+# Environment variables for the harness when vLLM is active
+# =============================================================================
+# Add these to .env (they override the defaults in inference.py):
+#
+#   INFERENCE_BACKEND=vllm
+#   VLLM_BASE_URL=http://localhost:8000/v1
+#
+# To route the evaluator to a second vLLM instance on port 8001, set a custom
+# model map entry that the wiggum shim can read:
+#   VLLM_MODEL_MAP={"Qwen3-Coder:30b": "Qwen/Qwen2.5-Coder-32B-Instruct"}
+#   VLLM_EVALUATOR_BASE_URL=http://localhost:8001/v1  (future — inference.py v2)
+#
+# =============================================================================
+# Known version constraints
+# =============================================================================
+# vLLM 0.7+ requires CUDA 12.x. The harness uses torch 2.7.1+cu118 (CUDA 11.8),
+# so 0.6.x is the ceiling until the base env is migrated to CUDA 12.
+# Track: https://github.com/vllm-project/vllm/releases
+#
+# Security incident context (2024 supply-chain): unconstrained `pip install vllm`
+# pulled a malicious package via a transitive dep. Mitigation:
+#   1. Pin every direct dep above (no bare `vllm` without ==version)
+#   2. Use --require-hashes after running pip-compile --generate-hashes
+#   3. Prefer the Docker image: it ships a tested+signed dep closure
+#   4. Audit diff before any version bump: `pip install pip-audit && pip-audit`

@@ -27,6 +27,7 @@ import subprocess
 import re
 from contextlib import contextmanager
 import ollama as _ollama_raw
+from inference import OllamaLike as _OllamaLike
 
 
 @contextmanager
@@ -35,12 +36,7 @@ def _nullspan():
     yield
 
 _KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
-
-def _ollama_chat(*args, **kwargs):
-    kwargs.setdefault("keep_alive", _KEEP_ALIVE)
-    return _ollama_raw.chat(*args, **kwargs)
-
-ollama = type("_OllamaShim", (), {"chat": staticmethod(_ollama_chat)})()
+ollama = _OllamaLike(keep_alive=_KEEP_ALIVE)
 
 
 try:

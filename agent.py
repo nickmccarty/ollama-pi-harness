@@ -35,10 +35,12 @@ if _env_file.exists():
 warnings.filterwarnings("ignore", message="Couldn't find ffmpeg", category=RuntimeWarning)
 
 import ollama as _ollama_raw
+from inference import OllamaLike as _OllamaLike
 
 # Keep models hot between calls — avoids 30-60s cold reload between pipeline stages.
 # OLLAMA_KEEP_ALIVE env var pins keep_alive globally (e.g. -1 to force always-on).
 # If unset, _estimate_keep_alive() computes a per-run value from historical data.
+# When INFERENCE_BACKEND=vllm, keep_alive is silently ignored (vLLM manages lifetime).
 _KEEP_ALIVE_OVERRIDE = os.environ.get("OLLAMA_KEEP_ALIVE")
 _KEEP_ALIVE = int(_KEEP_ALIVE_OVERRIDE) if _KEEP_ALIVE_OVERRIDE is not None else None
 
@@ -115,12 +117,7 @@ def _estimate_keep_alive(task_type: str, explicit_skills: set, use_wiggum: bool)
     return base
 
 
-def _ollama_chat(*args, **kwargs):
-    if _KEEP_ALIVE is not None:
-        kwargs.setdefault("keep_alive", _KEEP_ALIVE)
-    return _ollama_raw.chat(*args, **kwargs)
-
-ollama = type("_OllamaShim", (), {"chat": staticmethod(_ollama_chat)})()
+ollama = _OllamaLike(keep_alive=_KEEP_ALIVE)
 
 from ddgs import DDGS
 from wiggum import loop as wiggum_loop
