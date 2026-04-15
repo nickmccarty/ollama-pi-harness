@@ -683,14 +683,20 @@ Cleanest reproducible experiments for a paper/report:
 - `ggml-org/GLM-OCR-GGUF` — best general OCR, supports `"OCR markdown"` and `"OCR HTML table"` prompts
 - `Qwen3-VL-2B` — already in the vision family; lighter weight
 
-**Integration (llama-server route):**
+**Implemented cascade (`ocr.py`):**
+1. **PyMuPDF** — zero model cost, handles multi-column layout via `get_text("markdown")`
+2. **llama-server OCR** — dedicated model, activated by `LLAMA_OCR_BASE_URL` env var
+3. **llama3.2-vision via Ollama** — last resort for truly scanned pages
+
+**llama-server quickstart:**
 ```bash
-llama-server -hf ggml-org/GLM-OCR-GGUF
+llama-server -hf ggml-org/GLM-OCR-GGUF   # launches at http://localhost:8080
 ```
-```python
-# POST /v1/chat/completions with base64 image + "OCR markdown" prompt
-# Drop result into existing chunker pipeline unchanged
 ```
+LLAMA_OCR_BASE_URL=http://localhost:8080   # in .env — activates backend 2
+```
+
+**Supported OCR models via llama.cpp:** GLM-OCR, Deepseek-OCR, LightOnOCR, HunyuanOCR, Qianfan-OCR, Dots.OCR, PaddleOCR-VL, Qwen3-VL-2B, gemma-4-E2B/E4B.
 
 **Also useful for:** the `/annotate` skill on papers where MarkItDown produces malformed markdown from complex layouts (two-column PDFs, tables, equations).
 
