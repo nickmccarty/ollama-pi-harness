@@ -267,6 +267,16 @@ def read_file_context(paths: list[str], task: str = "") -> str:
             except Exception as e:
                 print(f"  [markitdown error] {os.path.basename(p)}: {e} — skipping")
                 continue
+            # OCR fallback: if MarkItDown output is sparse (scanned/image-heavy PDF),
+            # try PyMuPDF then vision model for a better extraction
+            if ext.lower() == ".pdf":
+                try:
+                    from ocr import is_sparse, ocr_pdf
+                    if is_sparse(content, p):
+                        print(f"  [ocr] {os.path.basename(p)} is sparse — attempting OCR fallback")
+                        content = ocr_pdf(p, task=task, markitdown_content=content)
+                except Exception as e:
+                    print(f"  [ocr] fallback failed (non-fatal): {e}")
         else:
             try:
                 with open(p, "r", encoding="utf-8", errors="replace") as f:

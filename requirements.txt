@@ -186,6 +186,7 @@ pandocfilters==1.5.1
 parsel==1.11.0
 parso==0.8.6
 pdfminer.six==20250506
+pymupdf==1.27.2.2
 peft==0.18.1
 pillow==11.3.0
 platformdirs==4.9.6
