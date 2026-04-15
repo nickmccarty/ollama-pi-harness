@@ -119,6 +119,16 @@ REGISTRY: dict[str, dict] = {
         "auto":        None,   # explicit only
     },
 
+    "lit-review": {
+        "description": (
+            "Literature review pipeline: fetch arXiv papers, enrich with citation graph "
+            "(Semantic Scholar), curate, annotate+wiggum, cluster, synthesize, render via Jinja2 template"
+        ),
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only
+    },
+
 }
 
 # Aliases — resolved during parse

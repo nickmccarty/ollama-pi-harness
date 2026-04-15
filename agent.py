@@ -48,6 +48,8 @@ def _estimate_keep_alive(task_type: str, explicit_skills: set, use_wiggum: bool)
     # Standalone skills with short, bounded durations
     if explicit_skills & {"github", "email", "review"}:
         return 90
+    if explicit_skills & {"lit-review"}:
+        return -1   # keep alive indefinitely — pipeline runs for minutes to hours
 
     # Try historical data
     try:
@@ -796,7 +798,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review"}
+        _path_optional = {"email", "github", "review", "lit-review"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -931,11 +933,63 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 trace.data["review_thinking"] = result["thinking"]
             trace.finish("PASS")
 
+        def _handle_lit_review():
+            from lit_review_skill import run_lit_review
+            import re as _re
+            # Parse flags from task string
+            no_fetch   = "--no-fetch"   in task
+            no_curate  = "--no-curate"  in task
+            no_wiggum  = "--no-wiggum"  in task
+            no_s2      = "--no-s2"      in task
+            after_m    = _re.search(r"--after\s+(\S+)",        task)
+            before_m   = _re.search(r"--before\s+(\S+)",       task)
+            csv_m      = _re.search(r"--csv\s+(\S+)",          task)
+            max_f_m    = _re.search(r"--max-fetch\s+(\d+)",    task)
+            max_a_m    = _re.search(r"--max-annotate\s+(\d+)", task)
+            tmpl_m     = _re.search(r"--template\s+(\S+)",     task)
+            after      = after_m.group(1)  if after_m  else None
+            before     = before_m.group(1) if before_m else None
+            csv_path   = Path(csv_m.group(1)) if csv_m else None
+            max_fetch  = int(max_f_m.group(1)) if max_f_m else 100
+            max_ann    = int(max_a_m.group(1)) if max_a_m else 20
+            template   = tmpl_m.group(1) if tmpl_m else "survey"
+            out        = Path(path) if path else Path("lit_review.md")
+            # Strip known flags from task to get query
+            query = _re.sub(
+                r"(/lit-review|--no-fetch|--no-curate|--no-wiggum|--no-s2"
+                r"|--after\s+\S+|--before\s+\S+|--csv\s+\S+"
+                r"|--max-fetch\s+\d+|--max-annotate\s+\d+"
+                r"|--template\s+\S+|save\s+to\s+\S+|\S+\.md)",
+                "", task, flags=_re.IGNORECASE,
+            ).strip()
+            trace.data["task_type"] = "lit-review"
+            result = run_lit_review(
+                query=query,
+                out_path=out,
+                max_fetch=max_fetch,
+                max_annotate=max_ann,
+                after=after,
+                before=before,
+                csv_path=csv_path if (no_fetch or csv_path) else None,
+                no_curate=no_curate,
+                no_wiggum=no_wiggum,
+                no_s2=no_s2,
+                template=template,
+                producer_model=producer_model,
+                evaluator_model=evaluator_model,
+            )
+            trace.data["output_path"]  = result.get("out_path", "")
+            trace.data["output_bytes"] = Path(result.get("out_path","")).stat().st_size if result.get("out_path") and Path(result["out_path"]).exists() else 0
+            trace.data["lit_review_papers"]   = result.get("papers", 0)
+            trace.data["lit_review_clusters"] = result.get("clusters", 0)
+            trace.finish("PASS")
+
         _STANDALONE = {
-            "annotate": _handle_annotate,
-            "email":    _handle_email,
-            "github":   _handle_github,
-            "review":   _handle_review,
+            "annotate":   _handle_annotate,
+            "email":      _handle_email,
+            "github":     _handle_github,
+            "review":     _handle_review,
+            "lit-review": _handle_lit_review,
         }
 
         for _skill in explicit_skills:

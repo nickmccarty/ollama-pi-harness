@@ -110,6 +110,14 @@ python agent.py "/review"                            # review staged changes (Qw
 python agent.py "/review last"                       # review last commit
 python agent.py "/review all"                        # review all unpushed vs origin/main
 
+# Literature review pipeline:
+python agent.py "/lit-review agentic LLM harness engineering save to review.md"
+python agent.py "/lit-review --after 2024-06-01 --max-annotate 30 prompt injection save to gaps.md"
+python agent.py "/lit-review --csv arxiv_agentic_papers.csv --no-fetch --template gaps save to gaps.md"
+python lit_review_skill.py "RAG retrieval" --max-annotate 20 --out review.md   # standalone
+python semantic_scholar.py arxiv_agentic_papers.csv                             # enrich + hub scores
+python semantic_scholar.py arxiv_agentic_papers.csv --fetch-gaps 20 --append arxiv_agentic_papers.csv
+
 # Auto-triggered (no prefix needed):
 #   /annotate  — task mentions "paper", "abstract", "survey", "review"
 #   /deep      — task mentions "comprehensive", "exhaustive", "deep dive"
@@ -291,6 +299,10 @@ python inspect_run.py --all    # summary table of all runs
 | `build_finetune_from_annotations.py` | Merge gold + agent CSVs → `finetune_dataset_v2.jsonl` (prefers `*_curated.csv` if available) |
 | `build_dpo_dataset.py` | Build DPO preference pairs from `runs.jsonl` — cross-run pairs + wiggum-revision pairs |
 | `arxiv_fetch.py` | Fetch arXiv papers to CSV via feedparser — date filters, dedup, append mode; same schema as existing CSVs |
+| `semantic_scholar.py` | Enrich corpus with citation graph data (Semantic Scholar API) — hub scores, gap candidates, SQLite cache |
+| `lit_review_skill.py` | /lit-review pipeline: fetch → S2 enrich → curate → annotate+wiggum → cluster → synthesize → Jinja render |
+| `templates/lit_review_survey.j2` | Full academic-style literature review template |
+| `templates/lit_review_gaps.j2` | Gap-focused template: what's missing, what to read next |
 | `backfill_metrics.py` | Reconstruct `finetune_metrics.jsonl` from training log output |
 | `Modelfile` | Ollama Modelfile for `pi-qwen` (qwen2.5:7b) |
 | `Modelfile.32b` | Ollama Modelfile for `pi-qwen-32b` (qwen2.5:32b Q4_K_M) |
