@@ -117,6 +117,15 @@ python agent.py "/review all"                        # review all unpushed vs or
 #   /kg        — task mentions "knowledge graph", "visualize"
 ```
 
+**Fetch arXiv papers:**
+```bash
+python arxiv_fetch.py "agentic LLM harness"                         # -> arxiv_agentic_llm_harness.csv (300 papers)
+python arxiv_fetch.py "RAG retrieval" --max 500 --out rag.csv        # custom output, more papers
+python arxiv_fetch.py "prompt injection" --after 2024-06-01          # date filter — new papers only
+python arxiv_fetch.py "multi-agent" --append existing.csv            # append, skip duplicates
+python arxiv_fetch.py --stats arxiv_agentic_papers.csv               # inspect existing CSV
+```
+
 **Annotated abstracts (batch):**
 ```bash
 python annotate_abstracts.py papers.csv
@@ -281,6 +290,7 @@ python inspect_run.py --all    # summary table of all runs
 | `run_annotations.py` | Batch annotation runner — parse arxiv markdown → annotate → CSV |
 | `build_finetune_from_annotations.py` | Merge gold + agent CSVs → `finetune_dataset_v2.jsonl` (prefers `*_curated.csv` if available) |
 | `build_dpo_dataset.py` | Build DPO preference pairs from `runs.jsonl` — cross-run pairs + wiggum-revision pairs |
+| `arxiv_fetch.py` | Fetch arXiv papers to CSV via feedparser — date filters, dedup, append mode; same schema as existing CSVs |
 | `backfill_metrics.py` | Reconstruct `finetune_metrics.jsonl` from training log output |
 | `Modelfile` | Ollama Modelfile for `pi-qwen` (qwen2.5:7b) |
 | `Modelfile.32b` | Ollama Modelfile for `pi-qwen-32b` (qwen2.5:32b Q4_K_M) |
