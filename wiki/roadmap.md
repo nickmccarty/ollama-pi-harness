@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-updated: 2026-04-12
+updated: 2026-04-15
 tags: [roadmap, design, architecture]
 ---
 
@@ -12,9 +12,23 @@ Ranked by estimated impact vs implementation effort. Items marked **[spec]** hav
 
 ## Active / next up
 
+### Stall-triggered replan in autoresearch
+**Source:** MagenticOne architecture review (2026-04-12)
+**Status:** Idea, not designed
+
+MagenticOne replans after N consecutive stalls. Autoresearch equivalent: if 4+ consecutive experiments are discarded, inject a directive into the PROPOSE_PROMPT:
+
+> "The last 4 variations were all discarded. Stop refining the existing instruction — propose a fundamentally different framing approach that hasn't been tried."
+
+**Expected benefit:** breaks proposer out of local minima faster. The local Qwen3-Coder proposer clustered in "add code examples" space for 10 experiments. Kimi found an orthogonal angle immediately but that was model quality, not loop design.
+
+**Effort:** low — add stall counter to autoresearch.py loop; modify PROPOSE_PROMPT conditionally.
+
+---
+
 ### Closed-book prior knowledge pass
 **Source:** MagenticOne architecture review (2026-04-12)
-**Status:** Designed, not implemented
+**Status:** Implemented (2026-04-15)
 
 Before `gather_research()`, add a `prior_knowledge_pass()` that asks the producer:
 
@@ -33,35 +47,6 @@ The gap list replaces generic topic queries in `plan_query()`. This addresses tw
 
 **Effort:** medium — one new LLM call in planner.py, minor changes to gather_research() and synthesize() prompt assembly.
 
----
-
-### Wiggum progress ledger (is-cycling detection)
-**Source:** MagenticOne architecture review (2026-04-12)
-**Status:** Designed, not implemented
-
-Currently wiggum stops revising based on score comparison (best-round restoration fix, 2026-04-12). A smarter stop: after round 2, ask the evaluator:
-
-> "Are the issues in round 2 substantively different from round 1, or is the revision cycling on the same problems?"
-
-If cycling → return best round immediately, no third revision call. If making progress → continue.
-
-**Expected benefit:** saves one wiggum_revise LLM call (~580s avg) on runs that are stuck cycling. Analysis shows flat/regressed multi-round runs (30/57) are the primary candidate.
-
-**Effort:** low — one LLM call added to wiggum loop between rounds 2 and 3.
-
----
-
-### Stall-triggered replan in autoresearch
-**Source:** MagenticOne architecture review (2026-04-12)
-**Status:** Idea, not designed
-
-MagenticOne replans after N consecutive stalls. Autoresearch equivalent: if 4+ consecutive experiments are discarded, inject a directive into the PROPOSE_PROMPT:
-
-> "The last 4 variations were all discarded. Stop refining the existing instruction — propose a fundamentally different framing approach that hasn't been tried."
-
-**Expected benefit:** breaks proposer out of local minima faster. The local Qwen3-Coder proposer clustered in "add code examples" space for 10 experiments. Kimi found an orthogonal angle immediately but that was model quality, not loop design.
-
-**Effort:** low — add stall counter to autoresearch.py loop; modify PROPOSE_PROMPT conditionally.
 
 ---
 
@@ -103,3 +88,10 @@ Pending clean ablation results (Priority 5) to determine if more search rounds a
 | Wiggum best-round restoration | 2026-04-12 | wiggum.py fix |
 | synthesize_with_count uses SYNTH_INSTRUCTION | 2026-04-12 | agent.py fix |
 | Cloud proposer (kimi-k2.5:cloud) | 2026-04-10 | eliminates VRAM swap |
+| Wiggum cycling detection | 2026-04-15 | identical score+dims → early exit, restores best round |
+| OCR preprocessing cascade | 2026-04-15 | ocr.py: PyMuPDF → llama-server → llama3.2-vision |
+| Closed-book prior knowledge pass | 2026-04-15 | planner.py: gaps seed queries, known facts in synthesis context |
+| vLLM inference backend (inference.py) | 2026-04-15 | INFERENCE_BACKEND=vllm; context-length retry with truncation |
+| Evaluator diversity comparison script | 2026-04-15 | eval_compare_evaluators.py |
+| vLLM parallelism benchmark | 2026-04-15 | bench_vllm_parallel.py; --ollama-only / --vllm-only flags |
+| Synthesis epilogue stripping | 2026-04-15 | clean_synthesis_output: --- + meta-commentary pattern |

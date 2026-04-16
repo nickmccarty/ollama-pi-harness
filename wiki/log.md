@@ -30,3 +30,25 @@ First run confounded: ablation revealed SYNTH_INSTRUCTION_COUNT was session-1-er
 Reviewed Microsoft MagenticOne vs harness architecture. Key borrow identified: closed-book prior knowledge pass before gather_research() — ask producer what it already knows and what gaps exist before any web search. This front-loads knowledge audit, makes gap queries more targeted, and addresses the synthesis gap (no reflect step between search and synthesis). Roadmap item added.
 
 ## [2026-04-12] ingest | wiki additions — agentic-patterns.md, roadmap.md created; synthesis-instructions.md + autoresearch_program.md updated with sessions 2+3 findings
+
+## [2026-04-15] build | Session 11 — vLLM backend, OCR cascade, prior knowledge pass, wiggum cycling detection
+
+Seven harness features shipped:
+
+1. **Wiggum cycling detection** (`wiggum.py`) — after round 2, identical score+dims triggers early exit and restores best-round content. Applied to both `loop()` and `loop_annotate()`. Saves ~1300s on stuck runs.
+
+2. **OCR preprocessing cascade** (`ocr.py`, `agent.py`) — sparse MarkItDown PDF output triggers: PyMuPDF `get_text("markdown")` (column-aware) → llama-server dedicated OCR (activated by `LLAMA_OCR_BASE_URL`) → llama3.2-vision per-page fallback. `is_sparse()` gate at 300 chars/page.
+
+3. **Closed-book prior knowledge pass** (`planner.py`) — `prior_knowledge_pass()` runs before any search. LLM self-audits: known facts injected into synthesis context as verified block; gaps replace generic topic queries. `Plan` dataclass extended with `known_facts` + `knowledge_gaps`.
+
+4. **vLLM inference backend** (`inference.py`) — `INFERENCE_BACKEND=vllm` routes to vLLM OpenAI-compatible endpoint. `VLLM_MODEL_MAP` replace-semantics (not extend) when env var set. Context-length retry: truncates longest message + halves `max_tokens` up to 2× before raising. `think` flag translation for Qwen3 reasoning mode. Sentence-transformer model cached at module level (no per-call reload).
+
+5. **vLLM embedding** (`inference.py`, `memory.py`) — `embed()` / `get_embedding_function()` public API. vLLM `/v1/embeddings` attempted, falls back to local sentence-transformers (all-MiniLM-L6-v2, 384-dim). `get_embed_collection_suffix()` always returns `""` since both backends produce 384-dim vectors. ChromaDB collection names backend-stable.
+
+6. **Evaluator diversity comparison** (`eval_compare_evaluators.py`) — scores 4 eval output files with two evaluators (default: Qwen3-Coder:30b vs gemma4:26b), prints side-by-side table, flags |Δ| ≥ 1.0 divergences.
+
+7. **vLLM parallelism benchmark** (`bench_vllm_parallel.py`) — times 2/4-subtask orchestrated runs under Ollama vs vLLM. `--ollama-only` / `--vllm-only` flags for split runs. Full model map remapping prevents Ollama fallback when Ollama is stopped. Results appended to `bench_vllm_results.jsonl`.
+
+**Synthesis epilogue fix** (`agent.py`) — `clean_synthesis_output` extended with `---` + meta-commentary pattern (strips "This synthesized guide can be saved to..." trailing text from smaller models).
+
+**env vars added:** `INFERENCE_BACKEND`, `VLLM_BASE_URL`, `VLLM_MODEL_MAP`, `WIGGUM_EVALUATOR_MODEL`, `WIGGUM_PRODUCER_MODEL`, `LLAMA_OCR_BASE_URL`

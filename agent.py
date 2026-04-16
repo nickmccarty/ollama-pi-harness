@@ -685,7 +685,9 @@ def clean_synthesis_output(content: str) -> str:
     epilogue_re = re.compile(
         r'\n+(?:#{1,4}\s*)?(?:Verification|Verify)[:\s].*$'
         r'|\n+The (?:markdown )?file .{0,120} (?:was created|has been).*$'
-        r'|\n+This command will (?:display|show|confirm).*$',
+        r'|\n+This command will (?:display|show|confirm).*$'
+        # Trailing --- divider followed by meta-commentary about saving / file paths
+        r'|\n+---\s*\n+(?:This (?:synthesized|guide|document|markdown)|Ensure you have|Save this|Note:|The above).{0,400}$',
         re.DOTALL | re.IGNORECASE,
     )
     content = epilogue_re.sub('', content)

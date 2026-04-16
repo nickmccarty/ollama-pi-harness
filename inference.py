@@ -168,14 +168,41 @@ def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
         oai_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(options["think"])}}
 
     vllm_model = _resolve_model(model)
-    t0 = time.monotonic_ns()
-    resp = client.chat.completions.create(
-        model=vllm_model,
-        messages=messages,
-        **oai_kwargs,
-    )
-    wall_ns = time.monotonic_ns() - t0
-    return _OllamaResponse(resp, wall_ns)
+
+    # Retry up to 2× on 400 context-length errors by truncating the longest message.
+    # Needed when --max-model-len is tight (e.g. 8192 for AWQ on 16GB VRAM) and
+    # synthesis context + num_predict together exceed it.
+    _messages = list(messages)
+    for attempt in range(3):
+        t0 = time.monotonic_ns()
+        try:
+            resp = client.chat.completions.create(
+                model=vllm_model,
+                messages=_messages,
+                **oai_kwargs,
+            )
+            wall_ns = time.monotonic_ns() - t0
+            return _OllamaResponse(resp, wall_ns)
+        except Exception as exc:
+            if "maximum context length" in str(exc) and attempt < 2:
+                # Find and halve the longest message content
+                longest_idx = max(
+                    range(len(_messages)),
+                    key=lambda i: len(str(_messages[i].get("content", "") or "")),
+                )
+                content = str(_messages[longest_idx].get("content", "") or "")
+                half = len(content) // 2
+                _messages[longest_idx] = {**_messages[longest_idx], "content": content[:half]}
+                # Also halve max_tokens — the completion budget contributes to the
+                # total and must shrink together with the input on a tight context window.
+                if "max_tokens" in oai_kwargs:
+                    oai_kwargs = dict(oai_kwargs)
+                    oai_kwargs["max_tokens"] = max(256, oai_kwargs["max_tokens"] // 2)
+                print(f"  [inference] context too long — truncated msg[{longest_idx}] "
+                      f"to {half} chars, max_tokens={oai_kwargs.get('max_tokens', '?')}, "
+                      f"retry {attempt + 1}/2")
+            else:
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +274,16 @@ def _embed_vllm(texts: list[str]) -> list[list[float]]:
     return [d.embedding for d in resp.data]
 
 
+_LOCAL_EMBED_INSTANCE = None  # module-level cache — avoids reloading weights each call
+
+
 def _embed_local(texts: list[str]) -> list[list[float]]:
     """Embed via sentence-transformers (all-MiniLM-L6-v2, local, no API)."""
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer(_LOCAL_EMBED_MODEL)
-    return model.encode(texts, show_progress_bar=False).tolist()
+    global _LOCAL_EMBED_INSTANCE
+    if _LOCAL_EMBED_INSTANCE is None:
+        from sentence_transformers import SentenceTransformer
+        _LOCAL_EMBED_INSTANCE = SentenceTransformer(_LOCAL_EMBED_MODEL)
+    return _LOCAL_EMBED_INSTANCE.encode(texts, show_progress_bar=False).tolist()
 
 
 def embed(texts: list[str]) -> list[list[float]]:
@@ -274,14 +306,14 @@ def embed(texts: list[str]) -> list[list[float]]:
 
 def get_embedding_function(device: str = "cpu"):
     """
-    Return a ChromaDB-compatible EmbeddingFunction for the current backend.
+    Return a ChromaDB-compatible EmbeddingFunction.
 
-    vLLM: wraps inference.embed() → vLLM /v1/embeddings (with local fallback).
-         Collection suffix "_vllm" isolates from local 384-dim collections.
-    Ollama/local: sentence-transformers all-MiniLM-L6-v2 (384 dims).
+    Always returns SentenceTransformerEmbeddingFunction (384-dim, local).
+    vLLM /v1/embeddings is only available when the served model is started with
+    --task embed, which is separate from the generate instance. Until a dedicated
+    embed endpoint is available, both backends use the same local model so that
+    ChromaDB collections stay compatible across backend switches.
     """
-    if _BACKEND == "vllm":
-        return _VLLMEmbeddingFunction()
     from chromadb.utils import embedding_functions
     return embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=_LOCAL_EMBED_MODEL,
@@ -293,15 +325,37 @@ def get_embed_collection_suffix() -> str:
     """
     Collection name suffix for backend isolation.
 
-    vLLM embeddings have a different dimension than all-MiniLM-L6-v2 (384).
-    Using a suffix prevents ChromaDB dimension mismatch errors when switching
-    backends. Each backend maintains its own index.
+    Returns "" always: both Ollama and vLLM backends use the same local
+    sentence-transformers model (384-dim), so no collection isolation is needed.
+    If a dedicated vLLM embed endpoint (--task embed) is added in future, this
+    should probe the actual embedding dimension and return "_vllm" when different.
     """
-    return "_vllm" if _BACKEND == "vllm" else ""
+    return ""
 
 
 class _VLLMEmbeddingFunction:
-    """ChromaDB EmbeddingFunction that calls inference.embed()."""
+    """ChromaDB EmbeddingFunction that calls inference.embed().
+
+    Does NOT inherit from chromadb.EmbeddingFunction to avoid a hard import at
+    module load time. Implements the full protocol manually for ChromaDB 1.5+:
+    __call__, embed_query, name, build_from_config, get_config.
+    """
+
+    # Must match the persisted collection name ("sentence_transformer") since
+    # this EF falls back to sentence-transformers when vLLM embed is unavailable
+    # (generate-mode model). ChromaDB rejects mismatched names on load.
+    def name(self) -> str:
+        return "sentence_transformer"
 
     def __call__(self, input: list[str]) -> list[list[float]]:  # noqa: A002
         return embed(input)
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:  # noqa: A002
+        return self(input)
+
+    @classmethod
+    def build_from_config(cls, config: dict) -> "_VLLMEmbeddingFunction":
+        return cls()
+
+    def get_config(self) -> dict:
+        return {}
