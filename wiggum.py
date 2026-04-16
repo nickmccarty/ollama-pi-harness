@@ -285,7 +285,7 @@ def revise(task: str, content: str, eval_result: dict, _trace=None) -> str:
     response = ollama.chat(
         model=PRODUCER_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.1, "think": False},
+        options={"temperature": 0.1, "think": False, "num_predict": 4096},
     )
     if _trace is not None:
         _trace.log_usage(response, stage="wiggum_revise")
@@ -713,7 +713,7 @@ def loop_annotate(
         rev_response = ollama.chat(
             model=producer_model,
             messages=[{"role": "user", "content": revise_prompt}],
-            options={"temperature": 0.1, "think": False},
+            options={"temperature": 0.1, "think": False, "num_predict": 4096},
         )
         _local_trace.log_usage(rev_response, stage="wiggum_revise")
         revised = rev_response["message"]["content"].strip()

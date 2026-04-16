@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-updated: 2026-04-15
+updated: 2026-04-16
 tags: [roadmap, design, architecture]
 ---
 
@@ -47,6 +47,37 @@ The gap list replaces generic topic queries in `plan_query()`. This addresses tw
 
 **Effort:** medium — one new LLM call in planner.py, minor changes to gather_research() and synthesize() prompt assembly.
 
+
+---
+
+---
+
+### Automated financial analyst skill family
+**Source:** architecture discussion (2026-04-16)
+**Status:** Designed, not implemented
+
+Build a `/finance` skill family that integrates with the existing autoresearch → wiggum → panel stack for domain-specific financial analysis.
+
+**Files to create:**
+- `finance_skill.py` — standalone `/finance` pipeline modeled on `lit_review_skill.py`: ingest (yfinance/EDGAR/FRED) → compute (ratios, DCF via `run_python` tool loop) → research (`gather_research()`) → synthesize → evaluate → render
+- `finance_panel.py` — 3 domain personas: Fundamental Analyst (valuation accuracy), Risk Manager (scenario coverage), Compliance Reviewer (source attribution)
+- `templates/equity-report.md.j2`, `sector-comparison.md.j2`, `risk-assessment.md.j2`
+
+**REGISTRY entries in `skills.py`:**
+- `finance-context` (hook: `pre_synthesis`) — auto-triggered on financial tasks; injects prompt requiring data-backed claims with dates and sources
+- `finance-eval` (hook: `post_wiggum`) — auto-triggers finance panel after wiggum
+
+**Autoresearch integration:** add `T_FIN_A` / `T_FIN_B` to `eval_suite.py`; run `autoresearch.py --tasks T_FIN_A,T_FIN_B` to optimize financial synthesis instruction.
+
+**Usage:**
+```bash
+python orchestrator.py "/finance AAPL MSFT --period 1y save to analysis.md"
+python orchestrator.py "/cite /deep /finance NVDA DCF valuation save to nvda_dcf.md"
+```
+
+**New dependency:** `yfinance`, `pandas` (ingest/compute stage). Everything else reuses existing harness components.
+
+**Effort:** high — new standalone skill pipeline, panel personas, Jinja2 templates, rubric tuning, eval tasks.
 
 ---
 

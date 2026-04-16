@@ -164,8 +164,12 @@ def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
     # num_ctx is a server-startup concern for vLLM (--max-model-len), not per-request
     if "think" in options:
         # Qwen3 thinking mode: translate Ollama options={"think": bool} →
-        # vLLM extra_body chat_template_kwargs (supported since vLLM 0.6.4)
-        oai_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(options["think"])}}
+        # vLLM extra_body chat_template_kwargs (supported since vLLM 0.6.4).
+        # Only apply for Qwen3/QwQ models — other models (gemma4, etc.) don't
+        # support this parameter and may return empty content if it's sent.
+        vllm_name = _resolve_model(model).lower()
+        if any(k in vllm_name for k in ("qwen", "qwq")):
+            oai_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(options["think"])}}
 
     vllm_model = _resolve_model(model)
 
