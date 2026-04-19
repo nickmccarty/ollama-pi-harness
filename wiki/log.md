@@ -31,6 +31,28 @@ Reviewed Microsoft MagenticOne vs harness architecture. Key borrow identified: c
 
 ## [2026-04-12] ingest | wiki additions — agentic-patterns.md, roadmap.md created; synthesis-instructions.md + autoresearch_program.md updated with sessions 2+3 findings
 
+## [2026-04-19] build | Session 12 — Qwen3.6 MoE integration, convergence monitoring, self-knowledge skills, CoT preservation
+
+Eight harness features shipped:
+
+1. **Qwen3.6-35B-A3B-AWQ producer** (`inference.py`, `agent.py`, `Modelfile.qwen3.6`) — MoE model (35B params, 3B activated) served via vLLM 0.19.1 with `awq_marlin` quantization. `think=False` promoted to top-level kwarg for Ollama; `<think>` tag parser added to `_OllamaMessage` for vLLM runs without `--reasoning-parser`. `MODEL` now reads from `HARNESS_PRODUCER_MODEL` env var. `_synth_options()` disables thinking mode for synthesis to prevent token budget starvation.
+
+2. **`/introspect` skill** (`skills.py`, `agent.py`, `context/`) — standalone handler that reads `context/*.md` files + memory store and produces a self-description without web search. Fixes photosynthesis bug where agent searched the web for self-referential tasks.
+
+3. **`/contextualize` skill** (`skills.py`, `agent.py`) — auto-activated on self-referential tasks (regex: "yourself", "what can you", "describe the agent", etc.). Injects context files into synthesis prompt, sets `_skip_research=True`.
+
+4. **Context files** (`context/identity.md`, `context/skills.md`, `context/function.md`) — canonical self-description: model stack, philosophy, skill registry, pipeline flow, env vars. Used by `/introspect` and `/contextualize`.
+
+5. **Supervisor / convergence monitor** (`supervisor.py`) — four signals: wiggum score variance, output size CV, search utilization, content similarity. Threshold warnings + intervention recommendations. CLI: `python supervisor.py --n 20 --json --task-type research`.
+
+6. **ε-greedy novelty gate** (`agent.py`, `NOVELTY_EPSILON=0.15`) — 15% pass-through for sub-threshold search rounds. Prevents search utilization collapse identified by supervisor (first live run: search_utilization WARN at 0.267).
+
+7. **Eval suite OOD expansion** (`eval_suite.py`) — three new task types: T_F (introspect/self-description), T_G (file-based autoresearch_program.md), T_H (off-domain nutrient synergies). Total: 9 tasks (was 6). Criteria: `mentions_skill_names()`, `no_hallucinated_skills()`, `has_h1_heading()`.
+
+8. **CoT preservation + model comparison bench** (`logger.py`, `agent.py`, `bench_model_compare.py`) — `synth_cot: []` field in runs.jsonl stores full thinking text from each synthesis call (not just char count). `bench_model_compare.py` compares test model vs historical baseline: score, pass rate, output KB, duration, thinking chars, CoT length, Δ score.
+
+**env vars added:** `HARNESS_PRODUCER_MODEL`
+
 ## [2026-04-15] build | Session 11 — vLLM backend, OCR cascade, prior knowledge pass, wiggum cycling detection
 
 Seven harness features shipped:

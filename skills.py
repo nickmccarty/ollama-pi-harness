@@ -149,7 +149,55 @@ REGISTRY: dict[str, dict] = {
         "auto":        None,   # explicit only
     },
 
+    "introspect": {
+        "description": (
+            "Standalone: answer questions about the agent from memory + context/ files; "
+            "no web search. Use for self-referential tasks like 'describe your skillset'."
+        ),
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,   # explicit only — user must deliberately invoke self-reflection
+    },
+
+    "contextualize": {
+        "description": (
+            "Pre-research: inject agent self-knowledge (context/ files) into any "
+            "self-referential task; skips web search when context files are present."
+        ),
+        "hook":        "pre_research",
+        "prompt":      None,
+        "auto": lambda task, plan: bool(re.search(
+            r"\byour(?:self)?\b"
+            r"|\bwhat (?:can|are) you\b"
+            r"|\bdescribe (?:you\b|the agent\b|the harness\b)"
+            r"|\babout (?:you\b|the agent\b|the harness\b)"
+            r"|\bagent['\u2019s]?\s+(?:capabilities?|skills?|functions?|role)\b"
+            r"|\bthe harness\b",
+            task, re.IGNORECASE,
+        )),
+    },
+
 }
+
+# ---------------------------------------------------------------------------
+# Context file loader — used by /introspect and /contextualize
+# ---------------------------------------------------------------------------
+
+def load_context_files() -> str:
+    """Read all .md files from the context/ directory next to this file.
+    Returns a single concatenated string ready for injection as file_context."""
+    from pathlib import Path
+    context_dir = Path(__file__).parent / "context"
+    if not context_dir.exists():
+        return ""
+    parts = []
+    for f in sorted(context_dir.glob("*.md")):
+        try:
+            parts.append(f"## {f.stem}\n\n{f.read_text(encoding='utf-8')}")
+        except Exception:
+            pass
+    return "\n\n---\n\n".join(parts)
+
 
 # Aliases — resolved during parse
 _ALIASES = {"annotated-abstract": "annotate"}

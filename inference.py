@@ -31,6 +31,7 @@ prompt_eval_duration, message.thinking) via getattr.
 
 import json
 import os
+import re
 import time
 
 _BACKEND      = os.environ.get("INFERENCE_BACKEND", "ollama").lower()
@@ -43,11 +44,15 @@ _VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
 # vLLM serves models by their HF repo ID (or the path you pass at startup).
 # Add entries here OR override at runtime via VLLM_MODEL_MAP (JSON).
 _MODEL_MAP: dict[str, str] = {
+    "pi-qwen3.6":                     "QuantTrio/Qwen3.6-35B-A3B-AWQ",
+    "qwen3.6:35b-a3b":                "QuantTrio/Qwen3.6-35B-A3B-AWQ",
     "pi-qwen-32b":                    "Qwen/Qwen2.5-32B-Instruct",
     "pi-qwen":                        "Qwen/Qwen2.5-7B-Instruct",
     "qwen2.5:32b-instruct-q4_K_M":   "Qwen/Qwen2.5-32B-Instruct",
     "qwen2.5:7b-instruct":            "Qwen/Qwen2.5-7B-Instruct",
     "Qwen3-Coder:30b":                "Qwen/QwQ-32B",        # closest served equivalent
+    "gemma4:latest":                  "google/gemma-4-9b-it",
+    "gemma4:26b":                     "google/gemma-4-26b-it",
     "glm4:9b":                        "THUDM/glm-4-9b-chat",
     "llama3.2-vision":                "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "llama3.2:3b":                    "meta-llama/Llama-3.2-3B-Instruct",
@@ -84,10 +89,18 @@ class _OllamaMessage:
     access used throughout the harness (response["message"]["content"]).
     """
     def __init__(self, oai_message):
-        self.role    = getattr(oai_message, "role", "assistant") or "assistant"
-        self.content = getattr(oai_message, "content", "") or ""
-        # vLLM with Qwen3 --enable-reasoning exposes reasoning_content here
-        self.thinking = getattr(oai_message, "reasoning_content", None) or ""
+        self.role = getattr(oai_message, "role", "assistant") or "assistant"
+        raw = getattr(oai_message, "content", "") or ""
+        # vLLM with reasoning parser populates reasoning_content and strips tags from content.
+        # Without the parser (newer vLLM dropped the flag), tags appear inline — parse manually.
+        reasoning = getattr(oai_message, "reasoning_content", None) or ""
+        if not reasoning:
+            m = re.search(r"<think>(.*?)</think>", raw, re.DOTALL)
+            if m:
+                reasoning = m.group(1).strip()
+                raw = raw[raw.rfind("</think>") + len("</think>"):].strip()
+        self.thinking = reasoning
+        self.content  = raw
 
     # dict-style fallback for legacy code: response["message"]["content"]
     def __getitem__(self, key):
@@ -145,6 +158,13 @@ class _OllamaResponse:
 
 def _chat_ollama(model: str, messages: list, **kwargs) -> object:
     import ollama as _ollama
+    # Ollama expects `think` as a top-level kwarg, not inside options.
+    # Extract it from options dict if present and promote it.
+    options = kwargs.get("options") or {}
+    if "think" in options:
+        options = dict(options)
+        kwargs["think"] = options.pop("think")
+        kwargs["options"] = options
     return _ollama.chat(model=model, messages=messages, **kwargs)
 
 
@@ -162,14 +182,20 @@ def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
     if "num_predict" in options:
         oai_kwargs["max_tokens"] = options["num_predict"]
     # num_ctx is a server-startup concern for vLLM (--max-model-len), not per-request
-    if "think" in options:
-        # Qwen3 thinking mode: translate Ollama options={"think": bool} →
-        # vLLM extra_body chat_template_kwargs (supported since vLLM 0.6.4).
-        # Only apply for Qwen3/QwQ models — other models (gemma4, etc.) don't
-        # support this parameter and may return empty content if it's sent.
+    if "think" in options or "preserve_thinking" in options:
+        # Qwen3/Qwen3.6 thinking mode options — only apply for Qwen/QwQ models.
+        # Other models (gemma4, etc.) don't support these and may return empty content.
         vllm_name = _resolve_model(model).lower()
         if any(k in vllm_name for k in ("qwen", "qwq")):
-            oai_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(options["think"])}}
+            chat_tmpl: dict = {}
+            if "think" in options:
+                chat_tmpl["enable_thinking"] = bool(options["think"])
+            if "preserve_thinking" in options:
+                # Qwen3.6: retain reasoning traces from prior messages across turns.
+                # Reduces redundant re-reasoning in multi-turn agent loops.
+                chat_tmpl["preserve_thinking"] = bool(options["preserve_thinking"])
+            if chat_tmpl:
+                oai_kwargs["extra_body"] = {"chat_template_kwargs": chat_tmpl}
 
     vllm_model = _resolve_model(model)
 

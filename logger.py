@@ -83,6 +83,13 @@ class RunTrace:
             "output_bytes":         None,
             "count_check_retry":    False,
 
+            # Chain-of-thought preservation
+            # Stores the raw thinking text emitted by the producer model during
+            # each synthesis call. One entry per call (initial synth + count-retry).
+            # thinking_chars per stage is already tracked in tokens_by_stage; this
+            # field preserves the actual text for offline CoT quality analysis.
+            "synth_cot":            [],
+
             # Wiggum
             "wiggum_rounds":        0,
             "wiggum_scores":        [],
@@ -223,6 +230,11 @@ class RunTrace:
 
     def log_vision(self, image_paths: list[str]):
         self.data["vision_images"] = image_paths
+
+    def log_synth_cot(self, thinking: str):
+        """Append one synthesis thinking block. Called once per synthesize() invocation."""
+        if thinking:
+            self.data["synth_cot"].append(thinking)
 
     def log_count_retry(self):
         self.data["count_check_retry"] = True

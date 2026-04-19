@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-updated: 2026-04-16
+updated: 2026-04-19
 tags: [roadmap, design, architecture]
 ---
 
@@ -126,3 +126,9 @@ Pending clean ablation results (Priority 5) to determine if more search rounds a
 | Evaluator diversity comparison script | 2026-04-15 | eval_compare_evaluators.py |
 | vLLM parallelism benchmark | 2026-04-15 | bench_vllm_parallel.py; --ollama-only / --vllm-only flags |
 | Synthesis epilogue stripping | 2026-04-15 | clean_synthesis_output: --- + meta-commentary pattern |
+| Qwen3.6-35B-A3B-AWQ producer | 2026-04-19 | vLLM 0.19.1 + awq_marlin; think=False synthesis; <think> tag parser |
+| /introspect + /contextualize skills | 2026-04-19 | context/*.md files; fixes self-referential task hallucination |
+| Supervisor / convergence monitor | 2026-04-19 | supervisor.py: 4 signals, thresholds, intervention recommendations |
+| ε-greedy novelty gate | 2026-04-19 | NOVELTY_EPSILON=0.15; prevents search utilization collapse |
+| Eval suite OOD expansion (T_F/T_G/T_H) | 2026-04-19 | 9 tasks total; introspect, file-based, off-domain |
+| CoT preservation + model comparison bench | 2026-04-19 | synth_cot in runs.jsonl; bench_model_compare.py |

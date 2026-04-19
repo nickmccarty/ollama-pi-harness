@@ -131,6 +131,40 @@ def no_annotate_artifacts():
     return check
 
 
+def mentions_skill_names(required: list[str]):
+    """Output must mention at least N of the required real skill names."""
+    def check(content: str):
+        found = [s for s in required if s in content]
+        ok = len(found) >= max(1, len(required) // 2)
+        return ok, f"found {len(found)}/{len(required)} required skills: {found}"
+    check.__name__ = "mentions_skill_names"
+    return check
+
+
+def no_hallucinated_skills():
+    """Output must not contain fabricated skill names not in the real registry."""
+    FAKE = [
+        "/knowledge_graph", "/research", "/visualize", "/translate",
+        "/validate", "/compress", "/enumerate", "/summarize",
+        "/writetofile", "/writetodisk", "/writetolog", "/writetotag",
+        "/writetotemplate", "/writetotext", "/writetotitle", "/writetotopic",
+    ]
+    def check(content: str):
+        found = [f for f in FAKE if f in content.lower()]
+        return len(found) == 0, ("clean" if not found else f"hallucinated skills: {found}")
+    check.__name__ = "no_hallucinated_skills"
+    return check
+
+
+def has_h1_heading():
+    """Output must start with a # heading."""
+    def check(content: str):
+        ok = bool(re.search(r'^#\s+\S', content.strip(), re.MULTILINE))
+        return ok, ("has H1 heading" if ok else "missing H1 heading")
+    check.__name__ = "has_h1_heading"
+    return check
+
+
 # ---------------------------------------------------------------------------
 # Task registry
 # ---------------------------------------------------------------------------
@@ -223,6 +257,51 @@ SUITE = [
             min_bytes(800),
             min_lines(15),
             min_sections(3),
+            no_placeholders(),
+            has_impl_notes(),
+            no_file_path_refs(),
+        ],
+    },
+    {
+        "id": "T_F",
+        "desc": "introspect: agent skillset (no web search)",
+        "task": f"/introspect Describe the agent's skill registry and pipeline stages and save to {BASE}/eval-introspect.md",
+        "output": f"{BASE}/eval-introspect.md",
+        "kb_file": None,
+        "criteria": [
+            min_bytes(400),
+            min_lines(10),
+            has_h1_heading(),
+            mentions_skill_names(["/annotate", "/cite", "/deep", "/kg", "/panel",
+                                   "/recall", "/review", "/email", "/lit-review"]),
+            no_hallucinated_skills(),
+            no_placeholders(),
+        ],
+    },
+    {
+        "id": "T_G",
+        "desc": "file-based synthesis: autoresearch program",
+        "task": f"Read {BASE}/autoresearch_program.md and summarize the autoresearch program's design, metric, and keep rule, save to {BASE}/eval-autoresearch-summary.md",
+        "output": f"{BASE}/eval-autoresearch-summary.md",
+        "kb_file": None,
+        "criteria": [
+            min_bytes(400),
+            min_lines(10),
+            min_sections(2),
+            no_placeholders(),
+            no_file_path_refs(),
+        ],
+    },
+    {
+        "id": "T_H",
+        "desc": "OOD topic: top 5, non-LLM domain",
+        "task": f"Search for the top 5 nutrient synergies that support cognitive performance and save to {BASE}/eval-nutrient-synergies.md",
+        "output": f"{BASE}/eval-nutrient-synergies.md",
+        "kb_file": None,
+        "criteria": [
+            min_bytes(600),
+            min_lines(10),
+            exact_sections(5),
             no_placeholders(),
             has_impl_notes(),
             no_file_path_refs(),

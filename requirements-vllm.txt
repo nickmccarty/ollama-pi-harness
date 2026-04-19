@@ -9,23 +9,27 @@
 # =============================================================================
 #
 # Pull the pinned release image:
-#   docker pull vllm/vllm-openai:v0.6.6
+#   docker pull vllm/vllm-openai:v0.19.0
 #
-# Serve pi-qwen-32b (producer):
+# Serve pi-qwen3.6 (Qwen3.6-35B-A3B AWQ, ~17GB VRAM):
 #   docker run --gpus all --ipc=host -p 8000:8000 \
 #     -v ~/.cache/huggingface:/root/.cache/huggingface \
-#     vllm/vllm-openai:v0.6.6 \
-#     --model Qwen/Qwen2.5-32B-Instruct \
-#     --dtype half \
+#     vllm/vllm-openai:v0.19.0 \
+#     --model QuantTrio/Qwen3.6-35B-A3B-AWQ \
+#     --quantization awq_marlin \
+#     --dtype float16 \
 #     --max-model-len 32768 \
+#     --reasoning-parser qwen3 \
+#     --enable-auto-tool-choice \
+#     --tool-call-parser qwen3_coder \
 #     --enable-prefix-caching \
-#     --gpu-memory-utilization 0.75
+#     --gpu-memory-utilization 0.90
 #
 # Serve evaluator alongside (second container, second port):
 #   docker run --gpus all --ipc=host -p 8001:8000 \
 #     -v ~/.cache/huggingface:/root/.cache/huggingface \
-#     vllm/vllm-openai:v0.6.6 \
-#     --model Qwen/Qwen2.5-Coder-32B-Instruct \
+#     vllm/vllm-openai:v0.19.0 \
+#     --model Qwen/Qwen2.5-7B-Instruct \
 #     --dtype half \
 #     --max-model-len 16384 \
 #     --enable-prefix-caching \
@@ -51,16 +55,22 @@
 # =============================================================================
 
 # Core serving stack
-vllm==0.7.3
-ray==2.38.0                  # vLLM's distributed backend; pin tightly
+# vLLM 0.19+ recommends uv for installation (avoids pip wheel build issues on CUDA).
+# DO NOT pip install vllm directly — use the uv command below.
+#
+# Install (WSL2, CUDA 12.x):
+#   pip install uv
+#   uv pip install vllm --torch-backend=auto   # pulls vllm==0.19.x + matching torch
+#
+# Then pin transformers (vLLM 0.19 ships with 5.x; 5.5.4 tested with Qwen3.6):
+#   pip install "transformers==5.5.4"
+#
+# flashinfer and triton are now bundled with vLLM — do NOT pin separately.
+# ray is only needed for multi-GPU tensor-parallel serving; omit for single-GPU.
 
-# transformers 4.50+ removes all_special_tokens_extended from Qwen2Tokenizer,
-# which breaks vLLM 0.7.x tokenizer init. Pin below 4.50.
-transformers==4.49.0
-
-# CUDA kernels — must match the vLLM release exactly
-flashinfer-python==0.1.6     # attention kernels; breaking API changes between minor versions
-triton==3.0.0                # OpenAI Triton compiler; vLLM 0.6.x requires 3.0.x
+# Listed for reference / pip-compile tooling — actual install uses uv above
+vllm==0.19.0
+transformers==5.5.4
 
 # OpenAI client — used by inference.py to talk to vLLM's /v1 endpoint
 # Already in main requirements.txt; listed here for the isolated venv case
@@ -82,9 +92,10 @@ openai==2.31.0
 # =============================================================================
 # Known version constraints
 # =============================================================================
-# vLLM 0.7+ requires CUDA 12.x and does not support native Windows pip installs
+# vLLM 0.8+ requires CUDA 12.x and does not support native Windows pip installs
 # (platform check + MAX_PATH failures during wheel build). Use WSL2 or Docker.
-# Tested: vllm==0.7.3 + torch==2.6.0+cu124 in WSL2 Ubuntu 24.04 on RTX 5000 Ada.
+# Tested: vllm==0.19.0 + torch==2.6.0+cu124 in WSL2 Ubuntu 24.04 on RTX 5000 Ada.
+# Qwen3.6-35B-A3B-AWQ (awq_marlin) fits in ~17-18GB VRAM at gpu-memory-utilization 0.90.
 # Track: https://github.com/vllm-project/vllm/releases
 #
 # Security incident context (2024 supply-chain): unconstrained `pip install vllm`

@@ -17,6 +17,7 @@ Environment:
 import sys
 import re
 import os
+import random
 import subprocess
 import textwrap
 import warnings
@@ -135,8 +136,24 @@ try:
 except ImportError:
     MARKITDOWN_AVAILABLE = False
 
-MODEL = "pi-qwen-32b"
+MODEL = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen3.6")
 COMPRESS_MODEL = os.environ.get("COMPRESS_MODEL", MODEL)  # lighter model for compress_knowledge / plan_query
+
+# Models that think by default and require think=False to produce immediate output.
+# Thinking mode consumes num_predict budget before the response starts, which
+# stalls synthesis on the default 8192 token limit.
+_THINKING_MODELS = {"qwen3", "qwq"}
+
+def _is_thinking_model(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    return any(tag in name for tag in _THINKING_MODELS)
+
+def _synth_options(producer_model: str) -> dict:
+    """Return ollama options for a synthesis call, disabling thinking on models that need it."""
+    opts = {"temperature": 0.1, "num_predict": 8192}
+    if _is_thinking_model(producer_model):
+        opts["think"] = False
+    return opts
 
 # ---------------------------------------------------------------------------
 # Synthesis instruction — the text appended to every synthesis prompt.
@@ -159,6 +176,7 @@ SEARCHES_PER_TASK = 2        # minimum searches before novelty gating kicks in
 SEARCH_QUALITY_FLOOR = 1800  # total merged chars — below this, run one more search
 MAX_SEARCH_ROUNDS   = 5      # hard cap regardless of novelty
 NOVELTY_THRESHOLD   = 3      # 0–10; stop if new results score below this
+NOVELTY_EPSILON     = 0.15   # ε-greedy: pass sub-threshold results through 15% of the time
 KNOWLEDGE_MAX_CHARS = 1500   # cap on rolling knowledge state fed to novelty scoring
 MAX_RESULTS_PER_SEARCH = 5
 PYTHON_TOOL_ROUNDS = 3       # max rounds in the run_python tool loop
@@ -543,8 +561,11 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
             gate_label = " (deep — no gate)" if force_deep else ""
             print(f"  [novelty] round {round_num}: {novelty}/10{gate_label}")
             if novelty < novelty_gate:
-                print(f"  [novelty] saturation — stopping search")
-                break
+                if random.random() < NOVELTY_EPSILON:
+                    print(f"  [novelty] saturation but ε-greedy pass-through — continuing")
+                else:
+                    print(f"  [novelty] saturation — stopping search")
+                    break
         elif round_num > 1:
             # Log novelty for rounds inside the minimum window (informational only)
             novelty = assess_novelty(results, knowledge_state)
@@ -631,10 +652,11 @@ def synthesize(task: str, research_context: str, vision_context: str = "", file_
     response = ollama.chat(
         model=producer_model,
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.1, "num_predict": 8192},
+        options=_synth_options(producer_model),
     )
     if trace is not None:
         trace.log_usage(response, stage="synth")
+        trace.log_synth_cot(getattr(response.message, "thinking", "") or "")
     return response["message"].get("content", "")
 
 
@@ -728,10 +750,11 @@ def synthesize_with_count(task: str, research_context: str, expected_count: int,
     response = ollama.chat(
         model=producer_model,
         messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.1, "num_predict": 8192},
+        options=_synth_options(producer_model),
     )
     if trace is not None:
         trace.log_usage(response, stage="synth_count")
+        trace.log_synth_cot(getattr(response.message, "thinking", "") or "")
     return response["message"]["content"].strip()
 
 
@@ -1047,6 +1070,48 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             print(f"[recall] {len(hits)} result(s) for {query!r}")
             trace.finish("PASS")
 
+        def _handle_introspect():
+            print("\n[skill:introspect] standalone mode — answering from memory + context files...")
+            trace.data["task_type"] = "introspect"
+            from skills import load_context_files
+            ctx_files = load_context_files()
+            if not ctx_files:
+                print("  [introspect] no context files found in context/ — answering from memory only")
+            else:
+                print(f"  [introspect] loaded {len(ctx_files)} chars from context/")
+            mem_ctx = memory.get_context(task)
+            if mem_ctx:
+                print(f"  [introspect] {mem_ctx.count('**[')} memory observation(s) retrieved")
+            else:
+                print("  [introspect] no relevant memory observations")
+            combined = "\n\n".join(filter(None, [ctx_files, mem_ctx]))
+            # Custom prompt — SYNTH_INSTRUCTION is for research docs and causes hallucination here.
+            # num_predict=2000 is enough for any self-description and keeps vLLM context headroom.
+            prompt = (
+                f"Task: {task}\n\n"
+                f"Agent context (use ONLY this — do not invent capabilities not listed):\n\n"
+                f"{combined}\n\n"
+                "Answer the task accurately and concisely using only the context above. "
+                "Format as clear markdown starting with a # heading. "
+                "Do not fabricate skills, models, or capabilities not described in the context."
+            )
+            with trace.span("introspect", model=producer_model):
+                response = ollama.chat(
+                    model=producer_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0.1, "num_predict": 2000, "num_ctx": 16384, "repeat_penalty": 1.1},
+                )
+            trace.log_usage(response, stage="introspect")
+            content = clean_synthesis_output(response["message"].get("content", "").strip())
+            if not content:
+                print("[error] introspect returned empty output")
+                trace.finish("ERROR")
+                return
+            print("\n" + content + "\n")
+            write_output(content, path, trace)
+            trace.finish("PASS")
+            _store_memory(memory, task, "introspect", trace.data, content)
+
         def _handle_queue():
             import urllib.request as _urllib
             import json as _json
@@ -1087,6 +1152,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "lit-review": _handle_lit_review,
             "recall":     _handle_recall,
             "queue":      _handle_queue,
+            "introspect": _handle_introspect,
         }
 
         for _skill in explicit_skills:
@@ -1141,8 +1207,24 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         force_deep = "deep" in active_skills
         if force_deep:
             print("  [skill:deep] novelty gate disabled — running all search rounds")
-        if has_url_content:
-            print("  [fetch_url] document already fetched — skipping web search")
+
+        # Contextualize — inject agent self-knowledge and skip web search
+        _skip_research = False
+        if "contextualize" in active_skills:
+            from skills import load_context_files
+            _ctx_content = load_context_files()
+            if _ctx_content:
+                file_context = (file_context + "\n\n" + _ctx_content).strip() if file_context else _ctx_content
+                _skip_research = True
+                print(f"  [skill:contextualize] injected {len(_ctx_content)} chars of agent context; skipping web search")
+            else:
+                print("  [skill:contextualize] no context files found — falling back to web search")
+
+        if has_url_content or _skip_research:
+            if not has_url_content:
+                print("  [skill:contextualize] web search skipped")
+            else:
+                print("  [fetch_url] document already fetched — skipping web search")
             context = ""
         else:
             with trace.span("gather_research"):
