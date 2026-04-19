@@ -227,6 +227,7 @@ def build_payload(runs):
             or (r.get("wiggum_rounds") or 0) > 0
             or (r.get("output_bytes") or 0) > 0
         )
+    dag_runs = []
     recent = []
     for r in [x for x in runs if _is_substantive(x)][-50:]:
         # Wiggum dims — first round's dimension scores
@@ -303,7 +304,59 @@ def build_payload(runs):
             "email_subject_prompt": (r.get("tool_calls") or [{}])[0].get("query") if task_type == "email_draft" else None,
             "email_body_prompt":    (r.get("tool_calls") or [{}, {}])[1].get("query") if task_type == "email_draft" and len(r.get("tool_calls") or []) > 1 else None,
         })
+
+        # --- DAG run (richer pipeline record) ---
+        raw_tool_calls = r.get("tool_calls") or []
+        dag_tool_calls = [
+            {
+                "name":         tc.get("name") or tc.get("tool") or "search",
+                "query":        tc.get("query") or tc.get("input") or "",
+                "result_chars": tc.get("result_chars") or len(str(tc.get("result") or "")),
+            }
+            for tc in raw_tool_calls
+        ]
+
+        raw_cot = r.get("synth_cot") or []
+        synth_cot_preview = [(c[:800] if isinstance(c, str) else str(c)[:800]) for c in raw_cot]
+
+        dag_runs.append({
+            # --- all recent_run fields ---
+            "ts":       fmt_ts(r.get("timestamp")),
+            "task":     task_label,
+            "task_full": task_raw,
+            "model":    r.get("producer_model") or "",
+            "type":     task_type,
+            "score":    first_wiggum_score(r),
+            "rounds":   r.get("wiggum_rounds"),
+            "duration": round((r.get("run_duration_s") or 0) / 60, 1),
+            "tokens_in":  r.get("input_tokens") or 0,
+            "tokens_out": r.get("output_tokens") or 0,
+            "final":    r.get("final") or "?",
+            "searches": r.get("search_rounds") or len(raw_tool_calls),
+            "memory_hits":       r.get("memory_hits") or 0,
+            "dims":              dims,
+            "issues":            first_issues,
+            "feedback":          first_feedback,
+            "score_trajectory":  score_trajectory,
+            "count_check_retry": bool(r.get("count_check_retry")),
+            "novelty_scores":    r.get("novelty_scores") or [],
+            "output_bytes":      r.get("output_bytes") or 0,
+            "output_lines":      r.get("output_lines") or 0,
+            # --- DAG-specific fields ---
+            "tool_calls":           dag_tool_calls,
+            "tokens_by_stage":      r.get("tokens_by_stage") or {},
+            "wiggum_eval_log":      r.get("wiggum_eval_log") or [],
+            "plan":                 r.get("plan"),
+            "synth_cot":            synth_cot_preview,
+            "final_content_preview": (r.get("final_content") or "")[:400],
+            "run_duration_s":       r.get("run_duration_s") or 0,
+            "orchestrated":         bool(r.get("orchestrated")),
+            "subtask_count":        r.get("subtask_count") or 0,
+            "output_path":          r.get("output_path") or "",
+        })
+
     recent.reverse()
+    dag_runs.reverse()
 
     cost = build_cost_data(runs)
 
@@ -331,6 +384,7 @@ def build_payload(runs):
         "model_split":   {"names": model_names, "values": model_values},
         "hour_dist":     {"labels": hour_labels, "values": hour_values},
         "recent_runs":   recent,
+        "dag_runs":      dag_runs,
         "cost":          cost,
     }
 
