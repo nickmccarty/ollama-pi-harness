@@ -696,6 +696,88 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   @media (max-width: 900px) {
     .col-2, .col-3 { grid-template-columns: 1fr; }
   }
+
+  /* ── Run Explorer (DAG) ─────────────────────────────────────────── */
+  #run-explorer {
+    display: flex; height: 560px; gap: 0;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin-bottom: 16px;
+  }
+  #run-list-panel {
+    width: 230px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    overflow-y: auto; background: var(--bg);
+  }
+  #run-list-panel h3 {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted);
+    padding: 10px 12px 6px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--bg); margin: 0;
+  }
+  .rli {
+    padding: 8px 12px; cursor: pointer;
+    border-bottom: 1px solid rgba(48,54,61,.45);
+    border-left: 3px solid transparent;
+    transition: background .1s, border-color .1s;
+  }
+  .rli:hover { background: rgba(255,255,255,.03); }
+  .rli.sel { border-left-color: var(--blue); background: rgba(79,142,247,.07); }
+  .rli-ts   { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+  .rli-task { font-size: 11px; color: var(--text); overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+  .rli-foot { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+  .rli-score{ font-size: 10px; color: var(--muted); }
+
+  #dag-canvas-panel {
+    flex: 1; overflow: auto; background: #080d12; position: relative;
+  }
+  #dag-svg { display: block; }
+
+  @keyframes dash-flow { to { stroke-dashoffset: -22; } }
+  .dag-edge { animation: dash-flow 1.6s linear infinite; }
+
+  .dag-node { cursor: pointer; }
+  .dag-node:hover .node-body { filter: brightness(1.15); }
+  .dag-node.sel .node-body  { filter: brightness(1.3); }
+
+  #node-inspector {
+    width: 300px; flex-shrink: 0;
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    background: var(--card); overflow: hidden;
+  }
+  #node-inspector.hidden { display: none; }
+  #insp-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px; border-bottom: 1px solid var(--border);
+    background: var(--bg); flex-shrink: 0;
+  }
+  #insp-type {
+    font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .1em; color: var(--muted);
+  }
+  #insp-title { flex: 1; font-size: 12px; font-weight: 600; color: var(--text); }
+  #insp-close {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px;
+  }
+  #insp-close:hover { color: var(--text); }
+  #insp-body { flex: 1; overflow-y: auto; padding: 12px; font-size: 12px; }
+  .insp-row { margin-bottom: 10px; }
+  .insp-label { font-size: 10px; font-weight: 700; text-transform: uppercase;
+                letter-spacing: .06em; color: var(--muted); margin-bottom: 3px; }
+  .insp-val { color: var(--text); line-height: 1.45; word-break: break-word; }
+  .insp-pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 7px 9px; font-family: monospace; font-size: 10.5px;
+    line-height: 1.5; white-space: pre-wrap; max-height: 140px; overflow-y: auto;
+    color: var(--muted);
+  }
+  .insp-dim { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .insp-dim-lbl { width: 80px; font-size: 10px; color: var(--muted); flex-shrink: 0; }
+  .insp-dim-bar { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .insp-dim-fill { height: 100%; border-radius: 3px; }
+  .insp-dim-val { width: 18px; font-size: 10px; color: var(--text); text-align: right; flex-shrink: 0; }
 </style>
 </head>
 <body>
@@ -838,14 +920,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<h2 class="section-heading">Runs</h2>
+<h2 class="section-heading">Run Explorer</h2>
 
-<div class="chart-grid col-1">
-  <div class="card">
-    <div class="card-title">Recent runs (last 30)</div>
-    <div class="table-wrap">
-      <table id="runsTable"></table>
+<div id="run-explorer">
+  <div id="run-list-panel">
+    <h3>Recent runs</h3>
+    <div id="run-list-inner"></div>
+  </div>
+  <div id="dag-canvas-panel">
+    <svg id="dag-svg"></svg>
+  </div>
+  <div id="node-inspector" class="hidden">
+    <div id="insp-header">
+      <span id="insp-type"></span>
+      <span id="insp-title"></span>
+      <button id="insp-close" title="close">&#x2715;</button>
     </div>
+    <div id="insp-body"></div>
   </div>
 </div>
 
@@ -1173,11 +1264,8 @@ new Chart($('tpsTrendChart'), {
 });
 
 // ---------------------------------------------------------------------------
-// Recent runs table — with expandable detail rows
+// Run Explorer — DAG-style pipeline visualiser
 // ---------------------------------------------------------------------------
-const tbl = $('runsTable');
-const cols = ['','Timestamp','Task','Model','Type','Score','Rounds','Duration','In tok','Out tok','Searches','Result'];
-tbl.innerHTML = `<tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>`;
 
 const DIM_COLORS = {
   relevance:    '#4f8ef7',
@@ -1187,281 +1275,352 @@ const DIM_COLORS = {
   structure:    '#f472b6',
 };
 
-function buildDetailInner(r) {
-  const cards = [];
+// DAG constants
+const NW = 150, NH = 58, HGAP = 58, VGAP = 14, PAD = 24;
 
-  // Card: Task (full text)
-  cards.push(`
-    <div class="detail-card" style="grid-column: 1 / -1">
-      <div class="detail-card-title">Task</div>
-      <div class="task-full">${(r.task_full || r.task).replace(/</g,'&lt;')}</div>
-    </div>`);
+const NODE_CFG = {
+  task:      { color: '#4f8ef7', label: 'TASK'      },
+  memory:    { color: '#a78bfa', label: 'MEMORY'    },
+  plan:      { color: '#38bdf8', label: 'PLAN'      },
+  search:    { color: '#fb923c', label: 'SEARCH'    },
+  synthesis: { color: '#22d3ee', label: 'SYNTHESIS' },
+  wiggum:    { color: '#e3b341', label: 'EVAL'      },
+  output:    { color: '#3fb950', label: 'OUTPUT'    },
+};
 
-  // Card: Memory
-  const memColor = r.memory_hits > 0 ? 'var(--blue)' : 'var(--muted)';
-  cards.push(`
-    <div class="detail-card">
-      <div class="detail-card-title">Memory</div>
-      <div style="font-size:22px;font-weight:700;color:${memColor};line-height:1.1">${r.memory_hits}</div>
-      <div style="color:var(--muted);font-size:11px;margin-top:4px">${r.memory_hits === 1 ? 'prior observation retrieved' : r.memory_hits > 1 ? 'prior observations retrieved' : 'no prior context'}</div>
-    </div>`);
+function xesc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function xtrunc(s, n) { s = String(s||''); return s.length > n ? s.slice(0,n)+'…' : s; }
 
-  // Card: Email draft details (per-contact trace)
-  if (r.email_subject) {
-    const esc = s => (s||'').replace(/</g,'&lt;').replace(/\n/g,'<br>');
-    cards.push(`
-      <div class="detail-card" style="grid-column: 1 / -1">
-        <div class="detail-card-title">Email Draft</div>
-        <div style="margin-bottom:8px">
-          <span style="color:var(--muted);font-size:11px">To</span>
-          <span style="margin-left:8px;font-weight:600">${esc(r.email_name)}</span>
-          <span style="color:var(--muted);font-size:11px;margin-left:6px">${esc(r.email_affiliation)}</span>
-          <span style="color:var(--blue);font-size:11px;margin-left:8px">&lt;${esc(r.email_to)}&gt;</span>
-        </div>
-        <div style="margin-bottom:10px">
-          <span style="color:var(--muted);font-size:11px">Subject</span>
-          <span style="margin-left:8px;font-weight:600;color:var(--green)">${esc(r.email_subject)}</span>
-        </div>
-        <div style="background:var(--bg2);border-radius:4px;padding:10px;font-size:12px;line-height:1.6;white-space:pre-wrap;border:1px solid var(--border)">${esc(r.email_body)}</div>
-      </div>`);
+function buildDagNodes(run) {
+  const nodes = [];
+  let col = 0;
 
-    if (r.email_subject_prompt || r.email_body_prompt) {
-      cards.push(`
-        <div class="detail-card" style="grid-column: 1 / -1">
-          <div class="detail-card-title">Prompts</div>
-          ${r.email_subject_prompt ? `
-            <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Subject prompt</div>
-            <div style="background:var(--bg2);border-radius:4px;padding:8px;font-size:11px;font-family:monospace;white-space:pre-wrap;border:1px solid var(--border);margin-bottom:10px">${esc(r.email_subject_prompt)}</div>` : ''}
-          ${r.email_body_prompt ? `
-            <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Body prompt</div>
-            <div style="background:var(--bg2);border-radius:4px;padding:8px;font-size:11px;font-family:monospace;white-space:pre-wrap;border:1px solid var(--border)">${esc(r.email_body_prompt)}</div>` : ''}
-        </div>`);
-    }
+  nodes.push({ id:'task', type:'task', col:col++, row:0,
+    title: xtrunc(run.task_full || run.task, 40),
+    sub:   (run.ts||'') + ' · ' + (run.model||''),
+    data:  run });
+
+  nodes.push({ id:'memory', type:'memory', col:col++, row:0,
+    title: (run.memory_hits||0) + ' prior obs.',
+    sub:   (run.memory_hits||0) > 0 ? 'context retrieved' : 'no prior context',
+    data:  { hits: run.memory_hits||0 } });
+
+  if (run.plan && typeof run.plan === 'object') {
+    const queries = run.plan.queries || run.plan.search_queries || [];
+    nodes.push({ id:'plan', type:'plan', col:col++, row:0,
+      title: queries.length + ' queries planned',
+      sub:   xtrunc((queries[0]||''), 40),
+      data:  run.plan });
   }
 
-  // Card: Email batch summary
-  if (r.email_drafts != null) {
-    const manifestPath = (r.email_output_dir || '').replace(/\\/g, '/').replace(/\/?$/, '/') + 'manifest.json';
-    cards.push(`
-      <div class="detail-card">
-        <div class="detail-card-title">Email Batch</div>
-        <div style="font-size:22px;font-weight:700;color:var(--blue);line-height:1.1">${r.email_drafts}</div>
-        <div style="color:var(--muted);font-size:11px;margin-top:4px">draft${r.email_drafts !== 1 ? 's' : ''} generated</div>
-        <div style="color:var(--muted);font-size:11px;margin-top:6px">&#128193; ${r.email_output_dir || '—'}</div>
-        <div style="margin-top:8px"><a href="${manifestPath}" target="_blank"
-          style="font-size:11px;color:var(--blue);text-decoration:none">manifest.json &#8599;</a></div>
-      </div>`);
+  const searches = (run.tool_calls||[]).filter(tc => tc.name === 'web_search' || tc.name === 'vision');
+  if (searches.length) {
+    const scol = col++;
+    searches.forEach((tc, i) => {
+      nodes.push({ id:'search'+i, type:'search', col:scol, row:i,
+        title: xtrunc(tc.query||'', 42),
+        sub:   (tc.name||'') + ' · ' + Math.round((tc.result_chars||0)/100)/10 + 'k',
+        data:  tc });
+    });
   }
 
-  // Card: Score trajectory + flags
-  const trajectory = (r.score_trajectory || []);
-  const pills = trajectory.length
-    ? trajectory.map((s,i) => {
-        const isFirst = i === 0, isLast = i === trajectory.length - 1 && trajectory.length > 1;
-        const col = isFirst ? 'rgba(79,142,247,.15)' : isLast ? 'rgba(63,185,80,.2)' : 'rgba(139,148,158,.15)';
-        const tcol = isFirst ? 'var(--blue)' : isLast ? 'var(--green)' : 'var(--muted)';
-        return `<span class="score-pill" style="background:${col};color:${tcol}">r${i+1}: ${s}</span>`;
-      }).join('')
-    : '<span style="color:var(--muted);font-size:11px">no scores</span>';
-  const flags = [];
-  if (r.count_check_retry) flags.push(`<span style="color:var(--orange);font-size:11px">&#9888; count retry</span>`);
-  if ((r.novelty_scores||[]).length) flags.push(`<span style="color:var(--muted);font-size:11px">novelty: ${r.novelty_scores.join(', ')}</span>`);
-  const outInfo = r.output_bytes > 0
-    ? `<div style="color:var(--muted);font-size:11px;margin-top:6px">${(r.output_bytes/1024).toFixed(1)} KB &middot; ${r.output_lines} lines</div>` : '';
-  cards.push(`
-    <div class="detail-card">
-      <div class="detail-card-title">Score trajectory</div>
-      <div>${pills}</div>
-      ${flags.length ? `<div style="margin-top:6px">${flags.join(' &nbsp; ')}</div>` : ''}
-      ${outInfo}
-    </div>`);
+  const stbs = ((run.tokens_by_stage||{}).synth) || {};
+  const cots = run.synth_cot || [];
+  nodes.push({ id:'synthesis', type:'synthesis', col:col++, row:0,
+    title: ((run.output_bytes||0)/1024).toFixed(1) + ' KB output',
+    sub:   stbs.output ? stbs.output + ' out tokens' : 'synthesis',
+    data:  { tokens_by_stage: run.tokens_by_stage||{}, cots, output_bytes: run.output_bytes||0 } });
 
-  // Card: Wiggum dimensions
-  if (r.dims && Object.keys(r.dims).length) {
-    const dimRows = Object.entries(r.dims).map(([k, v]) => {
-      const col = DIM_COLORS[k] || 'var(--blue)';
-      return `<div class="dim-row">
-        <span class="dim-label">${k}</span>
-        <div class="dim-bar-wrap"><div class="dim-bar-fill" style="width:${v*10}%;background:${col}"></div></div>
-        <span class="dim-value">${v}</span>
-      </div>`;
-    }).join('');
-    cards.push(`
-      <div class="detail-card">
-        <div class="detail-card-title">Dimensions (r1)</div>
-        ${dimRows}
-      </div>`);
+  const evalLog = run.wiggum_eval_log || [];
+  if (evalLog.length) {
+    const wcol = col++;
+    evalLog.forEach((ev, i) => {
+      nodes.push({ id:'wiggum'+i, type:'wiggum', col:wcol, row:i,
+        title: 'Round ' + (ev.round||i+1) + ' · score ' + (ev.score!=null?ev.score:'?'),
+        sub:   (ev.issues||[]).length + ' issue' + ((ev.issues||[]).length===1?'':'s'),
+        data:  ev });
+    });
   }
 
-  // Card: Evaluator issues (r1)
-  if (r.issues && r.issues.length) {
-    const issueItems = r.issues.map(iss =>
-      `<div class="issue-item">${iss.replace(/</g,'&lt;')}</div>`
-    ).join('');
-    const countLabel = `<div style="color:var(--muted);font-size:10px;margin-bottom:6px">${r.issues.length} issue${r.issues.length > 1 ? 's' : ''}</div>`;
-    cards.push(`
-      <div class="detail-card">
-        <div class="detail-card-title">Issues (r1)</div>
-        ${countLabel}
-        <div class="issues-scroll">${issueItems}</div>
-      </div>`);
-  }
+  nodes.push({ id:'output', type:'output', col:col++, row:0,
+    title: run.final || '?',
+    sub:   xtrunc(run.output_path||'', 38),
+    data:  run,
+    color: run.final==='PASS'?'#3fb950':run.final==='FAIL'?'#f85149':'#8b949e' });
 
-  // Card: Evaluator feedback
-  if (r.feedback) {
-    cards.push(`
-      <div class="detail-card">
-        <div class="detail-card-title">Evaluator feedback (r1)</div>
-        <div class="feedback-text">${r.feedback.replace(/</g,'&lt;')}</div>
-      </div>`);
-  }
-
-  // Card: RLHF feedback panel
-  const fbKey = 'rlhf_' + (r.run_id || r.ts);
-  const savedFb = (() => { try { return JSON.parse(localStorage.getItem(fbKey) || 'null'); } catch(e) { return null; } })();
-  const savedRating  = savedFb ? savedFb.rating  : 0;
-  const savedEdited  = savedFb ? (savedFb.edited_output || '') : '';
-  const savedComment = savedFb ? (savedFb.comment || '') : '';
-  const fbSaved      = savedFb != null;
-  const thumbUp   = savedRating ===  1 ? 'btn-thumb-active' : '';
-  const thumbDown = savedRating === -1 ? 'btn-thumb-active' : '';
-  const savedNote = fbSaved ? `<span style="color:var(--green);font-size:10px">saved</span>` : '';
-  cards.push(`
-    <div class="detail-card detail-card-feedback rlhf-panel" id="fb-card-${fbKey}">
-      <div class="detail-card-title" style="display:flex;align-items:center;gap:8px">
-        RLHF Feedback ${savedNote}
-        <button class="btn-thumb ${thumbUp}"  data-fb="${fbKey}" data-rating="1"  title="Good output">&#128077;</button>
-        <button class="btn-thumb ${thumbDown}" data-fb="${fbKey}" data-rating="-1" title="Bad output">&#128078;</button>
-      </div>
-      <textarea class="fb-edit" id="fb-edit-${fbKey}" rows="4"
-        placeholder="Edit or annotate the output here (optional — saved as preferred version for RLHF)"
-        style="width:100%;box-sizing:border-box;background:var(--bg2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:6px;font-size:11px;font-family:monospace;resize:vertical"
-      >${savedEdited.replace(/</g,'&lt;')}</textarea>
-      <input class="fb-comment" id="fb-comment-${fbKey}" type="text"
-        value="${savedComment.replace(/"/g,'&quot;')}"
-        placeholder="Optional comment (e.g. what was wrong)"
-        style="width:100%;box-sizing:border-box;margin-top:4px;background:var(--bg2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:5px 6px;font-size:11px"
-      />
-      <button class="btn-save-fb" data-fb="${fbKey}" data-run-id="${r.run_id || ''}" data-task="${(r.task||'').replace(/"/g,'&quot;')}"
-        style="margin-top:6px;padding:4px 12px;font-size:11px;cursor:pointer;background:var(--accent);color:#fff;border:none;border-radius:4px">
-        Save feedback
-      </button>
-    </div>`);
-
-  return cards.join('');
+  return nodes;
 }
 
-DATA.recent_runs.forEach((r, idx) => {
-  const scoreBar = r.score != null
-    ? `<span class="score-bar"><span class="score-fill" style="width:${r.score*10}%"></span></span>${r.score}`
-    : '&mdash;';
-  const badge = r.final === 'PASS'  ? `<span class="badge badge-pass">PASS</span>`
-              : r.final === 'FAIL'  ? `<span class="badge badge-fail">FAIL</span>`
-              : r.final === 'ERROR' ? `<span class="badge badge-error">ERR</span>`
-              : r.final;
-  const detailId = `run-detail-${idx}`;
-  const btnId    = `run-btn-${idx}`;
+function dagLayout(nodes) {
+  const colRows = {};
+  nodes.forEach(n => { colRows[n.col] = Math.max(colRows[n.col]||0, n.row+1); });
+  const maxRows = Math.max(...Object.values(colRows));
+  const totalCols = Math.max(...nodes.map(n=>n.col)) + 1;
+  const svgH = PAD*2 + maxRows * NH + (maxRows-1) * VGAP;
+  const svgW = PAD*2 + totalCols * NW + (totalCols-1) * HGAP;
 
-  const cells = [
-    `<td style="width:28px;padding:7px 6px"><button class="chevron-btn" id="${btnId}" data-detail="${detailId}" aria-label="expand">&#x276F;</button></td>`,
-    `<td style="color:var(--muted);font-size:11px">${r.ts}</td>`,
-    `<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${r.task.replace(/"/g,'&quot;')}">${r.task}</td>`,
-    `<td style="color:var(--muted)">${r.model}</td>`,
-    `<td style="color:var(--muted)">${r.type}</td>`,
-    `<td>${scoreBar}</td>`,
-    `<td style="color:var(--muted);text-align:center">${r.rounds ?? '&mdash;'}</td>`,
-    `<td style="color:var(--orange)">${r.duration}m</td>`,
-    `<td style="color:var(--muted)">${fmtK(r.tokens_in)}</td>`,
-    `<td style="color:var(--muted)">${fmtK(r.tokens_out)}</td>`,
-    `<td style="text-align:center;color:var(--muted)">${r.searches}</td>`,
-    `<td>${badge}</td>`,
-  ];
-
-  const colspan = cols.length;
-  tbl.innerHTML += `
-    <tr class="run-row">${cells.join('')}</tr>
-    <tr class="detail-row hidden" id="${detailId}">
-      <td colspan="${colspan}">
-        <div class="detail-inner">${buildDetailInner(r)}</div>
-      </td>
-    </tr>`;
-});
-
-// Attach click handlers after DOM is built
-tbl.querySelectorAll('.chevron-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const detailRow = document.getElementById(btn.dataset.detail);
-    const isHidden = detailRow.classList.toggle('hidden');
-    btn.classList.toggle('open', !isHidden);
+  nodes.forEach(n => {
+    const rows = colRows[n.col];
+    const blockH = rows * NH + (rows-1) * VGAP;
+    const startY = PAD + (svgH - PAD*2 - blockH) / 2;
+    n.x = PAD + n.col * (NW + HGAP) + NW/2;
+    n.y = startY + n.row * (NH + VGAP) + NH/2;
   });
+  return { nodes, width: svgW, height: svgH };
+}
+
+function buildEdges(nodes) {
+  const edges = [];
+  const colMap = {};
+  nodes.forEach(n => { (colMap[n.col] = colMap[n.col]||[]).push(n); });
+  const cols = Object.keys(colMap).map(Number).sort((a,b)=>a-b);
+  for (let ci = 0; ci < cols.length-1; ci++) {
+    const srcs = colMap[cols[ci]], dsts = colMap[cols[ci+1]];
+    srcs.forEach(src => dsts.forEach(dst => {
+      edges.push({ from: src, to: dst, color: src.color || NODE_CFG[src.type]?.color || '#8b949e' });
+    }));
+  }
+  return edges;
+}
+
+function renderDag(run) {
+  const svg = document.getElementById('dag-svg');
+  svg.innerHTML = '';
+  const rawNodes = buildDagNodes(run);
+  const { nodes, width, height } = dagLayout(rawNodes);
+  const edges = buildEdges(nodes);
+
+  svg.setAttribute('width',  width);
+  svg.setAttribute('height', height);
+  svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+
+  const defs = document.createElementNS('http://www.w3.org/2000/svg','defs');
+  [...new Set(edges.map(e=>e.color))].forEach(col => {
+    const mid = document.createElementNS('http://www.w3.org/2000/svg','marker');
+    const cid = 'arr' + col.replace('#','');
+    mid.setAttribute('id', cid);
+    mid.setAttribute('markerWidth','6'); mid.setAttribute('markerHeight','6');
+    mid.setAttribute('refX','5'); mid.setAttribute('refY','3');
+    mid.setAttribute('orient','auto');
+    const poly = document.createElementNS('http://www.w3.org/2000/svg','polygon');
+    poly.setAttribute('points','0 0, 6 3, 0 6');
+    poly.setAttribute('fill', col); poly.setAttribute('opacity','0.55');
+    mid.appendChild(poly); defs.appendChild(mid);
+  });
+  svg.appendChild(defs);
+
+  edges.forEach(e => {
+    const x1 = e.from.x + NW/2, y1 = e.from.y;
+    const x2 = e.to.x   - NW/2, y2 = e.to.y;
+    const cx = (x1+x2)/2;
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    path.setAttribute('d', 'M'+x1+','+y1+' C'+cx+','+y1+' '+cx+','+y2+' '+x2+','+y2);
+    path.setAttribute('fill','none');
+    path.setAttribute('stroke', e.color);
+    path.setAttribute('stroke-opacity','0.4');
+    path.setAttribute('stroke-width','1.5');
+    path.setAttribute('stroke-dasharray','6 5');
+    path.setAttribute('marker-end', 'url(#arr'+e.color.replace('#','')+')');
+    path.classList.add('dag-edge');
+    svg.appendChild(path);
+  });
+
+  nodes.forEach(n => {
+    const cfg = NODE_CFG[n.type] || NODE_CFG.task;
+    const col = n.color || cfg.color;
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    g.classList.add('dag-node');
+    g.setAttribute('transform', 'translate('+(n.x-NW/2)+','+(n.y-NH/2)+')');
+
+    const shadow = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    shadow.setAttribute('width',NW); shadow.setAttribute('height',NH);
+    shadow.setAttribute('rx','7'); shadow.setAttribute('fill','rgba(0,0,0,0.45)');
+    shadow.setAttribute('transform','translate(2,2)');
+    g.appendChild(shadow);
+
+    const body = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    body.setAttribute('width',NW); body.setAttribute('height',NH);
+    body.setAttribute('rx','7'); body.setAttribute('fill','#111820');
+    body.setAttribute('stroke',col); body.setAttribute('stroke-width','1.5');
+    body.classList.add('node-body');
+    g.appendChild(body);
+
+    const bar = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    bar.setAttribute('width','4'); bar.setAttribute('height',NH-14);
+    bar.setAttribute('x','0'); bar.setAttribute('y','7');
+    bar.setAttribute('rx','2'); bar.setAttribute('fill',col);
+    g.appendChild(bar);
+
+    const tl = document.createElementNS('http://www.w3.org/2000/svg','text');
+    tl.setAttribute('x','13'); tl.setAttribute('y','16');
+    tl.setAttribute('fill',col); tl.setAttribute('font-size','8');
+    tl.setAttribute('font-weight','700'); tl.setAttribute('font-family','monospace');
+    tl.setAttribute('letter-spacing','0.08em');
+    tl.textContent = cfg.label;
+    g.appendChild(tl);
+
+    const maxC = 21;
+    const line1 = n.title.slice(0, maxC);
+    const line2 = n.title.length > maxC ? n.title.slice(maxC, maxC*2) : '';
+    [line1, line2].filter(Boolean).forEach((ln, li) => {
+      const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+      t.setAttribute('x','13'); t.setAttribute('y', li===0 ? '30' : '41');
+      t.setAttribute('fill','#e6edf3'); t.setAttribute('font-size','11');
+      t.setAttribute('font-weight', li===0?'600':'400');
+      t.setAttribute('font-family','sans-serif');
+      t.textContent = ln;
+      g.appendChild(t);
+    });
+
+    const sl = document.createElementNS('http://www.w3.org/2000/svg','text');
+    sl.setAttribute('x','13'); sl.setAttribute('y','52');
+    sl.setAttribute('fill','#8b949e'); sl.setAttribute('font-size','9');
+    sl.setAttribute('font-family','sans-serif');
+    sl.textContent = xtrunc(n.sub, 28);
+    g.appendChild(sl);
+
+    const hit = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    hit.setAttribute('width',NW); hit.setAttribute('height',NH);
+    hit.setAttribute('fill','transparent'); hit.style.cursor='pointer';
+    g.appendChild(hit);
+
+    g.addEventListener('click', () => {
+      svg.querySelectorAll('.dag-node').forEach(el=>el.classList.remove('sel'));
+      g.classList.add('sel');
+      openInspector(n, col);
+    });
+    svg.appendChild(g);
+  });
+}
+
+function openInspector(node, color) {
+  const panel = document.getElementById('node-inspector');
+  panel.classList.remove('hidden');
+  const typeEl = document.getElementById('insp-type');
+  typeEl.textContent = (NODE_CFG[node.type]||{}).label || node.type;
+  typeEl.style.color = color;
+  document.getElementById('insp-title').textContent = node.title;
+  document.getElementById('insp-body').innerHTML = buildInspectorHTML(node);
+}
+
+document.getElementById('insp-close').addEventListener('click', () => {
+  document.getElementById('node-inspector').classList.add('hidden');
+  document.getElementById('dag-svg').querySelectorAll('.dag-node').forEach(el=>el.classList.remove('sel'));
 });
 
-// ---------------------------------------------------------------------------
-// RLHF feedback handlers
-// ---------------------------------------------------------------------------
-tbl.querySelectorAll('.btn-thumb').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const fbKey  = btn.dataset.fb;
-    const rating = parseInt(btn.dataset.rating, 10);
-    // Load existing saved state
-    let saved = {};
-    try { saved = JSON.parse(localStorage.getItem(fbKey) || '{}'); } catch(e) {}
-    // Toggle: clicking same thumb again clears rating
-    const newRating = saved.rating === rating ? 0 : rating;
-    saved.rating = newRating;
-    localStorage.setItem(fbKey, JSON.stringify(saved));
-    // Update button active state within this detail block
-    const parent = btn.closest('.rlhf-panel');
-    if (parent) {
-      parent.querySelectorAll('.btn-thumb').forEach(b => b.classList.remove('btn-thumb-active'));
-      if (newRating !== 0) {
-        parent.querySelectorAll(`.btn-thumb[data-rating="${newRating}"]`).forEach(b => b.classList.add('btn-thumb-active'));
-      }
+function inspRow(label, val) {
+  return '<div class="insp-row"><div class="insp-label">'+label+'</div><div class="insp-val">'+val+'</div></div>';
+}
+function inspPre(text) {
+  return '<div class="insp-pre">'+xesc(String(text||''))+'</div>';
+}
+
+function buildInspectorHTML(node) {
+  const d = node.data || {};
+  const parts = [];
+
+  if (node.type === 'task') {
+    parts.push(inspRow('Task', xesc(d.task_full||d.task||'')));
+    parts.push(inspRow('Timestamp', xesc(d.ts||'')));
+    parts.push(inspRow('Model', xesc(d.model||'')));
+    parts.push(inspRow('Type', xesc(d.type||'')));
+    const dur = d.run_duration_s ? (d.run_duration_s/60).toFixed(1)+'m' : (d.duration||'?')+'m';
+    parts.push(inspRow('Duration', dur));
+    if (d.orchestrated) parts.push(inspRow('Orchestrated', 'yes · '+(d.subtask_count||'?')+' subtasks'));
+  }
+  else if (node.type === 'memory') {
+    parts.push(inspRow('Hits', String(d.hits||0)));
+    parts.push(inspRow('Status', (d.hits||0)>0 ? 'Prior context retrieved' : 'No prior context'));
+  }
+  else if (node.type === 'plan') {
+    const qs = d.queries || d.search_queries || [];
+    const qhtml = qs.map((q,i)=>'<div style="margin-bottom:4px">'+(i+1)+'. '+xesc(q)+'</div>').join('');
+    parts.push(inspRow('Queries ('+qs.length+')', qhtml||'(none)'));
+    if ((d.known_facts||[]).length)
+      parts.push(inspRow('Known facts', d.known_facts.map(f=>'<div>• '+xesc(f)+'</div>').join('')));
+    if ((d.knowledge_gaps||[]).length)
+      parts.push(inspRow('Knowledge gaps', d.knowledge_gaps.map(g=>'<div>• '+xesc(g)+'</div>').join('')));
+  }
+  else if (node.type === 'search') {
+    parts.push(inspRow('Tool', xesc(d.name||'')));
+    parts.push(inspRow('Query', xesc(d.query||'')));
+    parts.push(inspRow('Result size', (d.result_chars||0).toLocaleString()+' chars'));
+  }
+  else if (node.type === 'synthesis') {
+    const tbs = d.tokens_by_stage || {};
+    const s = tbs.synth || {};
+    if (s.output) parts.push(inspRow('Output tokens', String(s.output)));
+    if (s.total_ms) parts.push(inspRow('Time', (s.total_ms/1000).toFixed(1)+'s'));
+    if (s.thinking_chars) parts.push(inspRow('CoT chars', s.thinking_chars.toLocaleString()));
+    parts.push(inspRow('Output size', ((d.output_bytes||0)/1024).toFixed(1)+' KB'));
+    const cots = d.cots || [];
+    if (cots.length && cots[0]) parts.push(inspRow('Chain-of-thought', inspPre(cots[0])));
+  }
+  else if (node.type === 'wiggum') {
+    parts.push(inspRow('Round', String(d.round||'')));
+    parts.push(inspRow('Score', String(d.score!=null?d.score:'?')));
+    const dims = d.dims || {};
+    if (Object.keys(dims).length) {
+      const bars = Object.entries(dims).map(([k,v]) => {
+        const c = DIM_COLORS[k]||'#4f8ef7';
+        return '<div class="insp-dim"><span class="insp-dim-lbl">'+k+'</span>'
+          +'<div class="insp-dim-bar"><div class="insp-dim-fill" style="width:'+(v*10)+'%;background:'+c+'"></div></div>'
+          +'<span class="insp-dim-val">'+v+'</span></div>';
+      }).join('');
+      parts.push(inspRow('Dimensions', bars));
     }
-  });
-});
+    const issues = d.issues || [];
+    if (issues.length) parts.push(inspRow('Issues ('+issues.length+')', issues.map(i=>'<div style="margin-bottom:3px;color:var(--muted)">• '+xesc(i)+'</div>').join('')));
+    if (d.feedback) parts.push(inspRow('Feedback', inspPre(d.feedback)));
+    if (d.thinking) parts.push(inspRow('Evaluator CoT', inspPre(d.thinking)));
+  }
+  else if (node.type === 'output') {
+    const badge = d.final==='PASS' ? '<span class="badge badge-pass">PASS</span>'
+                : d.final==='FAIL' ? '<span class="badge badge-fail">FAIL</span>'
+                : '<span class="badge badge-error">'+xesc(d.final||'?')+'</span>';
+    parts.push(inspRow('Result', badge));
+    if (d.output_path) parts.push(inspRow('File', xesc(d.output_path)));
+    if (d.output_bytes) parts.push(inspRow('Size', (d.output_bytes/1024).toFixed(1)+' KB · '+(d.output_lines||'?')+' lines'));
+    const scores = d.score_trajectory || d.wiggum_scores || [];
+    if (scores.length) parts.push(inspRow('Score trajectory', scores.map((s,i)=>'<span class="score-pill">r'+(i+1)+': '+s+'</span>').join(' ')));
+    if (d.final_content_preview) parts.push(inspRow('Output preview', inspPre(d.final_content_preview)));
+  }
 
-tbl.querySelectorAll('.btn-save-fb').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const fbKey  = btn.dataset.fb;
-    const runId  = btn.dataset.runId;
-    const task   = btn.dataset.task;
-    // Read current panel state
-    const editArea   = document.getElementById('fb-edit-' + fbKey);
-    const commentEl  = document.getElementById('fb-comment-' + fbKey);
-    const editedOut  = editArea   ? editArea.value   : '';
-    const comment    = commentEl  ? commentEl.value  : '';
-    // Get rating from localStorage
-    let saved = {};
-    try { saved = JSON.parse(localStorage.getItem(fbKey) || '{}'); } catch(e) {}
-    const rating = saved.rating || 0;
-    // Persist full state to localStorage
-    saved.edited_output = editedOut;
-    saved.comment       = comment;
-    localStorage.setItem(fbKey, JSON.stringify(saved));
-    // POST to server
-    fetch('/api/feedback', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        run_id:          runId,
-        task:            task,
-        rating:          rating,
-        original_output: saved.original_output || editedOut,
-        edited_output:   editedOut,
-        comment:         comment,
-      }),
-    }).then(r => r.json()).then(() => {
-      btn.textContent = 'Saved!';
-      btn.style.background = 'var(--green)';
-      setTimeout(() => { btn.textContent = 'Save feedback'; btn.style.background = ''; }, 1800);
-    }).catch(() => {
-      btn.textContent = 'Error';
-      btn.style.background = 'var(--red)';
-      setTimeout(() => { btn.textContent = 'Save feedback'; btn.style.background = ''; }, 1800);
+  return parts.join('');
+}
+
+function populateRunList() {
+  const dagRuns = DATA.dag_runs || [];
+  const listEl = document.getElementById('run-list-inner');
+  if (!dagRuns.length) {
+    listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:12px">No runs found.</div>';
+    return;
+  }
+  listEl.innerHTML = dagRuns.map((r,i) => {
+    const badge = r.final==='PASS' ? '<span class="badge badge-pass">PASS</span>'
+                : r.final==='FAIL' ? '<span class="badge badge-fail">FAIL</span>'
+                : '<span class="badge badge-error">'+xesc(r.final||'?')+'</span>';
+    const score = r.score!=null ? '<span class="rli-score">★ '+r.score+'</span>' : '';
+    return '<div class="rli'+(i===0?' sel':'')+'" data-idx="'+i+'" title="'+xesc(r.task_full||r.task||'')+'">'
+      +'<div class="rli-ts">'+xesc(r.ts||'')+'</div>'
+      +'<div class="rli-task">'+xesc(xtrunc(r.task_full||r.task||'',44))+'</div>'
+      +'<div class="rli-foot">'+badge+score+'</div>'
+      +'</div>';
+  }).join('');
+
+  listEl.querySelectorAll('.rli').forEach(el => {
+    el.addEventListener('click', () => {
+      listEl.querySelectorAll('.rli').forEach(e=>e.classList.remove('sel'));
+      el.classList.add('sel');
+      document.getElementById('node-inspector').classList.add('hidden');
+      renderDag(dagRuns[parseInt(el.dataset.idx,10)]);
     });
   });
-});
+
+  if (dagRuns.length) renderDag(dagRuns[0]);
+}
+
+populateRunList();
 
 // ---------------------------------------------------------------------------
 // Cost analysis
