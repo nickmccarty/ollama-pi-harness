@@ -12,40 +12,31 @@ Ranked by estimated impact vs implementation effort. Items marked **[spec]** hav
 
 ## Active / next up
 
-### Self-improving docs loop (/sync-wiki → /contextualize → sync_gaps)
-**Source:** session 14 (2026-04-20)
-**Status:** Implemented — loop closes but gap-to-extraction coverage is partial
+### Wiggum rubric: penalise code stubs in prose-format tasks
+**Source:** session 15 (2026-04-20)
+**Status:** Identified, not implemented
 
-`/sync-wiki` writes ground-truth constants/models/prompts to wiki/pipeline.md. `/contextualize` injects the wiki as research context. On wiggum FAIL, `sync_gaps(issues)` auto-fires and extracts source code sections targeted at the specific gaps identified. Next run has concrete facts.
+`/contextualize` ceiling of 7.0–7.2 is caused by pi-qwen-32b generating code blocks despite explicit instruction, bloating the document to 10K+ bytes and overflowing the evaluator's context window. The wiggum rubric has no specific penalty for code stubs in tasks where prose is the correct format.
 
-**Current gap pattern coverage** (7 patterns in `wiki_sync.py::GAP_EXTRACTIONS`): planning prompts, eval prompt, synthesis function, novelty scoring, ChromaDB setup, memory compression, research loop. Each maps issue keyword substrings to a `(file, kind, name)` extraction spec.
+**Proposed fix:** add a `format_compliance` dimension (weight ~0.1) to the wiggum eval prompt for prose-format tasks (task_type=contextualize, introspect). Deduct points when the model generates ```` ``` ```` blocks that aren't explicitly requested. This would lower scores on stub-heavy outputs, surface the violation clearly in wiggum issues, and provide a quality signal for the autoresearch loop.
 
-**Next:** run the loop end-to-end until `/contextualize` passes wiggum. Add gap patterns for any remaining issues that still lack coverage. Target: /contextualize pipeline-lifecycle task reaches 9.0+.
+**Alternative:** switch producer model to Qwen3-14B for `/contextualize` — smaller model with stronger instruction following may comply better.
 
-**Effort:** low — add gap patterns as needed; each is 5 lines.
+**Effort:** low for rubric change, medium for per-skill model routing.
 
 ---
 
-### Qwen3-14B AWQ via vLLM (deferred)
+### Self-improving docs loop (/sync-wiki → /contextualize → sync_gaps)
 **Source:** session 14 (2026-04-20)
-**Status:** Not yet attempted — Qwen3.6-35B abandoned in favour of stability
+**Status:** Loop closes correctly; ceiling is model capability, not context coverage
 
-Qwen3.6-35B-A3B-AWQ achieved only 0.6 tok/s with 10GB cpu_offload on RTX 5000 Ada — unusable. Qwen3-14B AWQ (~8GB) fits in VRAM without cpu_offload and should achieve 10–15 tok/s. No `--cpu-offload-gb`, no `--kv-cache-dtype fp8` needed.
+`/sync-wiki` writes ground-truth constants/models/prompts to wiki/pipeline.md. `/contextualize` injects selective wiki context (8K cap via `get_relevant_wiki_context()`). On wiggum FAIL, `sync_gaps(issues)` auto-fires and extracts targeted source sections. Wiggum issues stored as `[wiggum]` facts in ChromaDB so future runs see past failure modes.
 
-**Launch template:**
-```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model <qwen3-14b-awq-repo> \
-  --quantization awq_marlin \
-  --dtype float16 \
-  --max-model-len 16000 \
-  --reasoning-parser qwen3 \
-  --gpu-memory-utilization 0.90 \
-  --enforce-eager \
-  --served-model-name pi-qwen3
-```
+**Current gap pattern coverage** (9 patterns): planning prompts, eval prompt, synthesis function, novelty scoring, ChromaDB setup, memory compression, research loop, `make_plan()`, `auto_activate()`.
 
-**Effort:** low — find HF repo, update `.env` with `INFERENCE_BACKEND=vllm` + model map.
+**Ceiling diagnosis:** `/contextualize` scores 7.0–7.2 regardless of context quality. Model ignores "No code stubs" instruction, generating ```` ``` ```` blocks that bloat output to 10K+ bytes and overflow evaluator context. This is a model behavior problem, not a context gap. Adding more gap patterns will not lift the score.
+
+**Next:** validate loop on a non-self-referential task (e.g. T_A/T_B research) where the ceiling isn't model self-knowledge.
 
 ---
 
@@ -175,3 +166,11 @@ Pending clean ablation results (Priority 5) to determine if more search rounds a
 | Dashboard: memory card titles + synthesis preview + live DAG refresh | 2026-04-20 | finishCard() fetches /api/data; synthesis node shows content preview |
 | /sync-wiki skill (wiki_sync.py) | 2026-04-20 | deterministic fact extraction from source; idempotent marker-based wiki injection |
 | sync_gaps() auto-fire on contextualize FAIL | 2026-04-20 | 7 gap patterns; extracts prompts/functions targeted at wiggum issues |
+| Qwen3-14B-AWQ via vLLM | 2026-04-20 | `Qwen/Qwen3-14B-AWQ`, awq_marlin, `--reasoning-parser qwen3`; fits in VRAM without cpu_offload |
+| /contextualize selective wiki injection | 2026-04-20 | get_relevant_wiki_context() (8K cap): body excerpt + impl ref + gap extractions |
+| Contextualize synthesis directive | 2026-04-20 | forces citation of exact values/function names from source context |
+| Wiggum issues stored as memory facts | 2026-04-20 | [wiggum] prefix facts in ChromaDB; future runs see past failure modes |
+| Wiggum revision num_ctx override | 2026-04-20 | num_predict=8192, num_ctx=16384 at call site; overrides Modelfile cap |
+| GAP_EXTRACTIONS: make_plan() + auto_activate() | 2026-04-20 | 9 total patterns; closes planner classification + skill routing gaps |
+| /sync-wiki path-optional | 2026-04-20 | added to _path_optional; no .md arg required |
+| Logger ASCII arrow fix | 2026-04-20 | → replaced with -> for Windows cp1252 console compatibility |

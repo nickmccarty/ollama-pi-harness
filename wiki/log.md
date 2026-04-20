@@ -31,6 +31,26 @@ Reviewed Microsoft MagenticOne vs harness architecture. Key borrow identified: c
 
 ## [2026-04-12] ingest | wiki additions — agentic-patterns.md, roadmap.md created; synthesis-instructions.md + autoresearch_program.md updated with sessions 2+3 findings
 
+## [2026-04-20] build | Session 15 — vLLM/Qwen3-14B routing, /contextualize context injection, wiggum issue memory, selective wiki injection
+
+Six changes shipped:
+
+1. **vLLM with Qwen3-14B-AWQ** (`.env`, `inference.py`) — Qwen3.6-35B abandoned (0.6 tok/s unusable). Qwen3-14B-AWQ (`Qwen/Qwen3-14B-AWQ`) fits in VRAM with `--quantization awq_marlin --dtype float16 --max-model-len 16000`. `VLLM_MODEL_MAP` updated to route all logical model names to `pi-qwen3-14b`. `--reasoning-parser qwen3` (not `--enable-reasoning`) is the correct flag for this vLLM build.
+
+2. **`/contextualize` selective wiki injection** (`wiki_sync.py`, `agent.py`) — full `pipeline.md` (14.8K) was being injected wholesale, bloating context to 27K+ chars. Root cause: `introspect: true` in pipeline.md frontmatter. Fix: removed tag, replaced with `get_relevant_wiki_context()` (8K cap) that stitches: body excerpt (first 3K chars of pipeline diagram + arch overview) + `## Implementation Reference` marker block + `## Gap-Targeted Extractions` marker block.
+
+3. **Contextualize synthesis directive** (`agent.py`) — injected before `skill_context` on any `/contextualize` run: forces model to cite exact dimension names/weights, threshold values, function bodies from source rather than summarising generically. Score improved but still capped by model capability.
+
+4. **Wiggum issues as memory facts** (`memory.py`, `agent.py`) — `compress_and_store()` now accepts `wiggum_issues: list[str]`; stored as `[wiggum] <issue>` facts in the ChromaDB observation. `all_wiggum_issues` computed once, passed to both `sync_gaps()` and `_store_memory()`. Future runs see past failure modes as lessons.
+
+5. **Wiggum revision truncation fix** (`wiggum.py`) — root cause: `PARAMETER num_ctx 8192` in pi-qwen-32b Modelfile caps total context, truncating long revisions mid-sentence. Fix: `"num_predict": 8192, "num_ctx": 16384` runtime override on both revision call sites (`loop()` line ~288, `loop_annotate()` line ~716). Qwen3 Modelfile has no hardcoded cap.
+
+6. **Gap pattern expansion + /sync-wiki housekeeping** (`wiki_sync.py`, `agent.py`, `logger.py`) — two new `GAP_EXTRACTIONS` patterns: `make_plan()` (planner.py, task classification + query generation) and `auto_activate()` (agent.py, keyword-to-skill rule table). `sync-wiki` added to `_path_optional` so it no longer requires an explicit `.md` path argument. Logger `→` replaced with `->` for Windows cp1252 console compatibility.
+
+**Self-improving docs loop status:** loop closes correctly end-to-end. Hard ceiling identified: `/contextualize` scores 7.0–7.2 on PASS_THRESHOLD=9.0 regardless of context injection quality. Root cause is model capability — pi-qwen-32b generates code stubs despite instruction, bloating output to 10K+ bytes and overflowing evaluator context. Not a prompt engineering problem.
+
+**GAP_EXTRACTIONS coverage (9 patterns):** planning prompts, eval prompt, synthesis function, novelty scoring, ChromaDB setup, memory compression, research loop, make_plan(), auto_activate().
+
 ## [2026-04-20] build | Session 14 — /sync-wiki skill, memory contamination fix, /contextualize fix, dashboard repairs
 
 Seven changes shipped:
