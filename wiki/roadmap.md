@@ -174,3 +174,7 @@ Pending clean ablation results (Priority 5) to determine if more search rounds a
 | GAP_EXTRACTIONS: make_plan() + auto_activate() | 2026-04-20 | 9 total patterns; closes planner classification + skill routing gaps |
 | /sync-wiki path-optional | 2026-04-20 | added to _path_optional; no .md arg required |
 | Logger ASCII arrow fix | 2026-04-20 | → replaced with -> for Windows cp1252 console compatibility |
+| experiment_panel.py | 2026-04-20 | 3-persona panel (Methodologist/KnowledgeAuditor/LoopOptimizer); KEEP/REVISE/REDESIGN |
+| experiment_runner.py | 2026-04-20 | CRD runner; env var treatments; checkpoint; treatment-specific output paths |
+| experiment_analyzer.py | 2026-04-20 | stats + hypothesis eval + Markdown report + panel integration |
+| runs.jsonl: experiment_id + treatment_level fields | 2026-04-20 | logger.py reads HARNESS_EXPERIMENT_ID/TREATMENT_LEVEL env vars |

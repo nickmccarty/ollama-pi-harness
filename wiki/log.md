@@ -31,6 +31,47 @@ Reviewed Microsoft MagenticOne vs harness architecture. Key borrow identified: c
 
 ## [2026-04-12] ingest | wiki additions — agentic-patterns.md, roadmap.md created; synthesis-instructions.md + autoresearch_program.md updated with sessions 2+3 findings
 
+## [2026-04-20] build | Session 16 — /autoexperiment infrastructure: experiment_panel, runner, analyzer
+
+Three new files close the /autoexperiment loop:
+
+1. **`experiment_panel.py`** — three-persona evaluation panel for experiments-as-artifacts:
+   - `ExperimentSpec` dataclass (hypothesis, factor, tasks, replications, mutable_scope, controlled_vars)
+   - `run_experiment_panel(spec, traces)` — parallel ThreadPoolExecutor, same pattern as panel.py
+   - Three personas with structural model diversity to avoid evaluator conflict of interest:
+     - Methodologist (`glm4:9b`) — design validity, falsifiability, confound control
+     - Knowledge Auditor (`pi-qwen-32b`) — feedback-to-content alignment, conclusion soundness
+     - Loop Optimizer (`Qwen3-Coder:30b`) — actionability, `next_experiment_suggestion`
+   - `experiment_panel_decision()` — KEEP / REVISE / REDESIGN from three verdicts
+   - `experiment_panel_issues()` — flattened deduplicated issues with persona prefix
+
+2. **`experiment_runner.py`** — generalized CRD executor:
+   - Generates randomized run order from spec (seed=42 for reproducibility)
+   - Applies treatments via env var overrides (mutable_scope.type=env)
+   - Treatment-specific output paths (`eval-ctx-off.md`, `eval-ctx-on.md`) prevent file overwrites
+   - Checkpoint at `experiments/<id>/run_log.jsonl`; `--resume` skips completed (task, treatment, rep) tuples
+   - Tags each run with `HARNESS_EXPERIMENT_ID` + `HARNESS_TREATMENT_LEVEL` env vars
+   - `--dry-run` prints CRD order without executing
+
+3. **`experiment_analyzer.py`** — statistical analysis + report:
+   - Loads runs.jsonl filtered by `experiment_id` field
+   - Per-(task, treatment) stats: mean/std of score_r1/final, wiggum_rounds, pass_rate, per-dim r1 means
+   - Hypothesis evaluation: parses `falsified_if` string, computes treatment delta vs threshold
+   - Renders Markdown report to `experiments/<id>/report.md`
+   - Calls `run_experiment_panel()` → panel verdicts saved to `experiments/<id>/panel.json`
+
+**`logger.py`**: `RunTrace` now reads `HARNESS_EXPERIMENT_ID` + `HARNESS_TREATMENT_LEVEL` env vars; written as first-class fields in every runs.jsonl record.
+
+**Full /autoexperiment loop (end-to-end):**
+```
+/autoresearch or /lit-review output (open questions, gap candidates)
+  → hand-write ExperimentSpec JSON (or future /experiment-design LLM skill)
+    → python experiment_runner.py spec.json           # CRD execution
+      → python experiment_analyzer.py experiments/<id>/spec.json  # stats + panel
+        → panel.json: KEEP/REVISE/REDESIGN + next_experiment_suggestion
+          → use next_experiment_suggestion as input to next ExperimentSpec
+```
+
 ## [2026-04-20] build | Session 15 — vLLM/Qwen3-14B routing, /contextualize context injection, wiggum issue memory, selective wiki injection
 
 Six changes shipped:
