@@ -13,10 +13,42 @@ Usage:
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass, field, asdict
 
 import inference as ollama
+
+try:
+    import dirtyjson as _dirtyjson
+    _HAS_DIRTYJSON = True
+except ImportError:
+    _HAS_DIRTYJSON = False
+
+
+def _json_loads(s: str) -> dict:
+    """json.loads with dirtyjson fallback for common model-output defects."""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        if _HAS_DIRTYJSON:
+            try:
+                return _dirtyjson.loads(s)
+            except Exception:
+                pass
+        raise
+
+
+def _extract_string_list(text: str, key: str) -> list[str]:
+    """
+    Regex extraction of a JSON array value by key — last resort when both JSON
+    parsers fail. Handles the common case where the model emits valid-looking
+    JSON but with an unescaped quote or literal newline inside a string.
+    """
+    m = re.search(rf'"{re.escape(key)}"\s*:\s*\[([^\]]*)\]', text, re.DOTALL)
+    if not m:
+        return []
+    return [item.strip() for item in re.findall(r'"([^"]+)"', m.group(1)) if item.strip()]
 
 PLANNER_MODEL = "glm4:9b"
 
@@ -128,7 +160,7 @@ def prior_knowledge_pass(task: str) -> tuple[list[str], list[str]]:
         response = ollama.chat(
             model=PLANNER_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1},
+            options={"temperature": 0.1, "think": False},
         )
         text = response["message"]["content"].strip()
         text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
@@ -136,9 +168,17 @@ def prior_knowledge_pass(task: str) -> tuple[list[str], list[str]]:
         json_match = re.search(r'\{.*\}', text.strip(), re.DOTALL)
         if not json_match:
             return [], []
-        data = json.loads(json_match.group(0))
-        known = [str(f).strip() for f in data.get("known_facts", []) if str(f).strip()]
-        gaps  = [str(g).strip() for g in data.get("gaps", []) if str(g).strip()]
+        raw = json_match.group(0)
+        try:
+            data = _json_loads(raw)
+            known = [str(f).strip() for f in data.get("known_facts", []) if str(f).strip()]
+            gaps  = [str(g).strip() for g in data.get("gaps", []) if str(g).strip()]
+        except Exception:
+            # Both JSON parsers failed — extract arrays directly with regex
+            known = _extract_string_list(raw, "known_facts")
+            gaps  = _extract_string_list(raw, "gaps")
+            if known or gaps:
+                print(f"  [planner:prior] JSON malformed — recovered via regex")
         return known, gaps
     except Exception as e:
         print(f"  [planner:prior] failed ({e}) — skipping")
@@ -157,9 +197,14 @@ def make_plan(task: str, memory_context: str = "") -> tuple["Plan", object]:
     Returns (Plan(), None) on any failure — never raises.
     """
     # Prior knowledge pass — fast single call, informs query targeting
-    known_facts, gaps = prior_knowledge_pass(task)
-    if known_facts or gaps:
-        print(f"  [planner:prior] {len(known_facts)} known fact(s), {len(gaps)} gap(s) identified")
+    # Skippable via HARNESS_SKIP_PRIOR_KNOWLEDGE=1 for controlled experiments
+    known_facts, gaps = [], []
+    if os.environ.get("HARNESS_SKIP_PRIOR_KNOWLEDGE") != "1":
+        known_facts, gaps = prior_knowledge_pass(task)
+        if known_facts or gaps:
+            print(f"  [planner:prior] {len(known_facts)} known fact(s), {len(gaps)} gap(s) identified")
+    else:
+        print("  [planner:prior] skipped (HARNESS_SKIP_PRIOR_KNOWLEDGE=1)")
 
     # Build knowledge block for the main plan prompt
     knowledge_block = ""
@@ -204,8 +249,8 @@ def _parse_plan(text: str) -> Plan:
         return Plan()
 
     try:
-        data = json.loads(json_match.group(0))
-    except json.JSONDecodeError:
+        data = _json_loads(json_match.group(0))
+    except Exception:
         return Plan()
 
     # expected_sections: accept integer or stringified integer, reject anything else
