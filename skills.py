@@ -177,6 +177,17 @@ REGISTRY: dict[str, dict] = {
         )),
     },
 
+    "sync-wiki": {
+        "description": (
+            "Extract implementation facts from source code (models, constants, prompts, "
+            "weights) and write a structured Implementation Reference section into "
+            "wiki/pipeline.md. Deterministic — no web search, no LLM extraction."
+        ),
+        "hook":   "standalone",
+        "prompt": None,
+        "auto":   None,   # explicit only — user must invoke /sync-wiki
+    },
+
 }
 
 # ---------------------------------------------------------------------------
@@ -184,19 +195,48 @@ REGISTRY: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 def load_context_files() -> str:
-    """Read all .md files from the context/ directory next to this file.
-    Returns a single concatenated string ready for injection as file_context."""
+    """
+    Load wiki pages tagged with 'introspect: true' in their YAML frontmatter.
+    These are the canonical self-knowledge pages for /introspect and /contextualize.
+
+    Falls back to context/ directory if wiki/ has no tagged pages (migration safety net).
+    Skips index.md and log.md (index and journal — not self-knowledge).
+    """
     from pathlib import Path
-    context_dir = Path(__file__).parent / "context"
-    if not context_dir.exists():
-        return ""
-    parts = []
-    for f in sorted(context_dir.glob("*.md")):
-        try:
-            parts.append(f"## {f.stem}\n\n{f.read_text(encoding='utf-8')}")
-        except Exception:
-            pass
-    return "\n\n---\n\n".join(parts)
+
+    _SKIP = {"index.md", "log.md"}
+
+    def _tagged_pages(directory: Path) -> list[str]:
+        parts = []
+        for f in sorted(directory.glob("*.md")):
+            if f.name in _SKIP:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+                # Parse YAML frontmatter between leading --- delimiters
+                if text.startswith("---"):
+                    end = text.find("---", 3)
+                    if end != -1 and "introspect: true" in text[3:end]:
+                        body = text[end + 3:].strip()
+                        parts.append(f"## {f.stem}\n\n{body}")
+            except Exception:
+                pass
+        return parts
+
+    wiki_dir = Path(__file__).parent / "wiki"
+    parts = _tagged_pages(wiki_dir) if wiki_dir.exists() else []
+
+    # Fallback to legacy context/ if wiki has no tagged pages yet
+    if not parts:
+        ctx_dir = Path(__file__).parent / "context"
+        if ctx_dir.exists():
+            for f in sorted(ctx_dir.glob("*.md")):
+                try:
+                    parts.append(f"## {f.stem}\n\n{f.read_text(encoding='utf-8')}")
+                except Exception:
+                    pass
+
+    return "\n\n" + ("\n\n" + "=" * 60 + "\n\n").join(parts)
 
 
 # Aliases — resolved during parse

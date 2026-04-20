@@ -136,7 +136,7 @@ try:
 except ImportError:
     MARKITDOWN_AVAILABLE = False
 
-MODEL = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen3.6")
+MODEL = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen-32b")
 COMPRESS_MODEL = os.environ.get("COMPRESS_MODEL", MODEL)  # lighter model for compress_knowledge / plan_query
 
 # Models that think by default and require think=False to produce immediate output.
@@ -722,14 +722,45 @@ def clean_synthesis_output(content: str) -> str:
     return content.strip()
 
 
+_STRUCTURAL_HEADERS = {
+    "introduction", "conclusion", "summary", "overview",
+    "background", "references", "appendix",
+}
+
+def _is_structural_header(text: str) -> bool:
+    return re.sub(r'^[\d.\s]+', '', text).strip().lower() in _STRUCTURAL_HEADERS
+
+
 def count_output_items(content: str) -> int:
     """Count H2-level content sections in markdown, ignoring structural headers."""
-    structural = {"introduction", "conclusion", "summary", "overview", "background", "references"}
     headers = re.findall(r'^##\s+(.+)', content, re.MULTILINE)
-    return sum(
-        1 for h in headers
-        if re.sub(r'^[\d.\s]+', '', h).strip().lower() not in structural
-    )
+    return sum(1 for h in headers if not _is_structural_header(h))
+
+
+def trim_to_count(content: str, expected: int) -> str | None:
+    """
+    Trim over-produced sections to exactly `expected` H2 content sections.
+
+    Returns trimmed content if the model over-counted (fast, no LLM call).
+    Returns None if the model under-counted — caller must fall back to LLM retry.
+
+    Shares the same structural-header exclusion logic as count_output_items so
+    the count before and after trim is always consistent.
+    """
+    matches = list(re.finditer(r'^##\s+(.+)', content, re.MULTILINE))
+    content_matches = [m for m in matches if not _is_structural_header(m.group(1))]
+
+    n = len(content_matches)
+    if n < expected:
+        return None          # under-count — can't fix without LLM
+    if n == expected:
+        return content       # exact — nothing to do
+
+    # Cut at the start of the (expected+1)th content section.
+    # Any structural headers that come after it (e.g. a trailing References) are
+    # also dropped — they belong to the section that's being removed.
+    cut_at = content_matches[expected].start()
+    return content[:cut_at].rstrip()
 
 
 def synthesize_with_count(task: str, research_context: str, expected_count: int, vision_context: str = "", file_context: str = "", code_context: str = "", memory_context: str = "", skill_context: str = "", producer_model: str = MODEL, trace=None) -> str:
@@ -821,7 +852,14 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
     from wiggum import EVALUATOR_MODEL, ANNOTATE_EVALUATOR_MODEL
     _eval_model    = evaluator_model or EVALUATOR_MODEL
     _ann_eval_model = evaluator_model or ANNOTATE_EVALUATOR_MODEL
-    trace = RunTrace(task=task, producer_model=producer_model, evaluator_model=_eval_model)
+    trace = RunTrace(
+        task=task,
+        producer_model=producer_model,
+        evaluator_model=_eval_model,
+        session_id=os.environ.get("HARNESS_SESSION_ID", ""),
+        project_id=os.environ.get("HARNESS_PROJECT_ID", ""),
+    )
+    os.environ["HARNESS_RUN_ID"] = trace.run_id
     memory = MemoryStore()
 
     try:
@@ -1112,6 +1150,17 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
             _store_memory(memory, task, "introspect", trace.data, content)
 
+        def _handle_sync_wiki():
+            print("\n[skill:sync-wiki] extracting implementation facts from source code...")
+            trace.data["task_type"] = "sync_wiki"
+            from wiki_sync import sync as _wiki_sync
+            summary = _wiki_sync()
+            print(f"  [sync-wiki] {summary.splitlines()[0]}")
+            content = summary
+            print("\n" + content[:800] + ("..." if len(content) > 800 else "") + "\n")
+            write_output(content, path, trace)
+            trace.finish("PASS")
+
         def _handle_queue():
             import urllib.request as _urllib
             import json as _json
@@ -1153,6 +1202,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "recall":     _handle_recall,
             "queue":      _handle_queue,
             "introspect": _handle_introspect,
+            "sync-wiki":  _handle_sync_wiki,
         }
 
         for _skill in explicit_skills:
@@ -1162,11 +1212,13 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
 
         # Memory retrieval — before planning so the planner can use prior context
         with trace.span("memory_retrieval"):
-            memory_context = memory.get_context(task)
+            memory_context, _mem_titles = memory.get_context_with_titles(task)
         if memory_context:
-            memory_hits = memory_context.count("**[")
+            memory_hits = len(_mem_titles)
             print(f"\n  [memory] injecting {memory_hits} past observation(s)")
-            trace.log_memory_hits(memory_hits)
+            for t in _mem_titles:
+                print(f"    • {t}")
+            trace.log_memory_hits(memory_hits, titles=_mem_titles)
         else:
             print("\n  [memory] no relevant history")
 
@@ -1175,8 +1227,10 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         with trace.span("planner"):
             plan, _planner_resp = make_plan(task, memory_context)
         trace.log_plan(plan.to_dict())
+        trace.log_plan_record(plan.to_dict(), plan_type="agent")
         if _planner_resp is not None:
             trace.log_usage(_planner_resp, stage="planner")
+            trace.log_planner_cot(_planner_resp)
         print(f"  [planner] {plan.task_type} / {plan.complexity}"
               + (f" / {plan.expected_sections} sections" if plan.expected_sections else "")
               + (f"\n  [planner] note: {plan.notes}" if plan.notes else ""))
@@ -1225,7 +1279,13 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 print("  [skill:contextualize] web search skipped")
             else:
                 print("  [fetch_url] document already fetched — skipping web search")
-            context = ""
+            # For contextualize, promote injected context to research slot so the
+            # model treats it as primary source material, not supplementary files.
+            if _skip_research and not has_url_content and file_context:
+                context = file_context
+                file_context = ""
+            else:
+                context = ""
         else:
             with trace.span("gather_research"):
                 context = gather_research(task, trace, planned_queries=plan.search_queries or None, producer_model=producer_model, force_deep=force_deep, task_type=plan.task_type or "")
@@ -1268,15 +1328,29 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         if expected_count is not None:
             actual_count = count_output_items(content)
             if actual_count != expected_count:
-                print(f"\n[count check] expected {expected_count} items, got {actual_count} — retrying synthesis")
-                trace.log_count_retry()
-                content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
-                content = clean_synthesis_output(content)
-                actual_count = count_output_items(content)
-                if actual_count == expected_count:
-                    print(f"  [count check] OK — {actual_count} items after retry")
+                # Try a Python trim first: over-count (model produced too many) can be
+                # fixed instantly by cutting at the (N+1)th ## boundary — no LLM call.
+                # Under-count cannot be fixed in Python and falls through to LLM retry.
+                trimmed = trim_to_count(content, expected_count)
+                if trimmed is not None:
+                    content = trimmed
+                    print(f"\n[count check] trimmed {actual_count}→{expected_count} items (Python, no retry)")
                 else:
-                    print(f"  [count check] still {actual_count} after retry — proceeding anyway")
+                    print(f"\n[count check] expected {expected_count} items, got {actual_count} — retrying synthesis")
+                    trace.log_count_retry()
+                    content = synthesize_with_count(task, context, expected_count, vision_context=vision_context, file_context=file_context, code_context=code_context, memory_context=full_memory_context, skill_context=skill_context, producer_model=producer_model, trace=trace)
+                    content = clean_synthesis_output(content)
+                    actual_count = count_output_items(content)
+                    if actual_count == expected_count:
+                        print(f"  [count check] OK — {actual_count} items after retry")
+                    else:
+                        # Still wrong — try one more Python trim before giving up
+                        trimmed = trim_to_count(content, expected_count)
+                        if trimmed is not None:
+                            content = trimmed
+                            print(f"  [count check] trimmed {actual_count}→{expected_count} after retry")
+                        else:
+                            print(f"  [count check] still {actual_count} after retry — proceeding anyway")
             else:
                 print(f"\n[count check] OK — {actual_count} items match constraint ({expected_count})")
 
@@ -1306,6 +1380,23 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 print(f"  round {r['round']}: score={r['score']}/10  passed={r['passed']}")
                 for issue in r.get("issues", []):
                     print(f"    - {issue}")
+
+            # Gap-targeted wiki sync: when a contextualize run fails, extract source
+            # sections that answer wiggum's issues so the next run has concrete facts.
+            if wiggum_trace["final"] != "PASS" and "contextualize" in active_skills:
+                all_issues = [
+                    issue
+                    for r in wiggum_trace["rounds"]
+                    for issue in (r.get("issues") or [])
+                ]
+                if all_issues:
+                    print("\n  [sync-wiki:gaps] wiggum FAIL on contextualize — extracting gap facts...")
+                    try:
+                        from wiki_sync import sync_gaps as _sync_gaps
+                        _sync_gaps(all_issues)
+                    except Exception as _gap_err:
+                        print(f"  [sync-wiki:gaps] error (non-fatal): {_gap_err}")
+
             trace.finish()
             _store_memory(memory, task, wiggum_trace.get("task_type"), trace.data, content)
         else:

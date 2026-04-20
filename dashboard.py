@@ -320,6 +320,10 @@ def build_payload(runs):
         synth_cot_preview = [(c[:800] if isinstance(c, str) else str(c)[:800]) for c in raw_cot]
 
         dag_runs.append({
+            # --- identity ---
+            "run_id":     r.get("run_id") or "",
+            "session_id": r.get("session_id") or "",
+            "project_id": r.get("project_id") or "",
             # --- all recent_run fields ---
             "ts":       fmt_ts(r.get("timestamp")),
             "task":     task_label,
@@ -349,6 +353,7 @@ def build_payload(runs):
             "plan":                 r.get("plan"),
             "synth_cot":            synth_cot_preview,
             "final_content_preview": (r.get("final_content") or "")[:400],
+            "memory_context_titles": r.get("memory_context_titles") or [],
             "run_duration_s":       r.get("run_duration_s") or 0,
             "orchestrated":         bool(r.get("orchestrated")),
             "subtask_count":        r.get("subtask_count") or 0,
@@ -697,14 +702,50 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .col-2, .col-3 { grid-template-columns: 1fr; }
   }
 
-  /* ── Run Explorer (DAG) ─────────────────────────────────────────── */
-  #run-explorer {
-    display: flex; height: 560px; gap: 0;
+  /* ── Hypervisor layout (project/session sidebar + run explorer) ─── */
+  #hypervisor-layout {
+    display: flex; height: 580px; gap: 0;
     background: var(--card); border: 1px solid var(--border);
     border-radius: 8px; overflow: hidden; margin-bottom: 16px;
   }
+  #project-session-panel {
+    width: 172px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    overflow-y: auto; background: #0a0f16;
+    display: flex; flex-direction: column;
+  }
+  .psp-section {
+    font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted);
+    padding: 8px 10px 4px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: #0a0f16; z-index: 1;
+  }
+  .psp-project {
+    padding: 7px 10px; font-size: 11px; color: var(--text);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .psp-project span { font-size: 9px; color: var(--muted); display: block; margin-top: 1px; }
+  .sess-item {
+    padding: 6px 10px; cursor: pointer;
+    border-left: 3px solid transparent;
+    border-bottom: 1px solid rgba(48,54,61,.35);
+    transition: background .1s, border-color .1s;
+  }
+  .sess-item:hover { background: rgba(255,255,255,.03); }
+  .sess-item.sel { border-left-color: var(--blue); background: rgba(79,142,247,.06); }
+  .sess-item.active-sess { border-left-color: #22d3ee; }
+  .sess-ts   { font-size: 9px; color: var(--muted); margin-bottom: 2px; }
+  .sess-meta { font-size: 10px; color: var(--text); }
+  .sess-dur  { font-size: 9px; color: var(--muted); margin-top: 1px; }
+
+  /* ── Run Explorer (DAG) ─────────────────────────────────────────── */
+  #run-explorer {
+    flex: 1; display: flex; gap: 0; overflow: hidden;
+    background: var(--card);
+  }
   #run-list-panel {
-    width: 230px; flex-shrink: 0;
+    width: 220px; flex-shrink: 0;
     border-right: 1px solid var(--border);
     overflow-y: auto; background: var(--bg);
   }
@@ -922,21 +963,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <h2 class="section-heading">Run Explorer</h2>
 
-<div id="run-explorer">
-  <div id="run-list-panel">
-    <h3>Recent runs</h3>
-    <div id="run-list-inner"></div>
+<div id="hypervisor-layout">
+  <div id="project-session-panel">
+    <div class="psp-section">Project</div>
+    <div class="psp-project" id="psp-project-name">—<span id="psp-project-id"></span></div>
+    <div class="psp-section" style="top:auto;position:relative">Sessions</div>
+    <div id="psp-session-list"></div>
   </div>
-  <div id="dag-canvas-panel">
-    <svg id="dag-svg"></svg>
-  </div>
-  <div id="node-inspector" class="hidden">
-    <div id="insp-header">
-      <span id="insp-type"></span>
-      <span id="insp-title"></span>
-      <button id="insp-close" title="close">&#x2715;</button>
+  <div id="run-explorer">
+    <div id="run-list-panel">
+      <h3>Runs <span id="rl-session-badge" style="font-weight:400;color:var(--blue);text-transform:none;letter-spacing:0"></span></h3>
+      <div id="run-list-inner"></div>
     </div>
-    <div id="insp-body"></div>
+    <div id="dag-canvas-panel">
+      <svg id="dag-svg"></svg>
+    </div>
+    <div id="node-inspector" class="hidden">
+      <div id="insp-header">
+        <span id="insp-type"></span>
+        <span id="insp-title"></span>
+        <button id="insp-close" title="close">&#x2715;</button>
+      </div>
+      <div id="insp-body"></div>
+    </div>
   </div>
 </div>
 
@@ -1303,7 +1352,7 @@ function buildDagNodes(run) {
   nodes.push({ id:'memory', type:'memory', col:col++, row:0,
     title: (run.memory_hits||0) + ' prior obs.',
     sub:   (run.memory_hits||0) > 0 ? 'context retrieved' : 'no prior context',
-    data:  { hits: run.memory_hits||0 } });
+    data:  { hits: run.memory_hits||0, titles: run.memory_context_titles||[] } });
 
   if (run.plan && typeof run.plan === 'object') {
     const queries = run.plan.queries || run.plan.search_queries || [];
@@ -1329,7 +1378,8 @@ function buildDagNodes(run) {
   nodes.push({ id:'synthesis', type:'synthesis', col:col++, row:0,
     title: ((run.output_bytes||0)/1024).toFixed(1) + ' KB output',
     sub:   stbs.output ? stbs.output + ' out tokens' : 'synthesis',
-    data:  { tokens_by_stage: run.tokens_by_stage||{}, cots, output_bytes: run.output_bytes||0 } });
+    data:  { tokens_by_stage: run.tokens_by_stage||{}, cots, output_bytes: run.output_bytes||0,
+             final_content_preview: run.final_content_preview||'' } });
 
   const evalLog = run.wiggum_eval_log || [];
   if (evalLog.length) {
@@ -1531,6 +1581,8 @@ function buildInspectorHTML(node) {
   else if (node.type === 'memory') {
     parts.push(inspRow('Hits', String(d.hits||0)));
     parts.push(inspRow('Status', (d.hits||0)>0 ? 'Prior context retrieved' : 'No prior context'));
+    const titles = d.titles || [];
+    if (titles.length) parts.push(inspRow('Observations', titles.map(t=>'<div style="margin-bottom:3px">• '+xesc(t)+'</div>').join('')));
   }
   else if (node.type === 'plan') {
     const qs = d.queries || d.search_queries || [];
@@ -1553,6 +1605,7 @@ function buildInspectorHTML(node) {
     if (s.total_ms) parts.push(inspRow('Time', (s.total_ms/1000).toFixed(1)+'s'));
     if (s.thinking_chars) parts.push(inspRow('CoT chars', s.thinking_chars.toLocaleString()));
     parts.push(inspRow('Output size', ((d.output_bytes||0)/1024).toFixed(1)+' KB'));
+    if (d.final_content_preview) parts.push(inspRow('Output preview', inspPre(d.final_content_preview)));
     const cots = d.cots || [];
     if (cots.length && cots[0]) parts.push(inspRow('Chain-of-thought', inspPre(cots[0])));
   }
@@ -1589,11 +1642,93 @@ function buildInspectorHTML(node) {
   return parts.join('');
 }
 
-function populateRunList() {
-  const dagRuns = DATA.dag_runs || [];
+// ---------------------------------------------------------------------------
+// State poller — live data from /api/state (only works when server.py is running)
+// ---------------------------------------------------------------------------
+let _liveState = null;
+let _selectedSessionId = null;
+
+function fmtLocalTs(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+  } catch { return iso.slice(0,16).replace('T',' '); }
+}
+
+function fmtDur(s) {
+  if (!s) return '';
+  if (s < 60) return Math.round(s)+'s';
+  return Math.round(s/60)+'m '+Math.round(s%60)+'s';
+}
+
+function updateSessionNav(state) {
+  if (!state) return;
+  const projName = document.getElementById('psp-project-name');
+  const projId   = document.getElementById('psp-project-id');
+  const proj = (state.projects||[]).find(p => p.project_id === state.server_project_id);
+  if (proj) {
+    projName.childNodes[0].textContent = proj.name || '(unnamed)';
+    projId.textContent = state.server_project_id.slice(0,14)+'…';
+  }
+
+  const sessions = state.sessions || [];
+  const listEl = document.getElementById('psp-session-list');
+  const serverSid = state.server_session_id;
+
+  listEl.innerHTML = sessions.map(s => {
+    const sid = s.session_id || '';
+    const isActive = sid === serverSid;
+    const isSel    = sid === _selectedSessionId;
+    const ts       = fmtLocalTs(s.started_at);
+    const dur      = s.duration_s ? fmtDur(s.duration_s) : (isActive ? 'active' : '');
+    const runs     = s.runs != null ? s.runs+' runs' : '';
+    return '<div class="sess-item'+(isSel?' sel':'')+(isActive?' active-sess':'')+'" data-sid="'+xesc(sid)+'">'
+      +'<div class="sess-ts">'+xesc(ts)+'</div>'
+      +'<div class="sess-meta">'+xesc(sid.slice(16,24))+(isActive?' ●':'')+'</div>'
+      +'<div class="sess-dur">'+xesc([runs,dur].filter(Boolean).join(' · '))+'</div>'
+      +'</div>';
+  }).join('');
+
+  listEl.querySelectorAll('.sess-item').forEach(el => {
+    el.addEventListener('click', () => {
+      _selectedSessionId = el.dataset.sid;
+      updateSessionNav(_liveState);
+      populateRunList(_selectedSessionId);
+    });
+  });
+}
+
+function pollState() {
+  fetch('/api/state')
+    .then(r => r.ok ? r.json() : null)
+    .then(state => {
+      if (!state) return;
+      _liveState = state;
+      updateSessionNav(state);
+    })
+    .catch(() => {});
+}
+
+pollState();
+setInterval(pollState, 5000);
+
+// ---------------------------------------------------------------------------
+// Run list
+// ---------------------------------------------------------------------------
+
+function populateRunList(sessionIdFilter) {
+  let dagRuns = DATA.dag_runs || [];
+  if (sessionIdFilter) {
+    dagRuns = dagRuns.filter(r => r.session_id === sessionIdFilter);
+  }
+  const badge_el = document.getElementById('rl-session-badge');
+  if (badge_el) badge_el.textContent = sessionIdFilter ? '(filtered)' : '';
+
   const listEl = document.getElementById('run-list-inner');
   if (!dagRuns.length) {
-    listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:12px">No runs found.</div>';
+    listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:12px">'
+      +(sessionIdFilter ? 'No runs in this session.' : 'No runs found.')+'</div>';
     return;
   }
   listEl.innerHTML = dagRuns.map((r,i) => {
@@ -2077,6 +2212,16 @@ new Chart($('cumulCostChart'), {
     if (card) card.querySelector('.btn-cancel')?.remove();
     delete _cards[run_id];
     if (Object.keys(_cards).length === 0) $('noActiveRuns').style.display = '';
+    // Refresh DAG run list so the just-completed run appears immediately
+    fetch('/api/data')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.dag_runs) {
+          DATA.dag_runs = d.dag_runs;
+          populateRunList(_selectedSessionId);
+        }
+      })
+      .catch(() => {});
   }
 
   window.cancelRun = function(run_id) {

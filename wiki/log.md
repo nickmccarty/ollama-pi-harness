@@ -31,6 +31,46 @@ Reviewed Microsoft MagenticOne vs harness architecture. Key borrow identified: c
 
 ## [2026-04-12] ingest | wiki additions — agentic-patterns.md, roadmap.md created; synthesis-instructions.md + autoresearch_program.md updated with sessions 2+3 findings
 
+## [2026-04-20] build | Session 14 — /sync-wiki skill, memory contamination fix, /contextualize fix, dashboard repairs
+
+Seven changes shipped:
+
+1. **`/contextualize` research context fix** (`agent.py`) — context files were injected into `file_context` ("File contents:" label) which models treat as supplementary. Now promoted to `research_context` ("Research findings:") when `_skip_research=True`. Output grew from 661B to 3841B on same task; score lifted 6.2 → 7.1.
+
+2. **Memory contamination fix** (`memory.py`) — `_search()` now soft-penalises observations scoring below 7.0 (half-weight quality component) and deduplicates by title (highest-ranked per unique title kept). Prevents failed runs from re-injecting themselves and anchoring synthesis at their own quality ceiling. Root cause: two copies of "Agent Pipeline Lifecycle (6.2, 7.1)" were crowding out diverse observations.
+
+3. **`memory_context_titles` logging** (`logger.py`, `agent.py`, `memory.py`) — `get_context_with_titles()` returns titles alongside formatted context. `log_memory_hits()` accepts titles list. Console now prints each injected observation title during run. `memory_context_titles` field written to `runs.jsonl`.
+
+4. **Dashboard fixes** (`dashboard.py`) — three bugs resolved: (a) memory card inspector now lists observation titles (was showing only count); (b) synthesis node inspector now shows output content preview (was only on output node); (c) `finishCard()` now fetches `/api/data` and re-populates DAG run list — live runs appear in the DAG explorer immediately on completion instead of requiring a dashboard.py regeneration.
+
+5. **`/sync-wiki` skill** (`wiki_sync.py`, `skills.py`, `agent.py`) — deterministic regex extraction of implementation facts from source code: models by stage, key constants, wiggum dimension weights, memory ranking formula, SYNTH_INSTRUCTION text, Ollama→vLLM model map. Writes idempotent `## Implementation Reference` section to `wiki/pipeline.md` using HTML comment markers. No LLM call. Run as `python agent.py "/sync-wiki"` or `python wiki_sync.py`.
+
+6. **`sync_gaps()` + auto-fire** (`wiki_sync.py`, `agent.py`) — keyword-triggered gap extraction: maps wiggum issue strings to source code sections (7 gap patterns covering planning prompts, eval prompt, synthesis function, novelty scoring, ChromaDB setup, memory compression, research loop). Extracts function bodies and prompt templates into `## Gap-Targeted Extractions` section in wiki/pipeline.md. Auto-fires after any wiggum FAIL on a `/contextualize` run — closes the self-improving docs loop.
+
+7. **vLLM Qwen3.6-35B-A3B-AWQ exploration** — attempted and abandoned. Issues encountered: (a) cpu_offload + Mamba hybrid `may_reinitialize_input_batch` assertion bug (patched via `patch_vllm_cpu_offload.py`); (b) FlashInfer JIT libcuda linker error in WSL2 (fixed via `ln -sf /usr/lib/wsl/lib/libcuda.so.1 ~/miniconda3/envs/vllm/lib64/stubs/libcuda.so`); (c) 0.6 tok/s generation rate with 10GB cpu_offload — unusable for production. Reverted to `pi-qwen-32b` via Ollama. `patch_vllm_cpu_offload.py` and `fix_vllm_patch.py` retained for reference.
+
+**Self-improving docs loop (new):** `/sync-wiki` → `/contextualize` → wiggum FAIL → `sync_gaps(issues)` → wiki enriched → repeat. Each cycle extracts the specific source sections wiggum identified as missing, so future runs have concrete facts rather than architectural summaries.
+
+## [2026-04-21] build | Session 13 — comprehensive agentic data flow schema, run lineage tracking, planner CoT
+
+Seven tracking improvements shipped:
+
+1. **`plans.jsonl`** (`schema.py`, `logger.py`) — new JSONL file; `OrchestratorPlan` dataclass written **before** subtask execution (queryable on crash). Fields: `plan_id`, `run_id`, `session_id`, `project_id`, `parent_run_id`, `task`, `plan_type` (agent|orchestrator), `task_type`, `complexity`, `subtasks`, `known_facts`, `knowledge_gaps`, `search_queries`.
+
+2. **`parent_run_id` in `runs.jsonl`** (`logger.py`) — `RunTrace` reads `HARNESS_PARENT_RUN_ID` env var; written as first-class field in every run record. Subtask runs are now linkable to their orchestrator parent.
+
+3. **Orchestrator env propagation** (`orchestrator.py`) — `HARNESS_PROJECT_ID`, `HARNESS_SESSION_ID`, `HARNESS_PARENT_RUN_ID` propagated into each subtask subprocess env. Subtask runs are no longer orphaned: they inherit session + project IDs and carry `parent_run_id`.
+
+4. **Subtask artifact registration** (`orchestrator.py`) — `_cleanup_subtask_files()` now calls `trace.log_artifact(path, "subtask_temp")` on each temp file before deletion. All intermediate outputs are now traceable in `artifacts.jsonl`.
+
+5. **Planner CoT preservation** (`logger.py`, `agent.py`) — `log_planner_cot(response)` extracts thinking text from `make_plan()` response; stored in `planner_cot: []` list in `runs.jsonl`. Parallel to existing `synth_cot`.
+
+6. **`cot` field on `Message`** (`schema.py`, `logger.py`) — `Message` dataclass gains optional `cot` field; `log_message()` accepts `cot=` kwarg for logging thinking text alongside message content in `messages.jsonl`.
+
+7. **`log_plan_record()` on `RunTrace`** (`logger.py`) — agent.py calls this after planning so every single-run also has a `plans.jsonl` record (not just orchestrated runs).
+
+**JSONL file inventory:** `projects.jsonl`, `sessions.jsonl`, `plans.jsonl`, `runs.jsonl`, `artifacts.jsonl`, `messages.jsonl` — six files covering full pipeline lifecycle.
+
 ## [2026-04-19] build | Session 12 — Qwen3.6 MoE integration, convergence monitoring, self-knowledge skills, CoT preservation
 
 Eight harness features shipped:

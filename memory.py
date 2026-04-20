@@ -451,6 +451,33 @@ class MemoryStore:
 
         return "\n".join(lines).strip()
 
+    def get_context_with_titles(self, task: str, n: int = MAX_CONTEXT_OBSERVATIONS) -> tuple[str, list[str]]:
+        """Like get_context() but also returns observation titles for logging."""
+        rows = self._search(task, n)
+        if not rows:
+            return "", []
+
+        lines = ["## Relevant past research\n"]
+        titles = []
+        for row in rows:
+            date = row["timestamp"][:10]
+            score_str = f"{row['final_score']:.1f}/10" if row["final_score"] else "n/a"
+            task_type = row["task_type"] or "unknown"
+            title = row["title"] or ""
+            titles.append(f"{title} ({score_str})")
+            lines.append(f"**[{date}] {title}** ({task_type}, {score_str})")
+            lines.append(row["narrative"])
+            if row["facts"]:
+                try:
+                    facts = json.loads(row["facts"])
+                    if facts:
+                        lines.append("Facts: " + "; ".join(str(f) for f in facts))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            lines.append("")
+
+        return "\n".join(lines).strip(), titles
+
     def search(self, task: str, n: int = 10) -> list[sqlite3.Row]:
         """Public alias for _search — semantic + quality ranked retrieval."""
         return self._search(task, n)
@@ -492,12 +519,32 @@ class MemoryStore:
                         if not row:
                             continue
                         sim   = 1.0 - (dist / 2.0)          # cosine sim [0, 1]
-                        qual  = (row["final_score"] or 5.0) / 10.0
+                        raw_score = row["final_score"]
+                        # Soft floor: penalise failed/low-quality runs so they don't
+                        # anchor synthesis when better observations exist elsewhere.
+                        # None-scored runs (e.g. introspect) use neutral 5.0.
+                        if raw_score is not None and raw_score < 7.0:
+                            qual = (raw_score / 10.0) * 0.5   # half-weight below floor
+                        else:
+                            qual = (raw_score or 5.0) / 10.0
                         rank  = 0.7 * sim + 0.3 * qual
                         scored.append((rank, row))
 
                     scored.sort(key=lambda x: x[0], reverse=True)
-                    return [row for _, row in scored[:n]]
+
+                    # Deduplicate by title — keep only the highest-ranked observation
+                    # per unique title so repeated attempts at the same task don't
+                    # crowd out observations from other topics.
+                    seen_titles: set[str] = set()
+                    deduped = []
+                    for rank, row in scored:
+                        t = (row["title"] or "").strip().lower()
+                        if t not in seen_titles:
+                            seen_titles.add(t)
+                            deduped.append(row)
+                        if len(deduped) >= n:
+                            break
+                    return deduped
             except Exception as e:
                 print(f"  [memory] semantic search error ({e}) — falling back to FTS5")
 

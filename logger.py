@@ -14,6 +14,12 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from schema import (
+    Artifact, Message, OrchestratorPlan,
+    ARTIFACTS_PATH, MESSAGES_PATH, PLANS_PATH,
+    _append_jsonl, make_id,
+)
+
 LOG_PATH  = os.path.join(os.path.dirname(__file__), "runs.jsonl")
 TRACE_DIR = os.path.join(os.path.dirname(__file__), "traces")
 
@@ -37,13 +43,31 @@ def _extract_usage(response) -> dict:
 
 
 class RunTrace:
-    def __init__(self, task: str, producer_model: str, evaluator_model: str):
+    def __init__(
+        self,
+        task: str,
+        producer_model: str,
+        evaluator_model: str,
+        session_id: str = "",
+        project_id: str = "",
+    ):
         self._run_start  = time.monotonic()
         self._t0_us      = time.monotonic_ns() // 1000   # anchor for Chrome Trace timestamps
         self._pid        = os.getpid()
         self._events     = []                             # Chrome Trace Event list
         self._task       = task
+
+        self.run_id      = os.environ.get("HARNESS_RUN_ID") or make_id()
+        self.session_id  = session_id or os.environ.get("HARNESS_SESSION_ID", "")
+        self.project_id  = project_id or os.environ.get("HARNESS_PROJECT_ID", "")
+        self.parent_run_id = os.environ.get("HARNESS_PARENT_RUN_ID", "")
+        self._msg_seq    = 0
+
         self.data = {
+            "run_id":           self.run_id,
+            "session_id":       self.session_id,
+            "project_id":       self.project_id,
+            "parent_run_id":    self.parent_run_id,
             "timestamp":        datetime.now(timezone.utc).isoformat(),
             "task":             task,
             "producer_model":   producer_model,
@@ -70,6 +94,7 @@ class RunTrace:
             "code_executions":      0,
             "injection_stripped":   0,
             "memory_hits":          0,
+            "memory_context_titles": [],   # titles of observations injected as context
             "plan":                 None,
 
             # Orchestration
@@ -84,11 +109,10 @@ class RunTrace:
             "count_check_retry":    False,
 
             # Chain-of-thought preservation
-            # Stores the raw thinking text emitted by the producer model during
-            # each synthesis call. One entry per call (initial synth + count-retry).
-            # thinking_chars per stage is already tracked in tokens_by_stage; this
-            # field preserves the actual text for offline CoT quality analysis.
-            "synth_cot":            [],
+            # thinking_chars per stage is tracked in tokens_by_stage; these fields
+            # preserve the actual text for offline CoT quality analysis.
+            "synth_cot":            [],   # one entry per synthesize() call
+            "planner_cot":          [],   # CoT from make_plan() planner model calls
 
             # Wiggum
             "wiggum_rounds":        0,
@@ -145,13 +169,12 @@ class RunTrace:
             self._record(name, start_us, dur_us, tid, args or None)
 
     def _write_trace(self):
-        """Write Chrome Trace JSON to traces/<timestamp>_<slug>.json."""
+        """Write Chrome Trace JSON to traces/<run_id>_<slug>.json."""
         if not self._events:
             return
         os.makedirs(TRACE_DIR, exist_ok=True)
-        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^\w]+", "_", self._task[:50]).strip("_")
-        path = os.path.join(TRACE_DIR, f"{ts}_{slug}.json")
+        path = os.path.join(TRACE_DIR, f"{self.run_id}_{slug}.json")
         payload = {
             "traceEvents":     self._events,
             "displayTimeUnit": "ms",
@@ -219,8 +242,10 @@ class RunTrace:
     def log_plan(self, plan_dict: dict):
         self.data["plan"] = plan_dict
 
-    def log_memory_hits(self, count: int):
+    def log_memory_hits(self, count: int, titles: list[str] | None = None):
         self.data["memory_hits"] = count
+        if titles:
+            self.data["memory_context_titles"] = titles
 
     def log_injection_stripped(self, count: int):
         self.data["injection_stripped"] += count
@@ -236,6 +261,12 @@ class RunTrace:
         if thinking:
             self.data["synth_cot"].append(thinking)
 
+    def log_planner_cot(self, response) -> None:
+        """Extract and store thinking text from a planner model response."""
+        thinking = getattr(getattr(response, "message", None), "thinking", None) or ""
+        if thinking:
+            self.data["planner_cot"].append(thinking)
+
     def log_count_retry(self):
         self.data["count_check_retry"] = True
 
@@ -243,11 +274,70 @@ class RunTrace:
         self.data["total_search_chars"] = total_chars
         self.data["quality_floor_hit"] = total_chars < 1800
 
+    def log_artifact(self, path: str, artifact_type: str = "output", lines: int = None, content_hash: str = None):
+        """Register a produced file in artifacts.jsonl."""
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        try:
+            size = os.path.getsize(abs_path)
+        except OSError:
+            size = 0
+        a = Artifact(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            project_id=self.project_id,
+            type=artifact_type,
+            path=abs_path,
+            bytes=size,
+            lines=lines,
+            content_hash=content_hash,
+        )
+        _append_jsonl(ARTIFACTS_PATH, {"event": "artifact_create", **a.to_dict()})
+
+    def log_message(self, role: str, content: str = None, cot: str = None, tool_calls: list = None, tool_name: str = None):
+        """Record one LLM message turn in messages.jsonl."""
+        m = Message(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            project_id=self.project_id,
+            seq=self._msg_seq,
+            role=role,
+            content=content,
+            cot=cot or None,
+            tool_calls=tool_calls,
+            tool_name=tool_name,
+            chars=len(content) if content else None,
+        )
+        self._msg_seq += 1
+        _append_jsonl(MESSAGES_PATH, m.to_dict())
+
+    def log_plan_record(self, plan_dict: dict, plan_type: str = "agent") -> str:
+        """Write an OrchestratorPlan record to plans.jsonl. Returns plan_id."""
+        p = OrchestratorPlan(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            project_id=self.project_id,
+            parent_run_id=self.parent_run_id,
+            task=self._task,
+            plan_type=plan_type,
+            task_type=plan_dict.get("task_type", ""),
+            complexity=plan_dict.get("complexity", ""),
+            subtasks=[{"desc": s} for s in plan_dict.get("subtasks", [])],
+            known_facts=plan_dict.get("known_facts", []),
+            knowledge_gaps=plan_dict.get("knowledge_gaps", []),
+            search_queries=plan_dict.get("search_queries", []),
+        )
+        _append_jsonl(PLANS_PATH, p.to_dict())
+        return p.plan_id
+
     def log_write(self, path: str, content: str):
-        self.data["output_path"]    = os.path.abspath(os.path.expanduser(path))
-        self.data["output_lines"]   = content.count("\n") + 1
-        self.data["output_bytes"]   = len(content.encode("utf-8"))
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        byte_count = len(content.encode("utf-8"))
+        line_count = content.count("\n") + 1
+        self.data["output_path"]    = abs_path
+        self.data["output_lines"]   = line_count
+        self.data["output_bytes"]   = byte_count
         self.data["final_content"]  = content[:16_000]  # inline for HF export; truncated at 16k chars
+        self.log_artifact(path, artifact_type="output", lines=line_count)
 
     def log_wiggum(self, wiggum_trace: dict):
         rounds = wiggum_trace.get("rounds", [])

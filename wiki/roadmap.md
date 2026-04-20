@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-updated: 2026-04-19
+updated: 2026-04-20
 tags: [roadmap, design, architecture]
 ---
 
@@ -11,6 +11,43 @@ Ranked by estimated impact vs implementation effort. Items marked **[spec]** hav
 ---
 
 ## Active / next up
+
+### Self-improving docs loop (/sync-wiki → /contextualize → sync_gaps)
+**Source:** session 14 (2026-04-20)
+**Status:** Implemented — loop closes but gap-to-extraction coverage is partial
+
+`/sync-wiki` writes ground-truth constants/models/prompts to wiki/pipeline.md. `/contextualize` injects the wiki as research context. On wiggum FAIL, `sync_gaps(issues)` auto-fires and extracts source code sections targeted at the specific gaps identified. Next run has concrete facts.
+
+**Current gap pattern coverage** (7 patterns in `wiki_sync.py::GAP_EXTRACTIONS`): planning prompts, eval prompt, synthesis function, novelty scoring, ChromaDB setup, memory compression, research loop. Each maps issue keyword substrings to a `(file, kind, name)` extraction spec.
+
+**Next:** run the loop end-to-end until `/contextualize` passes wiggum. Add gap patterns for any remaining issues that still lack coverage. Target: /contextualize pipeline-lifecycle task reaches 9.0+.
+
+**Effort:** low — add gap patterns as needed; each is 5 lines.
+
+---
+
+### Qwen3-14B AWQ via vLLM (deferred)
+**Source:** session 14 (2026-04-20)
+**Status:** Not yet attempted — Qwen3.6-35B abandoned in favour of stability
+
+Qwen3.6-35B-A3B-AWQ achieved only 0.6 tok/s with 10GB cpu_offload on RTX 5000 Ada — unusable. Qwen3-14B AWQ (~8GB) fits in VRAM without cpu_offload and should achieve 10–15 tok/s. No `--cpu-offload-gb`, no `--kv-cache-dtype fp8` needed.
+
+**Launch template:**
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model <qwen3-14b-awq-repo> \
+  --quantization awq_marlin \
+  --dtype float16 \
+  --max-model-len 16000 \
+  --reasoning-parser qwen3 \
+  --gpu-memory-utilization 0.90 \
+  --enforce-eager \
+  --served-model-name pi-qwen3
+```
+
+**Effort:** low — find HF repo, update `.env` with `INFERENCE_BACKEND=vllm` + model map.
+
+---
 
 ### Stall-triggered replan in autoresearch
 **Source:** MagenticOne architecture review (2026-04-12)
@@ -132,3 +169,9 @@ Pending clean ablation results (Priority 5) to determine if more search rounds a
 | ε-greedy novelty gate | 2026-04-19 | NOVELTY_EPSILON=0.15; prevents search utilization collapse |
 | Eval suite OOD expansion (T_F/T_G/T_H) | 2026-04-19 | 9 tasks total; introspect, file-based, off-domain |
 | CoT preservation + model comparison bench | 2026-04-19 | synth_cot in runs.jsonl; bench_model_compare.py |
+| /contextualize research context fix | 2026-04-20 | context files promoted to research_context slot; 661B → 3841B output |
+| Memory contamination fix | 2026-04-20 | quality floor (< 7.0 half-weighted) + title dedup in _search() |
+| memory_context_titles logging | 2026-04-20 | titles logged to runs.jsonl; printed to console; dashboard memory card |
+| Dashboard: memory card titles + synthesis preview + live DAG refresh | 2026-04-20 | finishCard() fetches /api/data; synthesis node shows content preview |
+| /sync-wiki skill (wiki_sync.py) | 2026-04-20 | deterministic fact extraction from source; idempotent marker-based wiki injection |
+| sync_gaps() auto-fire on contextualize FAIL | 2026-04-20 | 7 gap patterns; extracts prompts/functions targeted at wiggum issues |
