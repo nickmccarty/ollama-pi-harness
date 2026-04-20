@@ -827,7 +827,7 @@ def write_output(content: str, path: str, trace: RunTrace):
         print(f"[eval] FAIL — {expanded} not found")
 
 
-def _store_memory(memory: MemoryStore, task: str, task_type: str, trace_data: dict, content: str):
+def _store_memory(memory: MemoryStore, task: str, task_type: str, trace_data: dict, content: str, wiggum_issues: list[str] | None = None):
     """Compress a completed run and write it to the memory store."""
     print("\n  [memory] compressing run...")
     try:
@@ -841,6 +841,7 @@ def _store_memory(memory: MemoryStore, task: str, task_type: str, trace_data: di
             output_path=trace_data.get("output_path"),
             wiggum_scores=trace_data.get("wiggum_scores", []),
             final=trace_data.get("final", "PASS"),
+            wiggum_issues=wiggum_issues or [],
         )
         print(f"  [memory] stored: {obs['title']!r}")
     except Exception as e:
@@ -878,7 +879,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1266,11 +1267,16 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         _skip_research = False
         if "contextualize" in active_skills:
             from skills import load_context_files
+            from wiki_sync import get_relevant_wiki_context as _get_wiki_ctx
             _ctx_content = load_context_files()
+            _wiki_ctx = _get_wiki_ctx()
+            if _wiki_ctx:
+                _ctx_content = (_ctx_content + "\n\n" + _wiki_ctx).strip() if _ctx_content else _wiki_ctx
             if _ctx_content:
                 file_context = (file_context + "\n\n" + _ctx_content).strip() if file_context else _ctx_content
                 _skip_research = True
-                print(f"  [skill:contextualize] injected {len(_ctx_content)} chars of agent context; skipping web search")
+                wiki_note = f" + {len(_wiki_ctx)}ch wiki" if _wiki_ctx else ""
+                print(f"  [skill:contextualize] injected {len(_ctx_content)} chars of agent context{wiki_note}; skipping web search")
             else:
                 print("  [skill:contextualize] no context files found — falling back to web search")
 
@@ -1305,6 +1311,16 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
 
         # Pre-synthesis skill injections
         skill_context = get_prompt_injections(active_skills, "pre_synthesis")
+        if "contextualize" in active_skills:
+            _ctx_directive = (
+                "The research context above contains source code, implementation details, "
+                "specific values (thresholds, weights, dimension names), and function bodies. "
+                "You MUST cite these specifics in your output — do not summarize generically. "
+                "For example: name the exact evaluation dimensions and their weights, quote "
+                "specific threshold values, and describe how functions actually work per the "
+                "provided source, not a hypothetical version."
+            )
+            skill_context = (_ctx_directive + "\n\n" + skill_context).strip() if skill_context else _ctx_directive
         if skill_context:
             skill_names = [s for s in active_skills if s in ("annotate", "cite")]
             print(f"  [skills] injecting pre_synthesis prompts: {skill_names}")
@@ -1381,24 +1397,25 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 for issue in r.get("issues", []):
                     print(f"    - {issue}")
 
+            all_wiggum_issues = [
+                issue
+                for r in wiggum_trace["rounds"]
+                for issue in (r.get("issues") or [])
+            ]
+
             # Gap-targeted wiki sync: when a contextualize run fails, extract source
             # sections that answer wiggum's issues so the next run has concrete facts.
             if wiggum_trace["final"] != "PASS" and "contextualize" in active_skills:
-                all_issues = [
-                    issue
-                    for r in wiggum_trace["rounds"]
-                    for issue in (r.get("issues") or [])
-                ]
-                if all_issues:
+                if all_wiggum_issues:
                     print("\n  [sync-wiki:gaps] wiggum FAIL on contextualize — extracting gap facts...")
                     try:
                         from wiki_sync import sync_gaps as _sync_gaps
-                        _sync_gaps(all_issues)
+                        _sync_gaps(all_wiggum_issues)
                     except Exception as _gap_err:
                         print(f"  [sync-wiki:gaps] error (non-fatal): {_gap_err}")
 
             trace.finish()
-            _store_memory(memory, task, wiggum_trace.get("task_type"), trace.data, content)
+            _store_memory(memory, task, wiggum_trace.get("task_type"), trace.data, content, wiggum_issues=all_wiggum_issues)
         else:
             trace.finish("PASS")
             from wiggum import detect_task_type

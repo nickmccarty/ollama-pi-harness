@@ -297,6 +297,7 @@ class MemoryStore:
         output_path: str,
         wiggum_scores: list[float],
         final: str,
+        wiggum_issues: list[str] | None = None,
     ) -> dict:
         """
         Compress a completed run into an observation and persist it.
@@ -313,6 +314,11 @@ class MemoryStore:
             output_bytes=output_bytes or 0,
             wiggum_scores=wiggum_scores or [],
         )
+
+        # Append wiggum issues as quality-lesson facts so future runs see what failed
+        if wiggum_issues:
+            issue_facts = [f"[wiggum] {issue}" for issue in wiggum_issues[:5]]
+            obs["facts"] = (obs.get("facts") or []) + issue_facts
 
         score = wiggum_scores[-1] if wiggum_scores else None
         facts_json = json.dumps(obs["facts"]) if obs["facts"] else None

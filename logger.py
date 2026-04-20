@@ -378,5 +378,5 @@ class RunTrace:
         tok_in  = self.data["input_tokens"]
         tok_out = self.data["output_tokens"]
         dur     = self.data["run_duration_s"]
-        print(f"  [log] {dur}s  in={tok_in} out={tok_out} tok  → {LOG_PATH}")
+        print(f"  [log] {dur}s  in={tok_in} out={tok_out} tok  -> {LOG_PATH}")
         self._write_trace()

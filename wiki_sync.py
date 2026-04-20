@@ -364,6 +364,26 @@ GAP_EXTRACTIONS = [
              "gather_research() — saturation loop: search → novelty gate → compress → repeat"),
         ],
     },
+    {
+        "triggers": ["planner generates queries", "determines task type", "task classification",
+                     "how the plan", "how queries are determined", "rule-based", "natural language processing",
+                     "make plan", "make_plan", "complexity score", "plan queries"],
+        "label": "Planner — make_plan() (planner.py)",
+        "entries": [
+            ("planner.py", "function", "make_plan", 35,
+             "make_plan() — LLM call that classifies task type, complexity, and generates search queries"),
+        ],
+    },
+    {
+        "triggers": ["auto-activate", "auto activate", "skill activation", "determines which skills",
+                     "heuristic", "how skills are activated", "complexity score calculation",
+                     "keywords or complexity", "auto_activate"],
+        "label": "Skill auto-activation (agent.py)",
+        "entries": [
+            ("agent.py", "function", "auto_activate", 30,
+             "auto_activate() — rule-based: maps task keywords and plan signals to skill names"),
+        ],
+    },
 ]
 
 
@@ -485,6 +505,71 @@ def sync_gaps(issues: list[str]) -> str:
     )
     print(f"  {summary}")
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Selective context injection for /contextualize
+# ---------------------------------------------------------------------------
+
+def get_relevant_wiki_context(max_chars: int = 8000) -> str:
+    """
+    Return a targeted slice of pipeline.md for /contextualize injection:
+      1. Human-written body (pipeline diagram + architectural overview, capped at
+         BODY_MAX chars) — provides accurate function names and stage descriptions.
+      2. Implementation Reference marker block — constants, models, weights.
+      3. Gap-Targeted Extractions marker block — source code for flagged gaps.
+
+    Total is capped at max_chars to prevent truncation.
+    Returns empty string if pipeline.md doesn't exist.
+    """
+    BODY_MAX = 3000
+
+    if not WIKI_TARGET.exists():
+        return ""
+
+    text = WIKI_TARGET.read_text(encoding="utf-8")
+    parts = []
+
+    # 1. Human-written body: strip frontmatter, take content before first marker block
+    body = text
+    if body.startswith("---"):
+        end_fm = body.find("---", 3)
+        if end_fm != -1:
+            body = body[end_fm + 3:].strip()
+    # Trim at first auto-generated marker so we don't double-include it
+    for marker in (MARKER_START, GAP_MARKER_START):
+        idx = body.find(marker)
+        if idx != -1:
+            body = body[:idx].strip()
+    if body:
+        excerpt = body[:BODY_MAX]
+        if len(body) > BODY_MAX:
+            excerpt += f"\n… ({len(body) - BODY_MAX} more chars)"
+        parts.append(excerpt)
+
+    # 2. Implementation Reference block (constants, models, dim weights)
+    impl_m = re.search(
+        re.escape(MARKER_START) + r"(.*?)" + re.escape(MARKER_END),
+        text, re.DOTALL
+    )
+    if impl_m:
+        parts.append(impl_m.group(0).strip())
+
+    # 3. Gap-Targeted Extractions (source code for flagged gaps)
+    gap_m = re.search(
+        re.escape(GAP_MARKER_START) + r"(.*?)" + re.escape(GAP_MARKER_END),
+        text, re.DOTALL
+    )
+    if gap_m:
+        parts.append(gap_m.group(0).strip())
+
+    if not parts:
+        return ""
+
+    combined = "\n\n".join(parts)
+    if len(combined) > max_chars:
+        combined = combined[:max_chars] + f"\n… (truncated at {max_chars} chars)"
+    return combined
 
 
 # ---------------------------------------------------------------------------
