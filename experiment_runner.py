@@ -66,14 +66,24 @@ def _resolve_task(task_id: str, spec: ExperimentSpec, suite: dict) -> dict:
         return spec.task_defs[task_id]
     if task_id in suite:
         entry = suite[task_id]
-        return {"task": entry["task"], "output": os.path.expanduser(entry["output"])}
+        # Keep raw (unexpanded) output for task string replacement, expanded for existence check
+        return {
+            "task":             entry["task"],
+            "output":           os.path.expanduser(entry["output"]),
+            "output_raw":       entry["output"],  # e.g. ~/Desktop/.../eval-x.md
+        }
     raise ValueError(f"Task {task_id!r} not found in spec.task_defs or eval_suite.SUITE")
 
 
 def _treatment_output_path(base_output: str, treatment: str) -> str:
-    """Derive a treatment-specific output path to avoid overwrites."""
+    """Derive a treatment-specific output path to avoid overwrites.
+    Preserves the separator style of the input (forward slashes for ~/... paths)."""
+    sep = "/" if "/" in base_output and not base_output.startswith(("C:", "D:")) else None
     p = Path(base_output)
-    return str(p.with_stem(f"{p.stem}-{treatment}"))
+    result = str(p.with_stem(f"{p.stem}-{treatment}"))
+    if sep:
+        result = result.replace("\\", "/")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +181,20 @@ def run_one(
     run_num   = run_entry["run_num"]
 
     task_def = _resolve_task(task_id, spec, suite)
-    output_base = task_def["output"]
+    output_base = task_def["output"]          # expanded: C:\Users\...
+    output_raw  = task_def.get("output_raw", output_base)  # raw: ~/Desktop/...
     output_path = _treatment_output_path(output_base, treatment)
 
-    # Rewrite task string to use treatment-specific output path
+    # Rewrite task string to point at the treatment-specific output file.
+    # The task string embeds the raw (unexpanded) path, so replace that first;
+    # fall back to expanded path, then append if neither matches.
     task_str = task_def["task"]
-    if output_base in task_str:
+    output_raw_path = _treatment_output_path(output_raw, treatment)
+    if output_raw in task_str:
+        task_str = task_str.replace(output_raw, output_raw_path)
+    elif output_base in task_str:
         task_str = task_str.replace(output_base, output_path)
     else:
-        # Append output path if template doesn't embed it
         task_str = f"{task_str} save to {output_path}"
 
     label = f"[run {run_num}/{total}] {task_id} treatment={treatment} rep={rep}"
