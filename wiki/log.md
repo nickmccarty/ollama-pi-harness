@@ -31,6 +31,22 @@ Reviewed Microsoft MagenticOne vs harness architecture. Key borrow identified: c
 
 ## [2026-04-12] ingest | wiki additions — agentic-patterns.md, roadmap.md created; synthesis-instructions.md + autoresearch_program.md updated with sessions 2+3 findings
 
+## [2026-04-20] build | Session 17 — MCP security hardening: input validation, concurrency limit, API key auth
+
+Five hardening layers applied to `mcp_server.py`:
+
+1. **`_validate_task()` gate** — called before any subprocess spawn; enforces: (a) task length cap (default 2000 chars, env `MCP_TASK_MAX_CHARS`); (b) UNC path block (`\\` and `//` prefixes); (c) injection scan via `scan_for_injection()` from security.py; (d) output path sandbox via `check_output_path()` — rejects any embedded `.md` path outside `~/Desktop` or `~/Documents`.
+
+2. **Concurrency semaphore** (`threading.Semaphore`) — max 2 simultaneous `run_task`/`run_orchestrated` calls (env `MCP_MAX_CONCURRENCY`). Busy responses return immediately with a retry hint rather than queuing additional model loads.
+
+3. **Optional API key auth** — `MCP_API_KEY` env var; when set, `run_task`/`run_orchestrated` require a matching `api_key` param. No-op when unset (default: no auth). Designed for HTTP transport where the server is reachable over a network.
+
+4. **Imports from security.py** — `check_output_path`, `scan_for_injection` now imported at module level; no new security logic, reuses existing sandboxes already proven in agent.py.
+
+5. **`threading` import added** — `import threading` added alongside other stdlib imports.
+
+**Gap closed:** `mcp_server.py` was a new network-accessible entry point that bypassed all security.py checks applied inside agent.py. Input now validated at the perimeter before any subprocess is spawned.
+
 ## [2026-04-20] build | Session 16 — /autoexperiment infrastructure: experiment_panel, runner, analyzer
 
 Three new files close the /autoexperiment loop:

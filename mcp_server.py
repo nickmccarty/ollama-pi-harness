@@ -51,16 +51,61 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import argparse
 
 from mcp.server.fastmcp import FastMCP
+from security import check_output_path, scan_for_injection
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _AGENT_SCRIPT = os.path.join(_BASE_DIR, "agent.py")
 _ORCH_SCRIPT  = os.path.join(_BASE_DIR, "orchestrator.py")
 _RUNS_PATH    = os.path.join(_BASE_DIR, "runs.jsonl")
 _RECENT_N     = int(os.environ.get("MCP_RECENT_RUNS", 10))
+
+# Security limits
+_TASK_MAX_CHARS   = int(os.environ.get("MCP_TASK_MAX_CHARS", 2000))
+_MAX_CONCURRENCY  = int(os.environ.get("MCP_MAX_CONCURRENCY", 2))
+_API_KEY          = os.environ.get("MCP_API_KEY", "")      # empty = no auth required
+_semaphore        = threading.Semaphore(_MAX_CONCURRENCY)
+
+
+def _validate_task(task: str) -> tuple[bool, str]:
+    """
+    Gate all MCP tool inputs: length cap, UNC block, injection scan, output path check.
+    Returns (ok, error_message).
+    """
+    if len(task) > _TASK_MAX_CHARS:
+        return False, f"task too long: {len(task)} chars (max {_TASK_MAX_CHARS})"
+
+    # Block UNC paths (\\server\share) which could reach network shares
+    if "\\\\" in task or task.lstrip().startswith("//"):
+        return False, "UNC/network paths are not permitted in task strings"
+
+    clean, matches = scan_for_injection(task, source="mcp_task")
+    if not clean:
+        return False, f"task rejected (injection pattern): {matches[0]}"
+
+    # Validate any output path embedded in the task
+    import re as _re
+    m = _re.search(
+        r"(~[\w/\\.\\-]+\.md|[A-Za-z]:[\w/\\.\-]+\.md|/[\w/.\-]+\.md|[\w./\\\-]+\.md)",
+        task,
+    )
+    if m:
+        ok, reason = check_output_path(m.group(1))
+        if not ok:
+            return False, f"output path rejected: {reason}"
+
+    return True, ""
+
+
+def _check_api_key(provided: str) -> bool:
+    """Return True if auth is not configured or the key matches."""
+    if not _API_KEY:
+        return True
+    return provided == _API_KEY
 
 mcp = FastMCP(
     "harness-engineering",
@@ -153,7 +198,7 @@ def _load_recent_runs(n: int = _RECENT_N) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def run_task(task: str) -> str:
+def run_task(task: str, api_key: str = "") -> str:
     """
     Run a research or synthesis task through the harness agent pipeline.
 
@@ -163,9 +208,24 @@ def run_task(task: str) -> str:
     If no output path is included, a temporary path is used and the content is
     returned directly.
 
+    api_key: required when MCP_API_KEY is set on the server.
+
     Returns the markdown document content produced by the agent.
     """
-    result = _run_subprocess(_AGENT_SCRIPT, task)
+    if not _check_api_key(api_key):
+        return "[error] invalid or missing api_key"
+    ok, err = _validate_task(task)
+    if not ok:
+        return f"[error] {err}"
+
+    acquired = _semaphore.acquire(blocking=False)
+    if not acquired:
+        return f"[error] server busy (max {_MAX_CONCURRENCY} concurrent tasks) — retry shortly"
+    try:
+        result = _run_subprocess(_AGENT_SCRIPT, task)
+    finally:
+        _semaphore.release()
+
     if not result["ok"]:
         error_hint = result["stderr"] or result["stdout"] or "unknown error"
         return f"[error] Agent run failed after {result['elapsed']}s.\n{error_hint}"
@@ -173,7 +233,7 @@ def run_task(task: str) -> str:
 
 
 @mcp.tool()
-def run_orchestrated(task: str) -> str:
+def run_orchestrated(task: str, api_key: str = "") -> str:
     """
     Run a complex multi-subtask research task through the orchestrator.
 
@@ -184,9 +244,24 @@ def run_orchestrated(task: str) -> str:
     The orchestrator decomposes the task into parallel subtasks, assembles the
     results, and runs wiggum verification on the final output.
 
+    api_key: required when MCP_API_KEY is set on the server.
+
     Returns the assembled markdown document.
     """
-    result = _run_subprocess(_ORCH_SCRIPT, task, timeout=1800)
+    if not _check_api_key(api_key):
+        return "[error] invalid or missing api_key"
+    ok, err = _validate_task(task)
+    if not ok:
+        return f"[error] {err}"
+
+    acquired = _semaphore.acquire(blocking=False)
+    if not acquired:
+        return f"[error] server busy (max {_MAX_CONCURRENCY} concurrent tasks) — retry shortly"
+    try:
+        result = _run_subprocess(_ORCH_SCRIPT, task, timeout=1800)
+    finally:
+        _semaphore.release()
+
     if not result["ok"]:
         error_hint = result["stderr"] or result["stdout"] or "unknown error"
         return f"[error] Orchestration failed after {result['elapsed']}s.\n{error_hint}"

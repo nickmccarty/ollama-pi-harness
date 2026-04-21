@@ -178,3 +178,4 @@ Pending clean ablation results (Priority 5) to determine if more search rounds a
 | experiment_runner.py | 2026-04-20 | CRD runner; env var treatments; checkpoint; treatment-specific output paths |
 | experiment_analyzer.py | 2026-04-20 | stats + hypothesis eval + Markdown report + panel integration |
 | runs.jsonl: experiment_id + treatment_level fields | 2026-04-20 | logger.py reads HARNESS_EXPERIMENT_ID/TREATMENT_LEVEL env vars |
+| MCP server security hardening | 2026-04-20 | _validate_task(): length cap, UNC block, injection scan, output path sandbox; semaphore; API key |
