@@ -1,0 +1,36 @@
+{
+  "title": "prior_knowledge_pass_depth_impact",
+  "hypothesis": "Enabling prior knowledge pass improves mean depth_r1 by >= 0.2 points.",
+  "falsified_if": "mean depth_r1 delta < 0.2",
+  "factor": {
+    "name": "Prior Knowledge Pass",
+    "levels": [
+      "off",
+      "on"
+    ]
+  },
+  "tasks": [
+    "T_A",
+    "T_B",
+    "T_C"
+  ],
+  "replications": 3,
+  "response_variables": [
+    "depth_r1",
+    "score_r1",
+    "wiggum_rounds"
+  ],
+  "controlled_variables": {
+    "producer": "pi-qwen-32b",
+    "evaluator": "Wiggum"
+  },
+  "mutable_scope": {
+    "type": "env",
+    "var": "HARNESS_SKIP_PRIOR_KNOWLEDGE",
+    "levels": {
+      "off": "1",
+      "on": ""
+    }
+  },
+  "notes": "Evaluating the impact of prior knowledge pass on depth scores across a mix of task types."
+}

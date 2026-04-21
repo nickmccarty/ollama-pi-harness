@@ -141,8 +141,12 @@ randomized design (CRD) experiment via experiment_runner.py.
    - best_practices (T_B, T_E) — open-ended synthesis
    - Mix them to avoid task-type confounds.
 
-4. Factor levels: the first level is the BASELINE (current behaviour or "off").
-   The second level is the TREATMENT (the change you want to test).
+4. Factor levels: the first level is the BASELINE (feature disabled / current behaviour).
+   The second level is the TREATMENT (feature enabled / the change you want to test).
+   IMPORTANT: if the env var is a SKIP or DISABLE flag, invert the values so factor "off"
+   maps to the skip var being set (feature absent) and factor "on" maps to var being empty
+   (feature present). Example: HARNESS_SKIP_X → levels: {"off":"1","on":""}
+   This ensures delta = treatment - baseline = improvement from enabling the feature.
 
 5. replications: use 3. Use 2 only if runs are very expensive (>10 min each).
 
