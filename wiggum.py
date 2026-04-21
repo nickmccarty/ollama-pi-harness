@@ -28,6 +28,7 @@ import re
 from contextlib import contextmanager
 import ollama as _ollama_raw
 from inference import OllamaLike as _OllamaLike
+from summarizer import summarize_for_eval, summarize_for_revision
 
 
 @contextmanager
@@ -199,9 +200,10 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
     task_type = detect_task_type(task)
     print(f"  [evaluate] task_type={task_type}  scoring output...")
 
+    eval_content = summarize_for_eval(content, task, _trace)
     prompt = EVAL_PROMPT.format(
         task=task,
-        content=content[:6000],
+        content=eval_content,
         task_criteria=TASK_CRITERIA[task_type],
     )
 
@@ -274,10 +276,12 @@ def revise(task: str, content: str, eval_result: dict, _trace=None) -> str:
     """Ask the producer model to revise the output given evaluator feedback."""
     print("  [revise] asking producer to fix issues...")
 
-    issues_text = "\n".join(f"- {i}" for i in eval_result.get("issues", []))
+    issues_list = eval_result.get("issues", [])
+    issues_text = "\n".join(f"- {i}" for i in issues_list)
+    revision_content = summarize_for_revision(content, task, issues_list, _trace)
     prompt = REVISE_PROMPT.format(
         task=task,
-        content=content,
+        content=revision_content,
         issues=issues_text,
         feedback=eval_result.get("feedback", ""),
     )
@@ -612,7 +616,7 @@ def loop_annotate(
         print(f"  [evaluate] task_type=annotate  scoring annotation...")
         eval_prompt = EVAL_PROMPT_ANNOTATE.format(
             paper_context=paper_context[:4000],
-            content=content[:4000],
+            content=summarize_for_eval(content, task),
         )
         response = ollama.chat(
             model=evaluator_model,
