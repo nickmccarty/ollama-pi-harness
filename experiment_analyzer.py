@@ -84,10 +84,10 @@ def load_experiment_runs(experiment_id: str) -> list[dict]:
 
 def extract_run(r: dict) -> dict:
     scores = r.get("wiggum_scores", [])
-    dims_list = r.get("wiggum_dims", [])
     score_r1    = scores[0] if scores else None
     score_final = scores[-1] if scores else None
-    dims_r1     = dims_list[0] if dims_list else {}
+    eval_log = r.get("wiggum_eval_log", []) or []
+    dims_r1  = eval_log[0].get("dims", {}) if eval_log else {}
     return {
         "task_id":       r.get("treatment_level", "") and r.get("task_type", ""),  # overridden below
         "treatment":     r.get("treatment_level", ""),
@@ -182,12 +182,16 @@ def _evaluate_hypothesis(spec: ExperimentSpec, stats: dict) -> dict:
         return {"verdict": "INDETERMINATE", "observed": "single treatment", "threshold": str(threshold)}
 
     baseline, treatment = levels[0], levels[1]
-    # Stats keys use _mean suffix (e.g. "depth_r1_mean"); try both
-    key_mean = f"{metric}_mean"
-    baseline_means  = [s.get(key_mean, s.get(metric)) for s in stats.values()
-                       if s.get("treatment") == baseline and s.get(key_mean, s.get(metric)) is not None]
-    treatment_means = [s.get(key_mean, s.get(metric)) for s in stats.values()
-                       if s.get("treatment") == treatment and s.get(key_mean, s.get(metric)) is not None]
+    # Stats keys: dimension metrics stored as "dim_{metric}_mean"; composite as "{metric}_mean"
+    def _lookup(s: dict, m: str):
+        return s.get(f"dim_{m}_mean", s.get(f"{m}_mean", s.get(m)))
+
+    baseline_means  = [v for s in stats.values()
+                       if s.get("treatment") == baseline
+                       for v in [_lookup(s, metric)] if v is not None]
+    treatment_means = [v for s in stats.values()
+                       if s.get("treatment") == treatment
+                       for v in [_lookup(s, metric)] if v is not None]
 
     mean_baseline  = _mean(baseline_means)
     mean_treatment = _mean(treatment_means)
@@ -352,17 +356,25 @@ def analyze(spec_path: str, run_panel: bool = True) -> None:
         return
 
     # Enrich runs with task_id + rep (use explicit field if present, else infer)
+    # Exclude runs where task_id resolved to "?" — they lack the tracking field
+    # and were produced before task_id tagging was implemented.
     runs = []
+    skipped = 0
     rep_counters: dict[tuple, int] = defaultdict(int)
     for r in raw_runs:
         extracted = extract_run(r)
         task_id = r.get("task_id") or _infer_task_id(r, spec)
+        if task_id == "?":
+            skipped += 1
+            continue
         treatment = extracted["treatment"]
         rep_counters[(task_id, treatment)] += 1
         extracted["_task_id"] = task_id
         extracted["_rep"]     = rep_counters[(task_id, treatment)]
         extracted["_raw"]     = r
         runs.append(extracted)
+    if skipped:
+        print(f"  [warn] skipped {skipped} run(s) with unresolvable task_id (pre-tagging runs)")
 
     # Compute per-(task, treatment) statistics
     groups: dict[tuple, list] = defaultdict(list)
