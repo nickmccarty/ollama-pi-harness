@@ -63,6 +63,7 @@ class RunTrace:
         self.parent_run_id   = os.environ.get("HARNESS_PARENT_RUN_ID", "")
         self.experiment_id   = os.environ.get("HARNESS_EXPERIMENT_ID", "")
         self.treatment_level = os.environ.get("HARNESS_TREATMENT_LEVEL", "")
+        self.task_id         = os.environ.get("HARNESS_TASK_ID", "")
         self._msg_seq    = 0
 
         self.data = {
@@ -72,6 +73,7 @@ class RunTrace:
             "parent_run_id":    self.parent_run_id,
             "experiment_id":    self.experiment_id,
             "treatment_level":  self.treatment_level,
+            "task_id":          self.task_id,
             "timestamp":        datetime.now(timezone.utc).isoformat(),
             "task":             task,
             "producer_model":   producer_model,

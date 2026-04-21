@@ -147,7 +147,7 @@ def _save_spec(experiment_id: str, spec: ExperimentSpec) -> None:
 # Treatment env var application
 # ---------------------------------------------------------------------------
 
-def _build_env(spec: ExperimentSpec, treatment: str) -> dict:
+def _build_env(spec: ExperimentSpec, treatment: str, task_id: str = "") -> dict:
     """Return subprocess env with treatment applied."""
     env = os.environ.copy()
     scope = spec.mutable_scope
@@ -159,8 +159,9 @@ def _build_env(spec: ExperimentSpec, treatment: str) -> dict:
         elif var in env:
             del env[var]
     # Always tag the run
-    env["HARNESS_EXPERIMENT_ID"]  = spec.title.lower().replace(" ", "-")[:40]
+    env["HARNESS_EXPERIMENT_ID"]   = spec.title.lower().replace(" ", "-")[:40]
     env["HARNESS_TREATMENT_LEVEL"] = treatment
+    env["HARNESS_TASK_ID"]         = task_id
     return env
 
 
@@ -208,7 +209,7 @@ def run_one(
         print(f"  [dry-run] would execute: {task_str[:120]}")
         return {**run_entry, "ok": None, "elapsed": 0, "dry_run": True}
 
-    env = _build_env(spec, treatment)
+    env = _build_env(spec, treatment, task_id=task_id)
     t0 = time.time()
     result = subprocess.run(
         [sys.executable, AGENT_SCRIPT, task_str],

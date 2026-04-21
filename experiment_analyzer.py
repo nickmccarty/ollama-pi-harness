@@ -351,12 +351,12 @@ def analyze(spec_path: str, run_panel: bool = True) -> None:
         print("  [warn] no runs found — run experiment_runner.py first")
         return
 
-    # Enrich runs with task_id + rep (inferred from task string)
+    # Enrich runs with task_id + rep (use explicit field if present, else infer)
     runs = []
     rep_counters: dict[tuple, int] = defaultdict(int)
     for r in raw_runs:
         extracted = extract_run(r)
-        task_id = _infer_task_id(r, spec)
+        task_id = r.get("task_id") or _infer_task_id(r, spec)
         treatment = extracted["treatment"]
         rep_counters[(task_id, treatment)] += 1
         extracted["_task_id"] = task_id
