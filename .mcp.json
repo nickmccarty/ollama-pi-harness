@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "harness": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "cwd": "C:/Users/nicho/Desktop/harness-engineering",
+      "env": {
+        "CONDA_DEFAULT_ENV": "ollama-pi"
+      }
+    }
+  }
+}

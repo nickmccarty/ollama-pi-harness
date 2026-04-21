@@ -118,17 +118,39 @@ def _assign_paths(subtask_descs: list[str], workspace: str) -> list[dict]:
     return results
 
 
-def _run_one_subtask(sub: dict) -> dict:
+def _run_one_subtask(sub: dict, parent_env: dict | None = None) -> dict:
     """
-    Run a single subtask as a subprocess with retry policy.
-    Captures output per-subtask so parallel runs don't interleave on stdout.
-    Failure policy: retry up to SUBTASK_MAX_RETRIES times, then mark as failed.
+    Run a single subtask, routing to a remote MCP agent if HARNESS_MCP_ENDPOINTS
+    matches the task string; otherwise spawns a local agent.py subprocess.
+    parent_env: HARNESS_* env vars to propagate into the subprocess.
     Returns sub enriched with: content, output_log, attempts, elapsed.
     """
+    from mcp_dispatch import resolve_endpoint, route_subtask
+
+    # --- MCP dispatch path ---
+    endpoint = resolve_endpoint(sub["task"])
+    if endpoint:
+        print(f"  [orchestrator] MCP dispatch: {sub['desc'][:60]} -> {endpoint}")
+        result = route_subtask(sub["task"], endpoint)
+        sub["output_log"] = [f"[mcp] {endpoint}"]
+        sub["attempts"] = 1
+        sub["elapsed"] = result.get("elapsed", 0)
+        if result["ok"]:
+            sub["content"] = result["content"]
+            return sub
+        # MCP failed — fall through to local subprocess
+        print(f"  [orchestrator] MCP failed ({result.get('error')}) — falling back to local")
+
+    # --- Local subprocess path ---
     agent_script = os.path.join(os.path.dirname(__file__), "agent.py")
-    sub["output_log"] = []
+    sub["output_log"] = sub.get("output_log", [])
     sub["attempts"] = 0
     t0 = time.time()
+
+    # Build subprocess environment: inherit current env + harness tracking vars
+    env = os.environ.copy()
+    if parent_env:
+        env.update(parent_env)
 
     for attempt in range(1, SUBTASK_MAX_RETRIES + 2):
         sub["attempts"] = attempt
@@ -137,6 +159,7 @@ def _run_one_subtask(sub: dict) -> dict:
             capture_output=True,
             text=True,
             cwd=os.path.dirname(__file__),
+            env=env,
         )
         sub["output_log"].append(result.stdout + (result.stderr or ""))
 
@@ -162,10 +185,10 @@ def _run_one_subtask(sub: dict) -> dict:
     return sub
 
 
-def _run_subtasks_parallel(subtask_defs: list[dict]) -> list[dict]:
+def _run_subtasks_parallel(subtask_defs: list[dict], parent_env: dict | None = None) -> list[dict]:
     """
     Execute subtasks in parallel threads (each spawns its own subprocess).
-    Prints each subtask's captured output sequentially after all complete.
+    parent_env: HARNESS_* env vars to propagate for run lineage tracking.
     Returns subtask_defs enriched with content, elapsed, attempts.
     """
     n = len(subtask_defs)
@@ -176,7 +199,7 @@ def _run_subtasks_parallel(subtask_defs: list[dict]) -> list[dict]:
     results = [None] * n
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_idx = {pool.submit(_run_one_subtask, sub): i
+        future_to_idx = {pool.submit(_run_one_subtask, sub, parent_env): i
                          for i, sub in enumerate(subtask_defs)}
         for future in as_completed(future_to_idx):
             idx = future_to_idx[future]
@@ -204,15 +227,17 @@ def _run_subtasks_parallel(subtask_defs: list[dict]) -> list[dict]:
     return results
 
 
-def _cleanup_subtask_files(subtask_defs: list[dict]):
-    """Remove temporary subtask output files."""
+def _cleanup_subtask_files(subtask_defs: list[dict], trace: "RunTrace | None" = None):
+    """Register subtask temp files as artifacts, then remove them."""
     for sub in subtask_defs:
         expanded = os.path.expanduser(sub["path"])
-        try:
-            if os.path.exists(expanded):
+        if os.path.exists(expanded):
+            if trace is not None:
+                trace.log_artifact(expanded, artifact_type="subtask_temp")
+            try:
                 os.remove(expanded)
-        except OSError:
-            pass
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -265,11 +290,23 @@ def orchestrate(task: str, use_wiggum: bool = True):
     trace.data["subtask_count"] = len(plan.subtasks)
     trace.data["parallel"] = True
 
+    # Write plan record before execution so it's queryable even on crash
+    plan_dict = {**plan.to_dict(), "subtasks": [s["desc"] if isinstance(s, dict) else s for s in plan.subtasks]}
+    trace.log_plan_record(plan_dict, plan_type="orchestrator")
+
+    # Propagate tracking IDs into subtask subprocesses for run lineage
+    parent_env = {
+        "HARNESS_PROJECT_ID":   trace.project_id,
+        "HARNESS_SESSION_ID":   trace.session_id,
+        "HARNESS_PARENT_RUN_ID": trace.run_id,
+        "HARNESS_RUN_ID":       "",   # each subtask generates its own run_id
+    }
+
     try:
         subtask_defs = _assign_paths(plan.subtasks, workspace)
 
         # Execute subtasks in parallel
-        subtask_defs = _run_subtasks_parallel(subtask_defs)
+        subtask_defs = _run_subtasks_parallel(subtask_defs, parent_env=parent_env)
 
         completed = [s for s in subtask_defs if s.get("content")]
         failed = [s for s in subtask_defs if not s.get("content")]
@@ -336,7 +373,10 @@ def orchestrate(task: str, use_wiggum: bool = True):
         trace.finish("ERROR")
         raise
     finally:
-        _cleanup_subtask_files(subtask_defs if 'subtask_defs' in dir() else [])
+        _cleanup_subtask_files(
+            subtask_defs if 'subtask_defs' in dir() else [],
+            trace=trace if 'trace' in dir() else None,
+        )
 
 
 # ---------------------------------------------------------------------------
