@@ -190,4 +190,40 @@ Seven harness features shipped:
 
 **Synthesis epilogue fix** (`agent.py`) — `clean_synthesis_output` extended with `---` + meta-commentary pattern (strips "This synthesized guide can be saved to..." trailing text from smaller models).
 
+## [2026-04-21] build | Session 18 — atla/selene-mini evaluator, experiment infrastructure fixes, depth anchoring investigation
+
+Four findings and fixes from the evaluator switch and first controlled experiments:
+
+1. **`atla/selene-mini` evaluator** (`wiggum.py`) — switched from `Qwen3-Coder:30b` to `atla/selene-mini` (Llama-3.1-8B fine-tuned as LLM judge, outperforms GPT-4o on RewardBench, 128K context). `EVALUATOR_MODEL` default updated. `SUMMARIZER_EVAL_THRESHOLD` raised from 5500 → 32000 chars to exploit Selene's context window and preserve depth signal.
+
+2. **Depth rubric calibration** (`wiggum.py`) — replaced generic 3-level anchor with a 7-level prose-grounded ladder (depth=3 through depth=10) to combat score attractor at depth=6 observed across all full-length outputs regardless of content variation.
+
+3. **Experiment infrastructure bug fixes** (`experiment_runner.py`, `logger.py`, `experiment_analyzer.py`):
+   - `HARNESS_TASK_ID` now threaded through `_build_env()` → `logger.py` → `runs.jsonl`; analyzer skips pre-tagging runs with `task_id="?"`
+   - `extract_run()` fixed: dims read from `wiggum_eval_log[0]['dims']` (not missing `wiggum_dims` field)
+   - `_lookup()` helper in `_evaluate_hypothesis()` tries `dim_{metric}_mean` before `{metric}_mean` to match stored key format
+
+4. **Score anchoring diagnosed** — Selene assigns identical dims (9,7,6,8,8) to different-sized T_A outputs. Root cause confirmed: depth=6 is accurate (What/Why/How scaffold produces boilerplate with toy stubs). Qualitative review showed prose_depth outputs ARE more grounded (real systems, real numbers) but Selene cannot distinguish hallucinated specificity (numbers in code stubs) from grounded specificity (real thresholds). `synth_instruction_depth` FALSIFIED at delta=0 — evaluator validity problem, not producer capability.
+
+**Key insight:** the binding constraint on depth scores is the evaluator's inability to distinguish hallucinated scaffold specificity from grounded practitioner specificity. This motivates the `grounded_r1` dimension added in Session 19.
+
+## [2026-04-21] build | Session 19 — grounded_r1 dimension, hallucination detector, hybrid vLLM/Ollama routing, YouTube transcription
+
+Six improvements shipped:
+
+1. **`grounded_r1` eval dimension + hallucination detector** (`wiggum.py`) — new 6th scoring dimension (weight 0.15) measures whether specific claims are traceable to real systems, documented APIs, or published benchmarks. Calibration anchors: grounded=5-6 flags code blocks with invented method names; grounded=3-4 flags mostly hallucinated specifics. Weights redistributed: depth 0.30→0.25, completeness 0.25→0.20, specificity 0.15→0.10. `_count_stub_blocks()` post-score detector: scans code blocks for standalone method calls with 12+ char names on objects not in a known-real namespace (`_KNOWN_OBJECTS`); docks `depth` by 1 per suspicious block (cap 2). Correctly flags `bt.apply_budget_constraints()` / `bt.optimize_resource_usage()` pattern from baseline outputs.
+
+2. **`grounded_r1` registered as response variable** (`experiment_design.py`, `experiment_analyzer.py`) — added to `experiment_design.py` dimension catalog (weight, description). Added to `dim_names` in both the stats computation loop and the per-dimension report table in `experiment_analyzer.py`.
+
+3. **Hybrid vLLM/Ollama routing** (`inference.py`) — separated routing from name translation. `_VLLM_ROUTE: set | None` tracks which models actually go to vLLM. When `VLLM_MODEL_MAP` is set, only its keys route to vLLM; everything else falls to Ollama automatically. When unset (`None`), all calls go to vLLM (pure vLLM mode). `chat()` routing: `_VLLM_ROUTE is None or model in _VLLM_ROUTE`. Enables vLLM for large producer + Ollama for small utilities (glm4:9b summarizer, atla/selene-mini evaluator) on 16GB GPU without VRAM contention. `.env` updated: only `pi-qwen3-14b` and `pi-qwen-32b` (→pi-qwen3-14b) in `VLLM_MODEL_MAP`; glm4:9b, atla/selene-mini fall to Ollama on CPU.
+
+4. **Model map cleanup** (`inference.py`, `.env`) — built-in `_MODEL_MAP` now merges with env overrides (not replaced). Added `pi-qwen3-32b` self-mapping for future Qwen3-32B serve. Fixed `Qwen3-Coder:30b` mapping (was `QwQ-32B`, now correct HF ID). Corrected comment: `pi-qwen3-14b` is `Qwen/Qwen2.5-14B-Instruct-AWQ` (not Qwen3). `experiment_panel.py` Loop Optimizer default changed from `Qwen3-Coder:30b` → `pi-qwen-32b` to prevent panel hanging when Qwen3-Coder:30b is unloaded from Ollama.
+
+5. **`synth_instruction_grounded` experiment** — re-ran SYNTH_INSTRUCTION factor with `grounded_r1` as primary response variable. Result: delta=+1.223 (baseline=6.33, prose_depth=7.56), FALSIFIED at threshold 1.5. Confirms prose_depth instruction produces measurably more grounded outputs but does not yet clear the 1.5-point bar. The hallucination detector correctly docked depth scores on baseline outputs with fabricated stub blocks.
+
+6. **YouTube transcription** (`youtube_transcribe.py`, `agent.py`) — `fetch_url_content()` now routes YouTube URLs (`youtube.com/watch`, `youtu.be/`, `youtube.com/shorts/`) through `transcribe_youtube()` instead of MarkItDown (which silently fails). Downloads audio via yt-dlp with `--extractor-args youtube:player_client=android` (avoids JS runtime dependency), transcribes with `openai-whisper`. Configurable via `WHISPER_MODEL` (default: `base`) and `WHISPER_DEVICE` (default: `cpu`, avoids vLLM VRAM contention).
+
+**env vars added:** `WHISPER_MODEL`, `WHISPER_DEVICE`
+**files added:** `youtube_transcribe.py`
+
 **env vars added:** `INFERENCE_BACKEND`, `VLLM_BASE_URL`, `VLLM_MODEL_MAP`, `WIGGUM_EVALUATOR_MODEL`, `WIGGUM_PRODUCER_MODEL`, `LLAMA_OCR_BASE_URL`

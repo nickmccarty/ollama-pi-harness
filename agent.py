@@ -162,7 +162,7 @@ def _synth_options(producer_model: str) -> dict:
 # Do not rename the sentinels or move them off their own lines.
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
-SYNTH_INSTRUCTION = (
+SYNTH_INSTRUCTION = os.environ.get("HARNESS_SYNTH_INSTRUCTION") or (
     "Output ONLY the markdown starting with #. Structure each section with 'What', 'Why', 'How' subsections using numbered steps and inline code blocks. Write at least 150 words per subsection with concrete implementation details, ensuring every code snippet is complete, executable with specific tool versions, and includes error handling. Every section MUST include a complete runnable code example with both opening and closing triple-backtick fences — never leave a code block unclosed. Include edge case notes, trade-offs, and library recommendations. For each strategy, state when NOT to use it, identify input boundaries, and specify exact numerical values for all configuration parameters with workload-based justification."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
@@ -384,6 +384,9 @@ def run_tool_loop(task: str, research_context: str, trace: RunTrace, producer_mo
 
 def fetch_url_content(url: str) -> str:
     """Fetch a URL and convert its HTML to markdown via MarkItDown. Returns empty string on failure."""
+    from youtube_transcribe import is_youtube_url, transcribe_youtube
+    if is_youtube_url(url):
+        return transcribe_youtube(url)
     if not MARKITDOWN_AVAILABLE:
         return ""
     try:

@@ -59,7 +59,7 @@ _chat = _OllamaLike(keep_alive=_KEEP_ALIVE).chat
 _DEFAULT_MODELS = {
     "Methodologist":     os.environ.get("EXPERIMENT_PANEL_METHODOLOGIST_MODEL", "glm4:9b"),
     "Knowledge Auditor": os.environ.get("EXPERIMENT_PANEL_AUDITOR_MODEL",       "pi-qwen-32b"),
-    "Loop Optimizer":    os.environ.get("EXPERIMENT_PANEL_OPTIMIZER_MODEL",     "Qwen3-Coder:30b"),
+    "Loop Optimizer":    os.environ.get("EXPERIMENT_PANEL_OPTIMIZER_MODEL",     "pi-qwen-32b"),
 }
 
 

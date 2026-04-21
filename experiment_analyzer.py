@@ -284,7 +284,7 @@ def render_report(
             )
 
     lines += ["", "---", "", "## Per-Dimension Analysis (r1 means)", ""]
-    dim_names = ["relevance", "completeness", "depth", "specificity", "structure"]
+    dim_names = ["relevance", "completeness", "depth", "grounded", "specificity", "structure"]
     dim_header = "| Task | Treatment | " + " | ".join(dim_names) + " |"
     dim_sep    = "|------|-----------|" + "|".join(["---"] * len(dim_names)) + "|"
     lines += [dim_header, dim_sep]
@@ -401,7 +401,7 @@ def analyze(spec_path: str, run_panel: bool = True) -> None:
             "pass_rate":          _mean(passes),
         }
         # Per-dimension r1 means
-        dim_names = ["relevance", "completeness", "depth", "specificity", "structure"]
+        dim_names = ["relevance", "completeness", "depth", "grounded", "specificity", "structure"]
         for dim in dim_names:
             dim_vals = [r["dims_r1"].get(dim) for r in group if r["dims_r1"].get(dim) is not None]
             s[f"dim_{dim}_r1_mean"] = _mean(dim_vals)

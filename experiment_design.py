@@ -122,8 +122,9 @@ randomized design (CRD) experiment via experiment_runner.py.
 
   score_r1       — wiggum composite score on the first evaluation round (0–10)
   score_final    — wiggum composite score after all revision rounds (0–10)
-  depth_r1       — depth dimension on round 1 (weight 0.30 — most sensitive)
-  specificity_r1 — specificity dimension on round 1 (weight 0.15)
+  depth_r1       — depth dimension on round 1 (weight 0.25 — most sensitive to content quality)
+  grounded_r1    — groundedness on round 1 (weight 0.15 — penalizes hallucinated APIs/stubs)
+  specificity_r1 — specificity dimension on round 1 (weight 0.10)
   wiggum_rounds  — total revision rounds before PASS or MAX_ROUNDS
   output_bytes   — output document size in bytes
 

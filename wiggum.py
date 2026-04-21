@@ -57,6 +57,46 @@ EVALUATOR_MODEL = os.environ.get("WIGGUM_EVALUATOR_MODEL", "atla/selene-mini")
 MAX_ROUNDS = 3
 PASS_THRESHOLD = 9.0
 
+# ---------------------------------------------------------------------------
+# Hallucination detector
+# ---------------------------------------------------------------------------
+
+_KNOWN_OBJECTS = frozenset({
+    'model', 'tokenizer', 'optimizer', 'scheduler', 'trainer',
+    'np', 'pd', 'plt', 'ax', 'fig', 'torch', 'tf', 'nn',
+    'logger', 'logging', 'os', 'sys', 'json', 're', 'time',
+    'datetime', 'client', 'session', 'cursor', 'conn', 'db',
+    'app', 'router', 'request', 'response', 'df',
+})
+
+# Match standalone method calls: obj.long_method_name(  (no assignment before the dot)
+_STUB_CALL = re.compile(r'^([a-z_]\w*)\.([a-z_]{12,})\(')
+
+
+def _count_stub_blocks(content: str) -> int:
+    """
+    Count code blocks containing likely-fabricated API stubs.
+
+    Signature: object not in known-real namespaces, 2+ standalone method calls
+    with names ≥12 chars (real APIs rarely describe their action in full sentences).
+    Returns penalty 0–2 (capped so one bad block doesn't crater the score).
+    """
+    blocks = re.findall(r'```(?:\w*)\n(.*?)```', content, re.DOTALL)
+    count = 0
+    for block in blocks:
+        lines = [l.strip() for l in block.splitlines()
+                 if l.strip() and not l.strip().startswith('#')]
+        suspicious = 0
+        for line in lines:
+            m = _STUB_CALL.match(line)
+            if m:
+                obj = m.group(1)
+                if obj not in _KNOWN_OBJECTS and '=' not in line.split('(')[0]:
+                    suspicious += 1
+        if suspicious >= 2:
+            count += 1
+    return min(count, 2)
+
 # WIGGUM_PANEL=1 enables the TinyTroupe multi-persona panel after each evaluate() call.
 # Panel issues are merged into the revision prompt for richer feedback.
 _PANEL_ENABLED = os.environ.get("WIGGUM_PANEL", "0").strip() == "1"
@@ -117,9 +157,10 @@ Output:
 
 Score each dimension 0-10 as an integer:
 - relevance (weight 0.20): Does the output address the correct topic and complete the task as specified?
-- completeness (weight 0.25): Are all required items or practices present, with nothing important missing?
-- depth (weight 0.30): Does each item have a concrete example or implementation note specific enough to act on?
-- specificity (weight 0.15): Are claims precise and actionable, or vague and generic?
+- completeness (weight 0.20): Are all required items or practices present, with nothing important missing?
+- depth (weight 0.25): Does each item have a concrete example or implementation note specific enough to act on?
+- grounded (weight 0.15): Are specific claims traceable to real systems, documented APIs, or published benchmarks? Penalize invented method names and code stubs that don't correspond to any real library.
+- specificity (weight 0.10): Are claims precise and actionable, or vague and generic?
 - structure (weight 0.10): Is the document clearly organized and readable?
 
 Dimension score guide (apply to each dimension independently):
@@ -129,22 +170,38 @@ Dimension score guide (apply to each dimension independently):
 - 3-4: weak — significant problems; a practitioner could not act on this
 - 1-2: failing — this dimension is essentially absent
 
-Calibration anchors:
-- A document that correctly lists N items but gives only one-line descriptions per item: depth=5, specificity=5
-- A document where every section has a code snippet or step-by-step example: depth may reach 8-9
+Depth calibration anchors (most important dimension — read carefully):
+- depth=3: paragraph per item with no example, no mechanism, no numbers — pure definition
+- depth=5: each item has 1-2 sentences of explanation but no worked example, no specific threshold, no named tool or technique
+- depth=6: some items have a partial example (e.g. names a tool but does not show how to use it; states a principle but gives no concrete scenario)
+- depth=7: most items have a concrete example OR a specific implementation note, but at least one major item is still surface-level
+- depth=8: every item has a concrete example AND a mechanism (why it works, what can go wrong, what to watch for); a practitioner could act on any section
+- depth=9: every item has a worked example with specific parameters, thresholds, or decisions; an expert would find nothing to add
+- depth=10: reserved for genuinely exceptional depth — essentially never
+
+Grounded calibration anchors:
+- grounded=9-10: every specific claim names a real system, documented API, or published outcome a practitioner could verify
+- grounded=7-8: most claims grounded; 1-2 plausible but unverifiable specifics
+- grounded=5-6: mix of real and invented specifics; at least one code block with method calls that don't correspond to a documented API
+- grounded=3-4: most specifics generic or hallucinated; code blocks use invented method names that describe what the function should do rather than a real call
+- grounded=1-2: almost all specifics fabricated; output reads as plausible-sounding fiction
+
+Other calibration anchors:
 - A document that covers the topic broadly but omits 2+ major subtopics an expert would expect: completeness=6
+- Claims with no source, number, or named system to back them up: specificity=5
 - Do not score 9+ on any dimension unless you cannot identify a single concrete improvement
 
 Task-type criteria:
 {task_criteria}
 
-Compute composite = round(0.20*relevance + 0.25*completeness + 0.30*depth + 0.15*specificity + 0.10*structure, 1)
+Compute composite = round(0.20*relevance + 0.20*completeness + 0.25*depth + 0.15*grounded + 0.10*specificity + 0.10*structure, 1)
 
 Respond with valid JSON only — no preamble, no explanation:
 {{
   "relevance": integer 0-10,
   "completeness": integer 0-10,
   "depth": integer 0-10,
+  "grounded": integer 0-10,
   "specificity": integer 0-10,
   "structure": integer 0-10,
   "score": composite as a number with one decimal place,
@@ -233,11 +290,21 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
     # Recompute composite from dimension scores in Python — don't trust model arithmetic
     dims = {
         "relevance":    (result.get("relevance", 0),    0.20),
-        "completeness": (result.get("completeness", 0), 0.25),
-        "depth":        (result.get("depth", 0),        0.30),
-        "specificity":  (result.get("specificity", 0),  0.15),
+        "completeness": (result.get("completeness", 0), 0.20),
+        "depth":        (result.get("depth", 0),        0.25),
+        "grounded":     (result.get("grounded", 0),     0.15),
+        "specificity":  (result.get("specificity", 0),  0.10),
         "structure":    (result.get("structure", 0),    0.10),
     }
+
+    # Hallucination penalty: dock depth for fabricated code stubs
+    stub_count = _count_stub_blocks(eval_content)
+    if stub_count:
+        raw_depth = dims["depth"][0]
+        docked = max(0, raw_depth - stub_count)
+        dims["depth"] = (docked, dims["depth"][1])
+        print(f"  [hallucination] {stub_count} fabricated stub block(s) — depth docked {raw_depth}→{docked}")
+
     composite = round(sum(score * weight for score, weight in dims.values()), 1)
     result["score"] = composite
     result["dims"] = {k: v[0] for k, v in dims.items()}

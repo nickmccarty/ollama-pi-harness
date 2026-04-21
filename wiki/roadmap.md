@@ -179,3 +179,8 @@ Pending clean ablation results (Priority 5) to determine if more search rounds a
 | experiment_analyzer.py | 2026-04-20 | stats + hypothesis eval + Markdown report + panel integration |
 | runs.jsonl: experiment_id + treatment_level fields | 2026-04-20 | logger.py reads HARNESS_EXPERIMENT_ID/TREATMENT_LEVEL env vars |
 | MCP server security hardening | 2026-04-20 | _validate_task(): length cap, UNC block, injection scan, output path sandbox; semaphore; API key |
+| atla/selene-mini evaluator | 2026-04-21 | wiggum.py: EVALUATOR_MODEL default; SUMMARIZER_EVAL_THRESHOLD 5500→32000 |
+| grounded_r1 eval dimension | 2026-04-21 | wiggum.py: 6th dim (weight 0.15); depth 0.30→0.25; registered in experiment_design.py + analyzer |
+| Hallucination detector | 2026-04-21 | wiggum.py: _count_stub_blocks() docks depth for fabricated API stubs (cap -2) |
+| Hybrid vLLM/Ollama routing | 2026-04-21 | inference.py: _VLLM_ROUTE set; VLLM_MODEL_MAP keys → vLLM, rest → Ollama on CPU |
+| YouTube transcription | 2026-04-21 | youtube_transcribe.py: yt-dlp (android client) + openai-whisper; hooked into fetch_url_content() |

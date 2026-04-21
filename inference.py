@@ -10,8 +10,8 @@ Environment variables
 INFERENCE_BACKEND   "ollama" (default) | "vllm"
 VLLM_BASE_URL       vLLM server URL (default: http://localhost:8000/v1)
 VLLM_API_KEY        auth key — vLLM ignores this by default ("none")
-VLLM_MODEL_MAP      JSON dict overriding the built-in Ollama-tag → HF-ID map
-                    e.g. '{"pi-qwen-32b": "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"}'
+VLLM_MODEL_MAP      JSON dict overriding the built-in Ollama-tag → served-name map
+                    e.g. '{"pi-qwen3.6": "pi-qwen3.6", "pi-qwen-32b": "pi-qwen-32b"}'
 
 Migration
 ---------
@@ -41,16 +41,19 @@ _VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
 # ---------------------------------------------------------------------------
 # Model name translation: Ollama tag → vLLM / HuggingFace model ID
 # ---------------------------------------------------------------------------
-# vLLM serves models by their HF repo ID (or the path you pass at startup).
-# Add entries here OR override at runtime via VLLM_MODEL_MAP (JSON).
+# vLLM serves models by --served-model-name (or the HF repo ID if not set).
+# The Docker command uses --served-model-name pi-qwen3.6, so the harness tag
+# maps to itself (identity). Override at runtime via VLLM_MODEL_MAP if needed.
 _MODEL_MAP: dict[str, str] = {
-    "pi-qwen3.6":                     "QuantTrio/Qwen3.6-35B-A3B-AWQ",
-    "qwen3.6:35b-a3b":                "QuantTrio/Qwen3.6-35B-A3B-AWQ",
-    "pi-qwen-32b":                    "Qwen/Qwen2.5-32B-Instruct",
+    "pi-qwen3.6":                     "pi-qwen3.6",             # --served-model-name pi-qwen3.6
+    "qwen3.6:35b-a3b":                "pi-qwen3.6",             # alias → same served name
+    "pi-qwen3-14b":                   "pi-qwen3-14b",           # Qwen/Qwen2.5-14B-Instruct-AWQ, --served-model-name pi-qwen3-14b
+    "pi-qwen3-32b":                   "pi-qwen3-32b",           # Qwen3-32B-AWQ via vLLM (--served-model-name pi-qwen3-32b)
+    "pi-qwen-32b":                    "Qwen/Qwen2.5-32B-Instruct",  # Qwen2.5-32B (distinct from Qwen3-32B)
     "pi-qwen":                        "Qwen/Qwen2.5-7B-Instruct",
     "qwen2.5:32b-instruct-q4_K_M":   "Qwen/Qwen2.5-32B-Instruct",
     "qwen2.5:7b-instruct":            "Qwen/Qwen2.5-7B-Instruct",
-    "Qwen3-Coder:30b":                "Qwen/QwQ-32B",        # closest served equivalent
+    "Qwen3-Coder:30b":                "Qwen/Qwen3-Coder-480B-A22B",  # HF ID; needs dedicated serve
     "gemma4:latest":                  "google/gemma-4-9b-it",
     "gemma4:26b":                     "google/gemma-4-26b-it",
     "glm4:9b":                        "THUDM/glm-4-9b-chat",
@@ -62,13 +65,15 @@ _MODEL_MAP: dict[str, str] = {
 }
 
 _env_map = os.environ.get("VLLM_MODEL_MAP")
+# _VLLM_ROUTE: models that actually route to vLLM. None = all models (pure vLLM mode).
+# When VLLM_MODEL_MAP is set, only its keys route to vLLM; everything else falls to Ollama.
+# This enables hybrid routing: vLLM for large producer models, Ollama for small utilities.
+_VLLM_ROUTE: set | None = None
 if _env_map:
     try:
         _env_parsed = json.loads(_env_map)
-        # When VLLM_MODEL_MAP is explicitly set, it defines exactly which models
-        # route to vLLM. Replace the built-in map so that models listed in the
-        # built-in defaults but NOT in the env map fall back to Ollama.
-        _MODEL_MAP = _env_parsed
+        _MODEL_MAP.update(_env_parsed)          # merge for name translation
+        _VLLM_ROUTE = set(_env_parsed.keys())   # only listed models go to vLLM
     except Exception as _e:
         print(f"  [inference] VLLM_MODEL_MAP parse error: {_e}")
 
@@ -102,6 +107,15 @@ class _OllamaMessage:
         self.thinking = reasoning
         self.content  = raw
 
+    @classmethod
+    def from_raw(cls, role: str, content: str, thinking: str = "") -> "_OllamaMessage":
+        """Build directly from accumulated streaming parts — no parsing needed."""
+        obj = cls.__new__(cls)
+        obj.role    = role
+        obj.content = content
+        obj.thinking = thinking
+        return obj
+
     # dict-style fallback for legacy code: response["message"]["content"]
     def __getitem__(self, key):
         return getattr(self, key)
@@ -112,28 +126,32 @@ class _OllamaMessage:
 
 class _OllamaResponse:
     """
-    Wraps an OpenAI ChatCompletion to look like an Ollama ChatResponse.
+    Wraps vLLM streaming output to look like an Ollama ChatResponse.
 
-    Timing fields:
-      The OpenAI API body does not expose per-phase latencies. We reconstruct
-      them from wall-clock wrap time. Fractions are approximations:
-        eval_duration   ≈ 88 % of total  (generation dominates)
-        prompt_duration ≈ 12 % of total  (prompt-eval is fast on cached prefixes)
+    Timing fields come from real wall-clock measurements taken during streaming:
+      prompt_eval_duration = time from request start to first content token (TTFT / prefill)
+      eval_duration        = time from first token to stream end (generation)
+      total_duration       = end-to-end wall time (prompt + eval + overhead)
 
-      For tighter measurements, wire in vLLM's Prometheus /metrics endpoint
-      (vllm:e2e_request_latency_seconds, vllm:time_per_output_token_seconds)
-      as a post-hoc annotation pass in dashboard.py.
+    These are actual measurements, not approximations. They propagate into
+    runs.jsonl, the dashboard tok/s charts, and benchmark comparisons.
     """
-    def __init__(self, oai_response, wall_ns: int):
-        usage = getattr(oai_response, "usage", None)
-        self.prompt_eval_count       = getattr(usage, "prompt_tokens",     0) or 0
-        self.eval_count              = getattr(usage, "completion_tokens", 0) or 0
-        self.total_duration          = wall_ns
-        self.eval_duration           = int(wall_ns * 0.88)
-        self.prompt_eval_duration    = int(wall_ns * 0.12)
-        self.load_duration           = 0
-        self.message = _OllamaMessage(oai_response.choices[0].message)
-        self._oai = oai_response
+    def __init__(
+        self,
+        message:          "_OllamaMessage",
+        prompt_tokens:    int,
+        completion_tokens: int,
+        total_ns:         int,
+        prompt_ns:        int,   # TTFT: from request start to first generated token
+        eval_ns:          int,   # from first token to stream end
+    ):
+        self.prompt_eval_count    = prompt_tokens
+        self.eval_count           = completion_tokens
+        self.total_duration       = total_ns
+        self.prompt_eval_duration = prompt_ns
+        self.eval_duration        = eval_ns
+        self.load_duration        = 0
+        self.message              = message
 
     # dict-style access: response["message"]["content"]
     def __getitem__(self, key):
@@ -168,6 +186,73 @@ def _chat_ollama(model: str, messages: list, **kwargs) -> object:
     return _ollama.chat(model=model, messages=messages, **kwargs)
 
 
+def _stream_vllm_call(client, vllm_model: str, messages: list, oai_kwargs: dict):
+    """
+    Execute one streaming vLLM completion.
+
+    Returns (message, prompt_tokens, completion_tokens, total_ns, prompt_ns, eval_ns).
+
+    Streaming gives us real per-phase timing:
+      prompt_ns = TTFT (prefill latency) — time from request dispatch to first content token
+      eval_ns   = generation latency — time from first token to stream end
+    This replaces the previous 0.88/0.12 wall-clock approximation.
+    """
+    t0      = time.monotonic_ns()
+    t_first = None
+
+    content_parts   = []
+    reasoning_parts = []
+    prompt_tokens   = 0
+    completion_tokens = 0
+
+    stream = client.chat.completions.create(
+        model=vllm_model,
+        messages=messages,
+        stream=True,
+        stream_options={"include_usage": True},
+        **oai_kwargs,
+    )
+
+    for chunk in stream:
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            c = delta.content or ""
+            r = getattr(delta, "reasoning_content", None) or ""
+            if t_first is None and (c or r):
+                t_first = time.monotonic_ns()
+            if c:
+                content_parts.append(c)
+            if r:
+                reasoning_parts.append(r)
+        if getattr(chunk, "usage", None):
+            prompt_tokens     = chunk.usage.prompt_tokens     or 0
+            completion_tokens = chunk.usage.completion_tokens or 0
+
+    t_end = time.monotonic_ns()
+    if t_first is None:
+        t_first = t_end  # model returned nothing — avoid negative intervals
+
+    raw_content = "".join(content_parts)
+    reasoning   = "".join(reasoning_parts)
+
+    # Handle inline <think> tags when the reasoning parser wasn't active
+    if not reasoning:
+        m = re.search(r"<think>(.*?)</think>", raw_content, re.DOTALL)
+        if m:
+            reasoning   = m.group(1).strip()
+            raw_content = raw_content[raw_content.rfind("</think>") + len("</think>"):].strip()
+
+    msg = _OllamaMessage.from_raw("assistant", raw_content, reasoning)
+    return (
+        msg,
+        prompt_tokens,
+        completion_tokens,
+        t_end - t0,      # total_ns
+        t_first - t0,    # prompt_ns  (TTFT)
+        t_end - t_first, # eval_ns    (generation)
+    )
+
+
 def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
     from openai import OpenAI
     client = OpenAI(base_url=_VLLM_BASE, api_key=_VLLM_API_KEY)
@@ -182,55 +267,80 @@ def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
     if "num_predict" in options:
         oai_kwargs["max_tokens"] = options["num_predict"]
     # num_ctx is a server-startup concern for vLLM (--max-model-len), not per-request
-    if "think" in options or "preserve_thinking" in options:
-        # Qwen3/Qwen3.6 thinking mode options — only apply for Qwen/QwQ models.
-        # Other models (gemma4, etc.) don't support these and may return empty content.
-        vllm_name = _resolve_model(model).lower()
-        if any(k in vllm_name for k in ("qwen", "qwq")):
-            chat_tmpl: dict = {}
-            if "think" in options:
-                chat_tmpl["enable_thinking"] = bool(options["think"])
-            if "preserve_thinking" in options:
-                # Qwen3.6: retain reasoning traces from prior messages across turns.
-                # Reduces redundant re-reasoning in multi-turn agent loops.
-                chat_tmpl["preserve_thinking"] = bool(options["preserve_thinking"])
-            if chat_tmpl:
-                oai_kwargs["extra_body"] = {"chat_template_kwargs": chat_tmpl}
+    #
+    # Thinking mode: always emit enable_thinking for Qwen/QwQ vLLM models.
+    # Default to False when the caller didn't specify — the vLLM server may be running
+    # a thinking model (e.g. Qwen3.6) even when the Ollama tag suggests otherwise
+    # (e.g. pi-qwen-32b → Qwen/Qwen2.5-32B-Instruct resolves to the loaded Qwen3.6).
+    # Without an explicit enable_thinking=false, Qwen3.6 enters unbounded reasoning
+    # and never returns within the num_predict budget.
+    vllm_name = _resolve_model(model).lower()
+    if any(k in vllm_name for k in ("qwen", "qwq")):
+        chat_tmpl: dict = {}
+        if "think" in options:
+            chat_tmpl["enable_thinking"] = bool(options["think"])
+        else:
+            chat_tmpl["enable_thinking"] = False  # safe default: no unbounded reasoning
+        if "preserve_thinking" in options:
+            chat_tmpl["preserve_thinking"] = bool(options["preserve_thinking"])
+        oai_kwargs["extra_body"] = {"chat_template_kwargs": chat_tmpl}
 
     vllm_model = _resolve_model(model)
 
-    # Retry up to 2× on 400 context-length errors by truncating the longest message.
-    # Needed when --max-model-len is tight (e.g. 8192 for AWQ on 16GB VRAM) and
-    # synthesis context + num_predict together exceed it.
+    # Retry up to 2× on context-length or server-disconnect errors.
+    # Server disconnects (RemoteProtocolError / APIConnectionError with "Server disconnected")
+    # are the vLLM OOM signal: the server crashes under KV-cache pressure from a large
+    # context. We treat them identically to explicit context-length rejections: truncate
+    # the longest non-system message and retry with halved max_tokens.
+    #
+    # Critical: never truncate the system prompt — it contains the task framing and
+    # skill instructions. Truncating it silently corrupts all downstream behaviour.
+    # Instead, target the longest non-system message. If only system messages exist
+    # (degenerate case), fall back to the longest overall.
+    # Keep head (60%) + tail (20%) rather than just head, so both the instruction
+    # preamble and the most recent context survive the cut.
     _messages = list(messages)
     for attempt in range(3):
-        t0 = time.monotonic_ns()
         try:
-            resp = client.chat.completions.create(
-                model=vllm_model,
-                messages=_messages,
-                **oai_kwargs,
+            msg, ptok, ctok, total_ns, prompt_ns, eval_ns = _stream_vllm_call(
+                client, vllm_model, _messages, oai_kwargs,
             )
-            wall_ns = time.monotonic_ns() - t0
-            return _OllamaResponse(resp, wall_ns)
+            return _OllamaResponse(msg, ptok, ctok, total_ns, prompt_ns, eval_ns)
         except Exception as exc:
-            if "maximum context length" in str(exc) and attempt < 2:
-                # Find and halve the longest message content
-                longest_idx = max(
-                    range(len(_messages)),
-                    key=lambda i: len(str(_messages[i].get("content", "") or "")),
-                )
-                content = str(_messages[longest_idx].get("content", "") or "")
-                half = len(content) // 2
-                _messages[longest_idx] = {**_messages[longest_idx], "content": content[:half]}
-                # Also halve max_tokens — the completion budget contributes to the
-                # total and must shrink together with the input on a tight context window.
+            exc_str = str(exc)
+            _is_ctx_err = "maximum context length" in exc_str
+            _is_disconnect = (
+                "Server disconnected" in exc_str
+                or "RemoteProtocolError" in exc_str
+                or ("Connection error" in exc_str and attempt == 0)
+            )
+            if (_is_ctx_err or _is_disconnect) and attempt < 2:
+                reason = "context too long" if _is_ctx_err else "server disconnect (OOM)"
+                candidates = [
+                    (i, len(str(_messages[i].get("content", "") or "")))
+                    for i, m in enumerate(_messages)
+                    if _messages[i].get("role") != "system"
+                ]
+                if not candidates:
+                    # Only system messages — must truncate to proceed (log a warning)
+                    candidates = [(i, len(str(_messages[i].get("content", "") or "")))
+                                  for i in range(len(_messages))]
+                    print("  [inference] WARNING: only system messages remain — "
+                          "truncating system prompt to fit context window")
+
+                longest_idx = max(candidates, key=lambda x: x[1])[0]
+                content  = str(_messages[longest_idx].get("content", "") or "")
+                keep_head = int(len(content) * 0.60)
+                keep_tail = int(len(content) * 0.20)
+                truncated = content[:keep_head] + "\n…[truncated]…\n" + content[-keep_tail:]
+                _messages[longest_idx] = {**_messages[longest_idx], "content": truncated}
                 if "max_tokens" in oai_kwargs:
                     oai_kwargs = dict(oai_kwargs)
                     oai_kwargs["max_tokens"] = max(256, oai_kwargs["max_tokens"] // 2)
-                print(f"  [inference] context too long — truncated msg[{longest_idx}] "
-                      f"to {half} chars, max_tokens={oai_kwargs.get('max_tokens', '?')}, "
-                      f"retry {attempt + 1}/2")
+                role = _messages[longest_idx].get("role", "?")
+                print(f"  [inference] {reason} — truncated {role} msg[{longest_idx}] "
+                      f"({len(content)}→{len(truncated)} chars), "
+                      f"max_tokens={oai_kwargs.get('max_tokens', '?')}, retry {attempt+1}/2")
             else:
                 raise
 
@@ -243,15 +353,14 @@ def chat(model: str, messages: list, **kwargs) -> object:
     """
     Drop-in replacement for ollama.chat().
 
-    Routes to vLLM or Ollama based on INFERENCE_BACKEND env var.
-    Response is always compatible with logger._extract_usage() and the
-    response["message"]["content"] access pattern used throughout the harness.
+    Routes to vLLM or Ollama based on INFERENCE_BACKEND and VLLM_MODEL_MAP.
 
-    Automatic Ollama fallback: if INFERENCE_BACKEND=vllm but the model has no
-    entry in _MODEL_MAP (e.g. glm4:9b, llama3.2-vision, llama3.2:3b), the call
-    falls back to Ollama. Only mapped producer/evaluator models go to vLLM.
+    Hybrid routing: when VLLM_MODEL_MAP is set, only the listed models go to vLLM;
+    everything else (small utilities, evaluators) falls back to Ollama. This lets
+    vLLM serve the large producer model while Ollama handles glm4:9b, selene-mini, etc.
+    When VLLM_MODEL_MAP is unset (_VLLM_ROUTE is None), all calls go to vLLM.
     """
-    if _BACKEND == "vllm" and model in _MODEL_MAP:
+    if _BACKEND == "vllm" and (_VLLM_ROUTE is None or model in _VLLM_ROUTE):
         return _chat_vllm(model=model, messages=messages, **kwargs)
     return _chat_ollama(model=model, messages=messages, **kwargs)
 
@@ -363,29 +472,3 @@ def get_embed_collection_suffix() -> str:
     return ""
 
 
-class _VLLMEmbeddingFunction:
-    """ChromaDB EmbeddingFunction that calls inference.embed().
-
-    Does NOT inherit from chromadb.EmbeddingFunction to avoid a hard import at
-    module load time. Implements the full protocol manually for ChromaDB 1.5+:
-    __call__, embed_query, name, build_from_config, get_config.
-    """
-
-    # Must match the persisted collection name ("sentence_transformer") since
-    # this EF falls back to sentence-transformers when vLLM embed is unavailable
-    # (generate-mode model). ChromaDB rejects mismatched names on load.
-    def name(self) -> str:
-        return "sentence_transformer"
-
-    def __call__(self, input: list[str]) -> list[list[float]]:  # noqa: A002
-        return embed(input)
-
-    def embed_query(self, input: list[str]) -> list[list[float]]:  # noqa: A002
-        return self(input)
-
-    @classmethod
-    def build_from_config(cls, config: dict) -> "_VLLMEmbeddingFunction":
-        return cls()
-
-    def get_config(self) -> dict:
-        return {}
