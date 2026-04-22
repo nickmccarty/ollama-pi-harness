@@ -934,6 +934,19 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         # Skill parsing — extract /skill tokens before anything else touches the task
         task, explicit_skills = parse_skills(task)
 
+        # Auto-detect playwright intent when no explicit /playwright prefix was given.
+        # Triggers on navigation verbs + a domain URL so general tasks don't false-positive.
+        if "playwright" not in explicit_skills:
+            import re as _re_pw
+            _PW_PATTERN = _re_pw.compile(
+                r'\b(?:go\s+to|navigate\s+to|visit|open)\s+'
+                r'[a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}',
+                _re_pw.IGNORECASE,
+            )
+            if _PW_PATTERN.search(task):
+                explicit_skills = list(explicit_skills) + ["playwright"]
+                print("  [auto] playwright intent detected — routing to /playwright")
+
         # Set dynamic keep_alive unless overridden by OLLAMA_KEEP_ALIVE env var
         if _KEEP_ALIVE_OVERRIDE is None:
             _KEEP_ALIVE = _estimate_keep_alive(

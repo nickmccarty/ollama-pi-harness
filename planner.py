@@ -60,10 +60,13 @@ PRIOR_KNOWLEDGE_PROMPT = """\
 You are a research assistant assessing your existing knowledge before running web searches.
 
 Task: {task}
-
+{memory_block}
 Without searching the web, answer honestly:
-1. What specific facts are you CONFIDENT about regarding this topic?
-2. What specific aspects would you NEED to look up to answer this authoritatively?
+1. What specific facts are you CONFIDENT about regarding this topic? \
+Include facts drawn from the memory context above if present.
+2. What specific aspects would you NEED to look up to answer this authoritatively? \
+If the memory context already provides a complete, high-quality answer, \
+gaps should be an empty list [].
 
 Focus on gaps that a web search would actually resolve — not vague uncertainties.
 
@@ -75,7 +78,8 @@ Respond with ONLY valid JSON — no explanation, no markdown fences:
 
 Rules:
 - known_facts: 2-5 concrete, specific facts you are confident about
-- gaps: 2-4 specific aspects that need current/authoritative sources to answer well
+- gaps: 2-4 specific aspects that need current/authoritative sources; \
+  [] if memory already covers the task well
 - Both lists should be concrete enough that they could inform a search query
 """
 
@@ -147,7 +151,7 @@ class Plan:
 # Planning
 # ---------------------------------------------------------------------------
 
-def prior_knowledge_pass(task: str) -> tuple[list[str], list[str]]:
+def prior_knowledge_pass(task: str, memory_context: str = "") -> tuple[list[str], list[str]]:
     """
     Ask the planner model what it already knows and what gaps need web search.
 
@@ -155,7 +159,8 @@ def prior_knowledge_pass(task: str) -> tuple[list[str], list[str]]:
     Returns ([], []) on any failure — never raises.
     Used by make_plan() to seed targeted search queries.
     """
-    prompt = PRIOR_KNOWLEDGE_PROMPT.format(task=task)
+    memory_block = f"Relevant memory from prior runs:\n{memory_context}\n\n" if memory_context else ""
+    prompt = PRIOR_KNOWLEDGE_PROMPT.format(task=task, memory_block=memory_block)
     try:
         response = ollama.chat(
             model=PLANNER_MODEL,
@@ -200,7 +205,7 @@ def make_plan(task: str, memory_context: str = "") -> tuple["Plan", object]:
     # Skippable via HARNESS_SKIP_PRIOR_KNOWLEDGE=1 for controlled experiments
     known_facts, gaps = [], []
     if os.environ.get("HARNESS_SKIP_PRIOR_KNOWLEDGE") != "1":
-        known_facts, gaps = prior_knowledge_pass(task)
+        known_facts, gaps = prior_knowledge_pass(task, memory_context)
         if known_facts or gaps:
             print(f"  [planner:prior] {len(known_facts)} known fact(s), {len(gaps)} gap(s) identified")
     else:
