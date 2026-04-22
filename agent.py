@@ -195,6 +195,37 @@ SYNTH_INSTRUCTION_COUNT = (
     "Output ONLY the markdown starting with #. List strategies as a numbered list with working code examples. Write at least 150 words per strategy with concrete implementation details, ensuring code is complete, executable with specific tool versions, and includes error handling. Every section MUST include a complete runnable code example with opening and closing triple-backtick fences — never leave code blocks unclosed. Use 'What', 'Why', 'How' subsections with numbered steps. Include edge case notes, trade-offs, and library recommendations. For each strategy, state when NOT to use it, identify input boundaries, and specify exact numerical values for configuration parameters with workload-based justification."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
+
+# Fallback instruction for non-technical tasks (recipes, general knowledge, etc.)
+# Used when _is_technical_task() returns False so the model doesn't hallucinate code blocks.
+SYNTH_INSTRUCTION_PROSE = (
+    "Output ONLY the markdown starting with #. Write clear, accurate prose organized "
+    "with 'What', 'Why', 'How' subsections. Use numbered steps where sequence matters. "
+    "Include specific quantities, timeframes, and concrete details sourced from the research. "
+    "Do NOT include code blocks, programming examples, or software-specific sections "
+    "unless the task explicitly involves software or programming."
+)
+
+_TECHNICAL_KEYWORDS = frozenset({
+    "code", "coding", "implement", "library", "api", "sdk", "python", "javascript",
+    "typescript", "rust", "golang", "java", "c++", "c#", "sql", "database", "query",
+    "algorithm", "function", "class", "module", "package", "framework", "deploy",
+    "docker", "kubernetes", "ci/cd", "pipeline", "bash", "shell", "cli", "regex",
+    "async", "thread", "concurrency", "memory", "performance", "benchmark", "test",
+    "debugging", "refactor", "architecture", "microservice", "endpoint", "rest",
+    "graphql", "websocket", "embedding", "llm", "transformer", "fine-tun",
+    "inference", "tokenizer", "tensor", "gpu", "cuda", "vllm", "ollama",
+})
+
+def _is_technical_task(task: str) -> bool:
+    lower = task.lower()
+    return any(kw in lower for kw in _TECHNICAL_KEYWORDS)
+
+
+def _synth_instruction(task: str) -> str:
+    return SYNTH_INSTRUCTION if _is_technical_task(task) else SYNTH_INSTRUCTION_PROSE
+
+
 SEARCHES_PER_TASK = 2        # minimum searches before novelty gating kicks in
 SEARCH_QUALITY_FLOOR = 1800  # total merged chars — below this, run one more search
 MAX_SEARCH_ROUNDS   = 5      # hard cap regardless of novelty
@@ -683,7 +714,7 @@ def synthesize(task: str, research_context: str, vision_context: str = "", file_
         f"Task: {task}\n\n"
         f"Research findings:\n{research_context}\n"
         f"{vision_block}{file_block}{code_block}{memory_block}{skill_block}\n"
-        f"{SYNTH_INSTRUCTION}"
+        f"{_synth_instruction(task)}"
     )
     response = ollama.chat(
         model=producer_model,
@@ -812,7 +843,7 @@ def synthesize_with_count(task: str, research_context: str, expected_count: int,
         f"{vision_block}{file_block}{code_block}{memory_block}{skill_block}\n"
         f"IMPORTANT: You must produce EXACTLY {expected_count} numbered sections "
         f"(## 1. ... through ## {expected_count}. ...) — no more, no fewer. "
-        f"{SYNTH_INSTRUCTION}"
+        f"{_synth_instruction(task)}"
     )
     response = ollama.chat(
         model=producer_model,
