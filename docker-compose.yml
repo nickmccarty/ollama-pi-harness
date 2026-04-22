@@ -1,0 +1,75 @@
+services:
+
+  # --------------------------------------------------------------------------
+  # vLLM inference server — GPU required.
+  # Set VLLM_MODEL to the HuggingFace model ID or local path.
+  # Model weights are cached in ./model-cache (mounted from host).
+  # --------------------------------------------------------------------------
+  vllm:
+    image: vllm/vllm-openai:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - ./model-cache:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen2.5-14B-Instruct}
+      --dtype bfloat16
+      --max-model-len 16384
+      --port 8000
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  # --------------------------------------------------------------------------
+  # Ollama — handles smaller/fast models (glm4:9b, planner, evaluator).
+  # GPU passthrough optional; Ollama manages its own model downloads.
+  # --------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # Harness dashboard + agent server.
+  # Mounts the project directory so code changes don't require a rebuild.
+  # Switch to Dockerfile.gpu and add `runtime: nvidia` for CUDA embeddings.
+  # --------------------------------------------------------------------------
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app                          # live code mount — no rebuild needed during dev
+      - ./runs:/app/runs                # persist run data
+      - ./memory-db:/app/memory-db      # persist ChromaDB + SQLite
+    env_file:
+      - .env
+    environment:
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - OLLAMA_HOST=http://ollama:11434
+    ports:
+      - "8765:8765"
+    depends_on:
+      vllm:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: on-failure

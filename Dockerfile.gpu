@@ -1,0 +1,20 @@
+# GPU variant — use this if you want harness + sentence-transformers on CUDA.
+# Base image already has CUDA 11.8 + cuDNN.
+FROM pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git build-essential curl ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN playwright install chromium --with-deps
+
+COPY . .
+
+EXPOSE 8765
+
+CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8765"]
