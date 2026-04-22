@@ -979,6 +979,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       Copy response
     </button>
   </div>
+  <div id="voice-confirm" style="display:none">
+    <div style="padding:10px 16px 4px;font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.05em">INTERPRETED TASK</div>
+    <div style="padding:0 16px 8px;font-size:11px;color:var(--orange);font-style:italic" id="voice-reasoning"></div>
+    <div style="padding:0 12px 8px">
+      <textarea id="voice-task-input" rows="3"
+        style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:8px;resize:vertical;font-family:monospace"></textarea>
+    </div>
+    <div style="padding:0 12px 12px;display:flex;gap:8px">
+      <button id="voice-approve-btn"
+        style="flex:1;background:var(--green);border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;padding:7px;cursor:pointer">
+        Run task
+      </button>
+      <button id="voice-cancel-btn"
+        style="flex:1;background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:12px;padding:7px;cursor:pointer">
+        Cancel
+      </button>
+    </div>
+  </div>
 </div>
 
 <div class="kpi-grid" id="kpi-grid"></div>
@@ -2652,6 +2670,33 @@ new Chart($('cumulCostChart'), {
     }
   }
 
+  const confirmEl   = document.getElementById('voice-confirm');
+  const reasoningEl = document.getElementById('voice-reasoning');
+  const taskInput   = document.getElementById('voice-task-input');
+  const approveBtn  = document.getElementById('voice-approve-btn');
+  const cancelBtn   = document.getElementById('voice-cancel-btn');
+
+  function showAnswer(d) {
+    transcEl.textContent = (d.corrected_transcript || d.transcript)
+      ? '🎤 ' + (d.corrected_transcript || d.transcript) : '';
+    if (d.reasoning) transcEl.textContent += '  →  ' + d.reasoning;
+    lastMarkdown = d.response || '';
+    respEl.innerHTML = marked.parse(lastMarkdown);
+    copyRow.style.display = 'flex';
+    confirmEl.style.display = 'none';
+    setStatus('Done');
+  }
+
+  function showTaskConfirm(d) {
+    transcEl.textContent = '🎤 ' + (d.corrected_transcript || d.transcript);
+    reasoningEl.textContent = d.reasoning || '';
+    taskInput.value = d.task_string || '';
+    respEl.innerHTML = '';
+    copyRow.style.display = 'none';
+    confirmEl.style.display = '';
+    setStatus('Review task — approve to run');
+  }
+
   async function sendAudio() {
     const blob = new Blob(chunks, { type: 'audio/webm' });
     const fd = new FormData();
@@ -2660,15 +2705,40 @@ new Chart($('cumulCostChart'), {
       const r = await fetch('/api/voice', { method: 'POST', body: fd });
       const d = await r.json();
       if (d.error) { setStatus('Error: ' + d.error); return; }
-      transcEl.textContent = '🎤 ' + d.transcript;
-      lastMarkdown = d.response || '';
-      respEl.innerHTML = marked.parse(lastMarkdown);
-      copyRow.style.display = 'flex';
-      setStatus('Done');
+      if (d.type === 'task') { showTaskConfirm(d); }
+      else { showAnswer(d); }
     } catch (e) {
       setStatus('Request failed: ' + e.message);
     }
   }
+
+  approveBtn.addEventListener('click', async () => {
+    const task = taskInput.value.trim();
+    if (!task) return;
+    approveBtn.disabled = true;
+    approveBtn.textContent = 'Dispatching…';
+    try {
+      const r = await fetch('/api/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({task}),
+      });
+      const d = await r.json();
+      confirmEl.style.display = 'none';
+      setStatus('Run started: ' + (d.run_id || ''));
+      respEl.innerHTML = marked.parse(`Task dispatched to agent. Check the **Active runs** panel above.`);
+    } catch (e) {
+      setStatus('Dispatch failed: ' + e.message);
+    } finally {
+      approveBtn.disabled = false;
+      approveBtn.textContent = 'Run task';
+    }
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    confirmEl.style.display = 'none';
+    setStatus('Cancelled');
+  });
 
   fab.addEventListener('click', () => {
     if (recording) { stopRecording(); }

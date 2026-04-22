@@ -229,6 +229,20 @@ Six improvements shipped:
 **env vars added:** `INFERENCE_BACKEND`, `VLLM_BASE_URL`, `VLLM_MODEL_MAP`, `WIGGUM_EVALUATOR_MODEL`, `WIGGUM_PRODUCER_MODEL`, `LLAMA_OCR_BASE_URL`
 
 
+## [2026-04-22] build | Session 23 — voice-to-agent bridge, active-model fallback, search activity analysis
+
+Three features shipped:
+
+1. **Voice-to-agent bridge** (`server.py`, `dashboard.py`) — `/api/voice` now returns structured JSON instead of a plain markdown answer. LLM classifies intent as `"task"` or `"answer"`, corrects ASR errors (brand names: "lang chained"→LangChain, "clock post"→blog post, etc.), generates a complete agent task string with suggested output path. Dashboard shows a confirmation card with editable task textarea + "Run task" / "Cancel" buttons. Approve → `POST /api/run` → appears as a live DAG run. Answer-type responses still render as markdown with copy button.
+
+2. **Active-model fallback at agent startup** (`agent.py`) — `MODEL` and `COMPRESS_MODEL` are now resolved against the live vLLM `/v1/models` list at import time. If the configured model isn't served (e.g. `pi-qwen25-14b` not loaded), silently falls back to whatever model is actually running. Prevents 404s mid-run without requiring env var changes. Same pattern applied in `server.py`'s `/api/voice` endpoint and `orientation_skill.py`'s `_compress()`.
+
+3. **`search_analysis.py`** — chronological analysis of agentic search activity from `runs.jsonl`. Seven sections: volume over time (weekly), topic evolution (sliding term-frequency windows), search efficiency (Pearson r of queries/score), query specificity drift (word count proxy), per-model search behaviour, top repeated queries, zero-yield query audit. No external dependencies beyond stdlib + statistics. CLI: `python search_analysis.py --windows 5 --out search_report.md`. Key findings from first run (534 runs, 1345 searches, 2.43M chars): r(n_queries, score_r1)=-0.465; query word count grew 8.2→13.8 words over 3 weeks; "cost envelope management" and "context engineering" dominate all time windows (eval suite tasks hardcoded); zero zero-yield queries.
+
+**Validated end-to-end:** voice query "Lang Chained latest clock post" → LLM corrected to "LangChain latest blog post" → confirmation card → approved → agent dispatched → `langchain-latest-blog-post.md` written → wiggum PASS 7.0/10. grounded_r1=5 flags hallucinated code stubs (known `synth_instruction` trade-off).
+
+**files added:** `search_analysis.py`, `search_report.md`
+
 ## [2026-04-22] build | Session 21-22 — HARNESS_ENDPOINTS multi-backend routing, /orientation skill, voice input, YouTube rewrite, Claude usage stats
 
 Eleven features and fixes shipped:

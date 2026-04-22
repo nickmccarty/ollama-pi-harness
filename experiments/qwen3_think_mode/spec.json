@@ -14,12 +14,13 @@
     "T_B",
     "T_C"
   ],
-  "replications": 3,
+  "replications": 10,
   "response_variables": [
     "score_r1",
     "grounded_r1",
     "depth_r1",
-    "completeness_r1"
+    "completeness_r1",
+    "wiggum_rounds"
   ],
   "controlled_variables": {
     "producer_model": "qwen3-14b",

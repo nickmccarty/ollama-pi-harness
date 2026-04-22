@@ -139,6 +139,22 @@ except ImportError:
 MODEL = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen-32b").strip()
 COMPRESS_MODEL = os.environ.get("COMPRESS_MODEL", MODEL).strip()  # lighter model for compress_knowledge / plan_query
 
+# If the configured models aren't served, fall back to whatever vLLM has loaded.
+# This prevents 404s when switching between model configs without restarting the server.
+try:
+    import inference as _inf_boot
+    _active = _inf_boot.get_active_vllm_model()
+    if _active:
+        import urllib.request as _ur, json as _jb
+        _vb = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+        _ids = {m["id"] for m in _jb.loads(_ur.urlopen(f"{_vb}/models", timeout=2).read())["data"]}
+        if MODEL not in _ids and _active:
+            MODEL = _active
+        if COMPRESS_MODEL not in _ids and _active:
+            COMPRESS_MODEL = _active
+except Exception:
+    pass
+
 # Models that think by default and require think=False to produce immediate output.
 # Thinking mode consumes num_predict budget before the response starts, which
 # stalls synthesis on the default 8192 token limit.

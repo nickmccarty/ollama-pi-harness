@@ -622,46 +622,92 @@ def api_voice():
         return jsonify({"error": "transcript empty"}), 400
 
     try:
-        import inference, urllib.request
+        import inference
         producer = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen-32b").strip()
-        # If the configured model isn't loaded, fall back to the first available vLLM model
-        try:
-            vllm_base = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
-            with urllib.request.urlopen(f"{vllm_base}/models", timeout=2) as r:
-                models = json.loads(r.read())["data"]
+        active = inference.get_active_vllm_model()
+        if active:
+            try:
+                import urllib.request as _ur
+                vllm_base = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+                models = json.loads(_ur.urlopen(f"{vllm_base}/models", timeout=2).read())["data"]
                 if models and not any(m["id"] == producer for m in models):
-                    producer = models[0]["id"]
-        except Exception:
-            pass
+                    producer = active
+            except Exception:
+                pass
+
         orientation = _get_orientation()
-        if orientation:
-            system_msg = (
-                "You are the Harness Engineering research agent. "
-                "You MUST answer using ONLY the project orientation below — "
-                "do not invent capabilities, models, or skills not listed there. "
-                "Format your response in markdown.\n\n"
-                f"## Project orientation\n\n{orientation}"
-            )
-        else:
-            system_msg = (
-                "You are the Harness Engineering research agent. "
-                "Orientation context is still building — answer from general knowledge "
-                "but note that the project context is not yet available. "
-                "Format your response in markdown."
-            )
+        orientation_block = f"\n\n## Project orientation\n\n{orientation}" if orientation else ""
+
+        system_msg = f"""You are the voice interface for the Harness Engineering agentic research pipeline.
+
+Your job is to interpret the user's spoken request and return a JSON object — nothing else, no markdown fences.
+
+## Classification rules
+
+Classify as **"task"** when the user wants the agent to:
+- Search the web, fetch a URL, or find information
+- Write, save, or generate a file
+- Run an experiment, analysis, or pipeline operation
+- Do anything that requires agent.py to execute
+
+Classify as **"answer"** when the user asks a question about:
+- The harness itself, its models, experiments, or architecture
+- Something answerable from the orientation context without web access
+
+## ASR correction
+
+Speech-to-text often garbles brand names and technical terms. Correct them:
+- "lang chain" / "lang chained" / "lang check" → LangChain
+- "open a eye" / "open eye" → OpenAI
+- "hug in face" → Hugging Face
+- "clock post" / "block post" → blog post
+- "git hub" → GitHub
+- "pie torch" → PyTorch
+- "lama" / "llama" → Llama
+- "fast api" → FastAPI
+Apply similar corrections for any other obvious misrecognitions.
+
+## Output path rule
+
+Agent tasks must end with "save to <path>.md".
+If the user didn't specify a path, invent a sensible snake_case filename in the working directory.
+Example: "langchain-latest-blog-post.md"
+
+## Response format
+
+Return exactly this JSON, no other text:
+
+{{
+  "type": "task" | "answer",
+  "corrected_transcript": "<ASR-corrected version of what the user said>",
+  "reasoning": "<one sentence: what you understood and any corrections made>",
+  "task_string": "<complete agent task string ending in save to X.md — only for type=task>",
+  "suggested_path": "<relative filename like langchain-blog.md — only for type=task>",
+  "response": "<markdown answer — only for type=answer>"
+}}{orientation_block}"""
+
         resp = inference.chat(
             model=producer,
             messages=[
                 {"role": "system", "content": system_msg},
-                {"role": "user", "content": transcript},
+                {"role": "user",   "content": transcript},
             ],
-            options={"temperature": 0.3, "num_predict": 2048},
+            options={"temperature": 0.2, "num_predict": 1024},
         )
-        answer = resp.message.content.strip()
+        raw = resp.message.content.strip()
+        # Strip markdown fences if the model wrapped it anyway
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # Fall back: treat raw as an answer
+        parsed = {"type": "answer", "corrected_transcript": transcript,
+                  "reasoning": "", "response": raw}
     except Exception as e:
         return jsonify({"transcript": transcript, "error": f"LLM failed: {e}"}), 500
 
-    return jsonify({"transcript": transcript, "response": answer})
+    parsed["transcript"] = transcript
+    return jsonify(parsed)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
