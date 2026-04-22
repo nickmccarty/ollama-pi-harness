@@ -915,7 +915,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1238,6 +1238,72 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
             _store_memory(memory, task, "orientation", trace.data, content)
 
+        def _handle_playwright():
+            print("\n[skill:playwright] launching browser navigation...")
+            trace.data["task_type"] = "playwright"
+            try:
+                from playwright_skill import navigate_and_extract, parse_playwright_task
+            except ImportError:
+                print("[error] playwright_skill.py not found — pip install playwright && playwright install chromium")
+                trace.finish("ERROR")
+                return
+            try:
+                start_url, goal = parse_playwright_task(task)
+            except ValueError as _e:
+                print(f"[error] {_e}")
+                trace.finish("ERROR")
+                return
+
+            headed = os.environ.get("PLAYWRIGHT_HEADLESS", "0") != "1"
+            print(f"  [playwright] site={start_url}  goal={goal[:80]}  headed={headed}")
+            try:
+                with trace.span("playwright_navigate", model=COMPRESS_MODEL):
+                    page_text, final_url = navigate_and_extract(
+                        start_url=start_url,
+                        goal=goal,
+                        model=COMPRESS_MODEL,
+                        headed=headed,
+                    )
+            except RuntimeError as _e:
+                print(f"[error] playwright navigation failed: {_e}")
+                trace.finish("ERROR")
+                return
+
+            print(f"  [playwright] extracted {len(page_text)} chars from {final_url}")
+            if not page_text:
+                print("[error] playwright returned empty content")
+                trace.finish("ERROR")
+                return
+
+            # Synthesize from extracted content
+            prompt = (
+                f"Task: {task}\n\n"
+                f"Source URL: {final_url}\n\n"
+                f"Extracted page content:\n\n{page_text}\n\n"
+                "Using only the content above, complete the task accurately. "
+                "Format as clear markdown."
+            )
+            with trace.span("playwright_synthesis", model=producer_model):
+                response = ollama.chat(
+                    model=producer_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0.2, "num_predict": 4096},
+                )
+            trace.log_usage(response, stage="playwright_synthesis")
+            content = clean_synthesis_output(response["message"].get("content", "").strip())
+            if not content:
+                print("[error] synthesis returned empty output")
+                trace.finish("ERROR")
+                return
+            print("\n" + content[:1000] + ("\n...[truncated]" if len(content) > 1000 else "") + "\n")
+            if path:
+                write_output(content, path, trace)
+            else:
+                trace.data["final_content"] = content[:16_000]
+                trace.data["output_bytes"]  = len(content.encode())
+            trace.finish("PASS")
+            _store_memory(memory, task, "playwright", trace.data, content)
+
         def _handle_sync_wiki():
             print("\n[skill:sync-wiki] extracting implementation facts from source code...")
             trace.data["task_type"] = "sync_wiki"
@@ -1292,6 +1358,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "introspect":   _handle_introspect,
             "orientation":  _handle_orientation,
             "sync-wiki":    _handle_sync_wiki,
+            "playwright":   _handle_playwright,
         }
 
         for _skill in explicit_skills:

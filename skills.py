@@ -201,6 +201,20 @@ REGISTRY: dict[str, dict] = {
         "auto":   None,   # explicit only — user must invoke /sync-wiki
     },
 
+    "playwright": {
+        "description": (
+            "LLM-guided browser navigation using Playwright (headed Chromium). "
+            "Navigates to a website, intelligently traverses pages to find a target "
+            "(via site search, link-following, or direct goto), then extracts and "
+            "synthesizes the content. Use for JS-rendered pages, multi-hop navigation, "
+            "or any site where fetch_url_content() fails. "
+            "Invocation: /playwright go to <site>, <goal>"
+        ),
+        "hook":   "standalone",
+        "prompt": None,
+        "auto":   None,   # explicit only — triggered by /playwright token or voice intent
+    },
+
 }
 
 # ---------------------------------------------------------------------------

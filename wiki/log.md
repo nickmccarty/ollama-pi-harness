@@ -229,6 +229,21 @@ Six improvements shipped:
 **env vars added:** `INFERENCE_BACKEND`, `VLLM_BASE_URL`, `VLLM_MODEL_MAP`, `WIGGUM_EVALUATOR_MODEL`, `WIGGUM_PRODUCER_MODEL`, `LLAMA_OCR_BASE_URL`
 
 
+## [2026-04-22] build | Session 24 — /playwright skill, LLM-guided browser navigation
+
+Three components shipped:
+
+1. **`playwright_skill.py`** (new file) — LLM-guided browser navigation engine. `navigate_and_extract(start_url, goal, model, max_steps=10, headed=True)` drives a Playwright Chromium instance via a decision loop: each step takes a page snapshot (title, URL, up to 60 visible links with JS, search selector, 2 KB text excerpt), calls `_decide()` which asks the oracle LLM for a JSON action (`search` / `click` / `goto` / `extract` / `fail`), executes the action, repeats. `_clean_full_text()` pulls up to 16 KB on extract. `parse_playwright_task()` extracts URL + goal from natural-language strings like "go to flavortotaste.com, find the fruit-flavored water recipe". `PLAYWRIGHT_HEADLESS=1` env var enables headless mode. Custom Chrome user-agent and 1280×900 viewport set to avoid bot blocks.
+
+2. **`agent.py` — `_handle_playwright()` standalone handler** — calls `navigate_and_extract()`, synthesizes a summary from extracted content using the active model, stores result to memory and (if path given) writes the `.md` output file. `"playwright"` added to `_STANDALONE` dispatch dict and `_path_optional` set (no path required).
+
+3. **`skills.py`** — `"playwright"` skill entry added with `hook: "standalone"`, `auto: None`. Example invocation: `/playwright go to flavortotaste.com, find the fruit-flavored water recipe and summarize it`.
+
+**Integration with voice:** microphone input like "go to flavortotaste.com, find the fruit-flavored water recipe" → voice bridge classifies as task → confirmation card → approve → `/playwright` dispatched as live DAG run, browser opens, navigates intelligently, synthesizes and saves result.
+
+**files added:** `playwright_skill.py`
+**files modified:** `agent.py`, `skills.py`
+
 ## [2026-04-22] build | Session 23 — voice-to-agent bridge, active-model fallback, search activity analysis
 
 Three features shipped:
