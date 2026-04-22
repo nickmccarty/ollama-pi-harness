@@ -284,7 +284,14 @@ def _fetch_page(url: str, max_chars: int = 2000) -> str:
     if not MARKITDOWN_AVAILABLE or not url.startswith("http"):
         return ""
     try:
-        result = _md.convert(url)
+        import os, sys
+        with open(os.devnull, "w") as devnull:
+            old_stderr = sys.stderr
+            sys.stderr = devnull
+            try:
+                result = _md.convert(url)
+            finally:
+                sys.stderr = old_stderr
         text = (result.text_content or "").strip()
         if len(text) > max_chars:
             text = text[:max_chars] + "\n[truncated]"

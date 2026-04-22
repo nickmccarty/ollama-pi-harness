@@ -125,7 +125,8 @@ def _load_checkpoint(experiment_id: str) -> set[tuple]:
                 line = line.strip()
                 if line:
                     r = json.loads(line)
-                    completed.add((r["task_id"], r["treatment"], r["rep"]))
+                    if r.get("ok"):
+                        completed.add((r["task_id"], r["treatment"], r["rep"]))
     return completed
 
 
@@ -235,7 +236,7 @@ def run_one(
 # Main
 # ---------------------------------------------------------------------------
 
-def run_experiment(spec_path: str, resume: bool = False, dry_run: bool = False) -> None:
+def run_experiment(spec_path: str, resume: bool = False, dry_run: bool = False, only_treatment: str | None = None) -> None:
     with open(spec_path, encoding="utf-8") as f:
         spec = ExperimentSpec.from_dict(json.load(f))
 
@@ -253,6 +254,8 @@ def run_experiment(spec_path: str, resume: bool = False, dry_run: bool = False) 
     print(f" {total} runs  |  factor={spec.factor['name']}  |  "
           f"levels={spec.factor['levels']}  |  tasks={spec.tasks}  |  reps={spec.replications}")
     print(f" hypothesis: {spec.hypothesis}")
+    if only_treatment:
+        print(f" mode: treatment filter — only '{only_treatment}' runs")
     if resume:
         print(f" mode: resume ({len(completed)} already completed)")
     if dry_run:
@@ -269,6 +272,8 @@ def run_experiment(spec_path: str, resume: bool = False, dry_run: bool = False) 
     t_wall = time.time()
 
     for entry in crd:
+        if only_treatment and entry["treatment"] != only_treatment:
+            continue
         key = (entry["task_id"], entry["treatment"], entry["rep"])
         if resume and key in completed:
             print(f"\n[run {entry['run_num']}/{total}] {entry['task_id']} "
@@ -296,11 +301,18 @@ def run_experiment(spec_path: str, resume: bool = False, dry_run: bool = False) 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("usage: python experiment_runner.py experiment_spec.json [--resume] [--dry-run]")
+        print("usage: python experiment_runner.py experiment_spec.json [--resume] [--dry-run] [--treatment <level>]")
         sys.exit(1)
+
+    _treatment = None
+    if "--treatment" in sys.argv:
+        idx = sys.argv.index("--treatment")
+        if idx + 1 < len(sys.argv):
+            _treatment = sys.argv[idx + 1]
 
     run_experiment(
         spec_path=sys.argv[1],
         resume="--resume" in sys.argv,
         dry_run="--dry-run" in sys.argv,
+        only_treatment=_treatment,
     )

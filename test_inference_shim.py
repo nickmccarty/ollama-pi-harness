@@ -14,13 +14,8 @@ import os, sys, json
 from pathlib import Path
 
 # Load .env so INFERENCE_BACKEND / VLLM_BASE_URL are present
-_env = Path(__file__).parent / ".env"
-if _env.exists():
-    for line in _env.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env", override=False)
 
 backend = os.environ.get("INFERENCE_BACKEND", "ollama")
 print(f"INFERENCE_BACKEND = {backend}")

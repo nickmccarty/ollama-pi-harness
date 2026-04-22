@@ -14,6 +14,12 @@ build/
 
 # Runtime data
 runs.jsonl
+projects.jsonl
+sessions.jsonl
+artifacts.jsonl
+messages.jsonl
+plans.jsonl
+.harness-project
 *.db
 
 # Eval suite generated outputs
@@ -46,6 +52,16 @@ test-vision.png
 # Autoresearch
 autoresearch.tsv
 wiggum_test_output.md
+
+# Generated dashboard (rebuilt by dashboard.py or server.py)
+dashboard.html
+
+# Derived research artifacts — large, rebuilt from source CSVs + runs.jsonl
+# Raw input CSVs (arxiv downloads) are kept; annotated/rendered outputs are not
+*_annotated.csv
+arxiv_*.md
+geo-week-talks.csv
+_panel_test.md
 
 # ChromaDB vector store (rebuilt automatically from memory.db)
 chroma_memory/

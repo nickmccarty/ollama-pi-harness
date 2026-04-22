@@ -1,0 +1,54 @@
+{
+  "reviews": [
+    {
+      "persona": "Methodologist",
+      "score": 7,
+      "verdict": "MARGINAL",
+      "issues": [
+        "Limited replication adequacy: While the experiment specifies 3 replications per task, the run summary shows a high degree of variability in scores across runs. This may not be enough to reliably distinguish signal from noise."
+      ],
+      "strengths": [
+        "Hypothesis falsifiability: The hypothesis is clearly falsifiable with a specified measurable threshold of improving composite score_r1 by >= 0.2 points over baseline.",
+        "Confounds controlled: The experiment controls for several confounding variables, such as producer_model and evaluator_model, ensuring that only the variable of interest (SYNTH_INSTRUCTION variant) is changed at a time.",
+        "Run order randomization: Although not explicitly stated in the provided information, if the tasks were run independently and randomly across rounds, this would prevent systematic bias."
+      ],
+      "raw": "```json\n{\n  \"score\": 7,\n  \"verdict\": \"MARGINAL\",\n  \"issues\": [\n    \"Limited replication adequacy: While the experiment specifies 3 replications per task, the run summary shows a high degree of variability in scores across runs. This may not be enough to reliably distinguish signal from noise.\"\n  ],\n  \"strengths\": [\n    \"Hypothesis falsifiability: The hypothesis is clearly falsifiable with a specified measurable threshold of improving composite score_r1 by >= 0.2 points over baseline.\",\n    \"Confounds controlled: The experiment controls for several confounding variables, such as producer_model and evaluator_model, ensuring that only the variable of interest (SYNTH_INSTRUCTION variant) is changed at a time.\",\n    \"Run order randomization: Although not explicitly stated in the provided information, if the tasks were run independently and randomly across rounds, this would prevent systematic bias.\"\n  ]\n}\n```"
+    },
+    {
+      "persona": "Knowledge Auditor",
+      "score": 6,
+      "verdict": "INCONCLUSIVE",
+      "issues": [
+        "Across multiple tasks, there was a lack of meaningful change in output content between rounds despite feedback requesting specific improvements.",
+        "In some cases, the final conclusions did not fully follow from the observed score data and feedback provided.",
+        "Alternative explanations were not sufficiently addressed; the analysis sometimes jumped to favored conclusions without robust justification."
+      ],
+      "strengths": [
+        "The evaluators consistently requested concrete examples and implementation details which would have improved depth if followed.",
+        "There was an attempt in some rounds to provide more grounded content, such as real-world scenarios or code snippets."
+      ],
+      "raw": "{\n  \"score\": 6,\n  \"verdict\": \"INCONCLUSIVE\",\n  \"issues\": [\n    \"Across multiple tasks, there was a lack of meaningful change in output content between rounds despite feedback requesting specific improvements.\",\n    \"In some cases, the final conclusions did not fully follow from the observed score data and feedback provided.\",\n    \"Alternative explanations were not sufficiently addressed; the analysis sometimes jumped to favored conclusions without robust justification.\"\n  ],\n  \"strengths\": [\n    \"The evaluators consistently requested concrete examples and implementation details which would have improved depth if followed.\",\n    \"There was an attempt in some rounds to provide more grounded content, such as real-world scenarios or code snippets.\"\n  ]\n}"
+    },
+    {
+      "persona": "Loop Optimizer",
+      "score": 7,
+      "verdict": "REVISE",
+      "issues": [
+        "The effect size for score_r1 improvement is not consistently above the threshold of 0.2, with some replications showing no significant gain.",
+        "Variability in grounded_r1 and depth_r1 suggests that further refinement or additional replications are needed to confirm stability."
+      ],
+      "strengths": [
+        "The experiment provides a clear direction for improving depth without reintroducing hallucinated code stubs.",
+        "The structured prose instruction shows promise in maintaining high relevance and specificity scores."
+      ],
+      "raw": "{\n  \"score\": 7,\n  \"verdict\": \"REVISE\",\n  \"issues\": [\n    \"The effect size for score_r1 improvement is not consistently above the threshold of 0.2, with some replications showing no significant gain.\",\n    \"Variability in grounded_r1 and depth_r1 suggests that further refinement or additional replications are needed to confirm stability.\"\n  ],\n  \"strengths\": [\n    \"The experiment provides a clear direction for improving depth without reintroducing hallucinated code stubs.\",\n    \"The structured prose instruction shows promise in maintaining high relevance and specificity scores.\"\n  ],\n  \"next_experiment_suggestion\": \"Factor=SYNTH_INSTRUCTION variant, levels=['baseline', 'prose_grounded_deep'], tasks=['T_A', 'T_B', 'T_C'], change=harness_synthesis.py::update_instruction('HARNESS_SYNTH_INSTRUCTION', {'levels': {'baseline': '', 'prose_grounded_deep': 'Output ONLY the markdown starting with #. For each item write exactly 4 prose paragraphs \u2014 no bullet scaffolding, no code blocks. Paragraph 1: state the mechanism precisely \u2014 what it does, why it works at a technical level, and the key invariant that makes it reliable. Paragraph 2: give a concrete implementation scenario with the real configuration values a practitioner would set (specific token limits, timeout values, chunk sizes, retry counts, memory thresholds, latency budgets) and explain what the system does at each boundary condition. Paragraph 3: name the two most common failure modes, the exact symptom each produces in production (the log message pattern, metric that spikes, or user-visible behavior), and the specific remediation step. Paragraph 4: state the decision rule for choosing this approach over its nearest alternative \u2014 what property of the workload tips the decision \u2014 and name at least one production system or published benchmark that uses this approach with a specific measured outcome (throughput, latency, cost, error rate). Every number and system name must be one a practitioner could verify against public documentation or their own infrastructure. Do not invent API method names or library calls that do not exist. Write entirely in English.'}})\"\n}",
+      "next_experiment_suggestion": "Factor=SYNTH_INSTRUCTION variant, levels=['baseline', 'prose_grounded_deep'], tasks=['T_A', 'T_B', 'T_C'], change=harness_synthesis.py::update_instruction('HARNESS_SYNTH_INSTRUCTION', {'levels': {'baseline': '', 'prose_grounded_deep': 'Output ONLY the markdown starting with #. For each item write exactly 4 prose paragraphs \u2014 no bullet scaffolding, no code blocks. Paragraph 1: state the mechanism precisely \u2014 what it does, why it works at a technical level, and the key invariant that makes it reliable. Paragraph 2: give a concrete implementation scenario with the real configuration values a practitioner would set (specific token limits, timeout values, chunk sizes, retry counts, memory thresholds, latency budgets) and explain what the system does at each boundary condition. Paragraph 3: name the two most common failure modes, the exact symptom each produces in production (the log message pattern, metric that spikes, or user-visible behavior), and the specific remediation step. Paragraph 4: state the decision rule for choosing this approach over its nearest alternative \u2014 what property of the workload tips the decision \u2014 and name at least one production system or published benchmark that uses this approach with a specific measured outcome (throughput, latency, cost, error rate). Every number and system name must be one a practitioner could verify against public documentation or their own infrastructure. Do not invent API method names or library calls that do not exist. Write entirely in English.'}})"
+    }
+  ],
+  "decision": {
+    "decision": "REVISE",
+    "confidence": 0.5,
+    "rationale": "Mixed verdicts \u2014 Methodologist:MARGINAL Auditor:INCONCLUSIVE Optimizer:REVISE",
+    "next_experiment_suggestion": "Factor=SYNTH_INSTRUCTION variant, levels=['baseline', 'prose_grounded_deep'], tasks=['T_A', 'T_B', 'T_C'], change=harness_synthesis.py::update_instruction('HARNESS_SYNTH_INSTRUCTION', {'levels': {'baseline': '', 'prose_grounded_deep': 'Output ONLY the markdown starting with #. For each item write exactly 4 prose paragraphs \u2014 no bullet scaffolding, no code blocks. Paragraph 1: state the mechanism precisely \u2014 what it does, why it works at a technical level, and the key invariant that makes it reliable. Paragraph 2: give a concrete implementation scenario with the real configuration values a practitioner would set (specific token limits, timeout values, chunk sizes, retry counts, memory thresholds, latency budgets) and explain what the system does at each boundary condition. Paragraph 3: name the two most common failure modes, the exact symptom each produces in production (the log message pattern, metric that spikes, or user-visible behavior), and the specific remediation step. Paragraph 4: state the decision rule for choosing this approach over its nearest alternative \u2014 what property of the workload tips the decision \u2014 and name at least one production system or published benchmark that uses this approach with a specific measured outcome (throughput, latency, cost, error rate). Every number and system name must be one a practitioner could verify against public documentation or their own infrastructure. Do not invent API method names or library calls that do not exist. Write entirely in English.'}})"
+  }
+}

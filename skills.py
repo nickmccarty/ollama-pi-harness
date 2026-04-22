@@ -41,12 +41,12 @@ REGISTRY: dict[str, dict] = {
         "auto":        None,   # explicit only — /annotate bypasses the whole pipeline
     },
 
-    "kg": {
+    "knowledge-graph": {
         "description": "Generate a D3.js knowledge graph from the synthesized content",
         "hook":        "post_synthesis",
         "prompt":      None,
         "auto": lambda task, plan: bool(re.search(
-            r"knowledge graph|\bkg\b|visuali[sz]e", task, re.IGNORECASE
+            r"knowledge[\s-]graph|\bkg\b|visuali[sz]e", task, re.IGNORECASE
         )),
     },
 
@@ -147,6 +147,19 @@ REGISTRY: dict[str, dict] = {
         "hook":        "standalone",
         "prompt":      None,
         "auto":        None,   # explicit only
+    },
+
+    "orientation": {
+        "description": (
+            "Standalone: build a full situational awareness document for the agent — "
+            "directory tree (with mtime/size), .env config, recent runs, active experiments, "
+            "git log, GPU state, and wiki self-knowledge. Compresses with the LLM if the "
+            "document exceeds the context budget. Use when the agent needs to understand "
+            "its own environment before tackling an unfamiliar task."
+        ),
+        "hook":        "standalone",
+        "prompt":      None,
+        "auto":        None,
     },
 
     "introspect": {
@@ -355,12 +368,12 @@ def run_post_synthesis(
 ) -> dict:
     """
     Run all post_synthesis skill handlers.
-    Returns a dict of results keyed by skill name (e.g. {"kg": "/path/to/graph.html"}).
+    Returns a dict of results keyed by skill name (e.g. {"knowledge-graph": "/path/to/graph.html"}).
     """
     results = {}
     for name in skills_at_hook(active_skills, "post_synthesis"):
-        if name == "kg":
-            results["kg"] = _handle_kg(content, task, output_path, producer_model)
+        if name == "knowledge-graph":
+            results["knowledge-graph"] = _handle_kg(content, task, output_path, producer_model)
     return results
 
 
@@ -379,10 +392,10 @@ def _handle_kg(content: str, task: str, output_path: str, producer_model: str) -
         kg_path   = out_dir / f"kg_{ts}.html"
 
         render_html(graph_data, kg_path, title=task[:60], model=producer_model, article_snippet=article)
-        print(f"  [skill:kg] graph → {kg_path.resolve()}")
+        print(f"  [skill:knowledge-graph] graph → {kg_path.resolve()}")
         return str(kg_path.resolve())
     except Exception as e:
-        print(f"  [skill:kg] failed: {e}")
+        print(f"  [skill:knowledge-graph] failed: {e}")
         return None
 
 

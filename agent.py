@@ -136,8 +136,8 @@ try:
 except ImportError:
     MARKITDOWN_AVAILABLE = False
 
-MODEL = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen-32b")
-COMPRESS_MODEL = os.environ.get("COMPRESS_MODEL", MODEL)  # lighter model for compress_knowledge / plan_query
+MODEL = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen-32b").strip()
+COMPRESS_MODEL = os.environ.get("COMPRESS_MODEL", MODEL).strip()  # lighter model for compress_knowledge / plan_query
 
 # Models that think by default and require think=False to produce immediate output.
 # Thinking mode consumes num_predict budget before the response starts, which
@@ -149,9 +149,16 @@ def _is_thinking_model(model_name: str) -> bool:
     return any(tag in name for tag in _THINKING_MODELS)
 
 def _synth_options(producer_model: str) -> dict:
-    """Return ollama options for a synthesis call, disabling thinking on models that need it."""
+    """Return ollama options for a synthesis call.
+    HARNESS_PRODUCER_THINK=1 forces thinking on (and doubles num_predict budget).
+    Thinking models default to think=False to avoid consuming the token budget silently.
+    """
     opts = {"temperature": 0.1, "num_predict": 8192}
-    if _is_thinking_model(producer_model):
+    think_override = os.environ.get("HARNESS_PRODUCER_THINK", "")
+    if think_override == "1":
+        opts["think"] = True
+        opts["num_predict"] = 16384  # thinking tokens eat the budget before output starts
+    elif _is_thinking_model(producer_model):
         opts["think"] = False
     return opts
 
@@ -384,9 +391,19 @@ def run_tool_loop(task: str, research_context: str, trace: RunTrace, producer_mo
 
 def fetch_url_content(url: str) -> str:
     """Fetch a URL and convert its HTML to markdown via MarkItDown. Returns empty string on failure."""
-    from youtube_transcribe import is_youtube_url, transcribe_youtube
+    from youtube_transcribe import is_youtube_url, is_media_url, transcribe_youtube, transcribe_media_url
     if is_youtube_url(url):
-        return transcribe_youtube(url)
+        try:
+            return transcribe_youtube(url)
+        except Exception as e:
+            print(f"  [youtube] transcription error (skipping): {e}")
+            return ""
+    if is_media_url(url):
+        try:
+            return transcribe_media_url(url)
+        except Exception as e:
+            print(f"  [media] transcription error (skipping): {e}")
+            return ""
     if not MARKITDOWN_AVAILABLE:
         return ""
     try:
@@ -882,7 +899,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1154,6 +1171,57 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
             _store_memory(memory, task, "introspect", trace.data, content)
 
+        def _handle_orientation():
+            print("\n[skill:orientation] building situational awareness document...")
+            trace.data["task_type"] = "orientation"
+            from orientation_skill import build_orientation
+            mem_ctx = memory.get_context(task) or ""
+            doc = build_orientation(
+                producer_model=producer_model,
+                memory_ctx=mem_ctx,
+                compress_model=COMPRESS_MODEL,
+            )
+            # Write raw doc to temp file so server.py can pick it up for cache
+            try:
+                import tempfile
+                _raw_path = os.path.join(tempfile.gettempdir(), "harness_orientation_raw.md")
+                with open(_raw_path, "w", encoding="utf-8") as _f:
+                    _f.write(doc)
+            except Exception as _e:
+                print(f"  [orientation] raw doc write failed: {_e}")
+            # Synthesize a response grounded in the orientation document (best-effort)
+            content = ""
+            try:
+                import inference as _inf
+                _synth_model = _inf.get_active_vllm_model() or producer_model
+                prompt = (
+                    f"Task: {task}\n\n"
+                    f"Project orientation:\n\n{doc}\n\n"
+                    "Using only the orientation above, respond to the task accurately. "
+                    "Format as clear markdown. If the task is just '/orientation' with no "
+                    "specific question, produce a concise executive summary of the project state."
+                )
+                with trace.span("orientation", model=_synth_model):
+                    response = ollama.chat(
+                        model=_synth_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        options={"temperature": 0.1, "num_predict": 3000},
+                    )
+                trace.log_usage(response, stage="orientation")
+                content = clean_synthesis_output(response["message"].get("content", "").strip())
+            except Exception as _syn_err:
+                print(f"  [orientation] synthesis skipped ({_syn_err}); using raw doc")
+            if not content:
+                content = doc
+            print("\n" + content[:2000] + ("\n...[truncated]" if len(content) > 2000 else "") + "\n")
+            if path:
+                write_output(content, path, trace)
+            else:
+                trace.data["final_content"] = content[:16_000]
+                trace.data["output_bytes"]  = len(content.encode())
+            trace.finish("PASS")
+            _store_memory(memory, task, "orientation", trace.data, content)
+
         def _handle_sync_wiki():
             print("\n[skill:sync-wiki] extracting implementation facts from source code...")
             trace.data["task_type"] = "sync_wiki"
@@ -1198,15 +1266,16 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
 
         _STANDALONE = {
-            "annotate":   _handle_annotate,
-            "email":      _handle_email,
-            "github":     _handle_github,
-            "review":     _handle_review,
-            "lit-review": _handle_lit_review,
-            "recall":     _handle_recall,
-            "queue":      _handle_queue,
-            "introspect": _handle_introspect,
-            "sync-wiki":  _handle_sync_wiki,
+            "annotate":     _handle_annotate,
+            "email":        _handle_email,
+            "github":       _handle_github,
+            "review":       _handle_review,
+            "lit-review":   _handle_lit_review,
+            "recall":       _handle_recall,
+            "queue":        _handle_queue,
+            "introspect":   _handle_introspect,
+            "orientation":  _handle_orientation,
+            "sync-wiki":    _handle_sync_wiki,
         }
 
         for _skill in explicit_skills:
@@ -1381,7 +1450,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print("\n" + content + "\n")
         write_output(content, path, trace)
 
-        # Post-synthesis skill handlers (e.g. /kg)
+        # Post-synthesis skill handlers (e.g. /knowledge-graph)
         if skills_at_hook(active_skills, "post_synthesis"):
             with trace.span("post_synthesis_skills"):
                 run_post_synthesis(active_skills, content, task, path, producer_model)

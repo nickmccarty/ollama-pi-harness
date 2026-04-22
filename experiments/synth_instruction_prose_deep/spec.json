@@ -1,0 +1,38 @@
+{
+  "title": "synth_instruction_prose_deep",
+  "hypothesis": "A prose instruction that explicitly demands 4-paragraph implementation depth recovers depth_r1 to baseline levels while preserving the grounded_r1 gain from prose_depth, improving composite score_r1 by >= 0.2 points over baseline.",
+  "falsified_if": "mean score_r1 delta < 0.2",
+  "factor": {
+    "name": "SYNTH_INSTRUCTION variant",
+    "levels": [
+      "baseline",
+      "prose_grounded_deep"
+    ]
+  },
+  "tasks": [
+    "T_A",
+    "T_B",
+    "T_C"
+  ],
+  "replications": 3,
+  "response_variables": [
+    "score_r1",
+    "grounded_r1",
+    "depth_r1"
+  ],
+  "controlled_variables": {
+    "producer_model": "pi-qwen3-14b",
+    "evaluator_model": "atla/selene-mini",
+    "search_rounds": 2,
+    "max_rounds": 3
+  },
+  "mutable_scope": {
+    "type": "env",
+    "var": "HARNESS_SYNTH_INSTRUCTION",
+    "levels": {
+      "baseline": "",
+      "prose_grounded_deep": "Output ONLY the markdown starting with #. For each item write exactly 4 prose paragraphs \u2014 no bullet scaffolding, no code blocks. Paragraph 1: state the mechanism precisely \u2014 what it does, why it works at a technical level, and the key invariant that makes it reliable. Paragraph 2: give a concrete implementation scenario with the real configuration values a practitioner would set (specific token limits, timeout values, chunk sizes, retry counts, memory thresholds, latency budgets) and explain what the system does at each boundary condition. Paragraph 3: name the two most common failure modes, the exact symptom each produces in production (the log message pattern, metric that spikes, or user-visible behavior), and the specific remediation step. Paragraph 4: state the decision rule for choosing this approach over its nearest alternative \u2014 what property of the workload tips the decision \u2014 and name at least one production system or published benchmark that uses this approach with a specific measured outcome (throughput, latency, cost, error rate). Every number and system name must be one a practitioner could verify against public documentation or their own infrastructure. Do not invent API method names or library calls that do not exist. Write entirely in English."
+    }
+  },
+  "notes": "Follows synth_instruction_grounded (delta grounded_r1=+1.223, FALSIFIED at 1.5). Key finding: prose_depth improved grounded (+1.2) but cost depth (-0.5), leaving composite unchanged. Root cause: removing code scaffolding also removed the implementation specifics Selene scores as depth. This instruction adds explicit 4-paragraph structure and boundary-condition requirements to recover depth without reintroducing hallucinated code stubs. Primary metric: score_r1 composite (did we actually move the needle?). Secondary: grounded_r1 >= 7.0, depth_r1 >= 6.5 (no regression from baseline 6.7)."
+}

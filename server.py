@@ -24,10 +24,17 @@ Endpoints:
     DELETE /api/schedule/<id>     remove a scheduled task
 """
 
-import sys, os, uuid, threading, subprocess, argparse, json
+import sys, os, uuid, threading, subprocess, argparse, json, atexit, tempfile
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
+
+from schema import (
+    resolve_project_id, start_session, end_session,
+    list_projects, project_stats,
+    _read_jsonl,
+    PROJECTS_PATH, SESSIONS_PATH, ARTIFACTS_PATH,
+)
 
 try:
     from flask import Flask, Response, request, jsonify
@@ -47,6 +54,62 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app  = Flask(__name__)
+
+# ── Project / session lifecycle ───────────────────────────────────────────────
+
+_server_project_id : str = ""
+_server_session    = None   # schema.Session object
+
+def _init_session():
+    global _server_project_id, _server_session
+    _server_project_id = resolve_project_id()
+    _server_session    = start_session(_server_project_id, triggered_by="server")
+    print(f"[server] project={_server_project_id}  session={_server_session.session_id}")
+
+def _close_session():
+    if _server_session:
+        with _lock:
+            total_runs = sum(1 for r in _recent)
+        end_session(_server_session, runs=total_runs)
+
+atexit.register(_close_session)
+
+# ── Orientation cache ────────────────────────────────────────────────────────
+
+_orientation_doc  : str   = ""
+_orientation_lock         = threading.Lock()
+_ORIENTATION_INTERVAL     = 1800  # seconds between refreshes
+
+_ORIENTATION_RAW = os.path.join(tempfile.gettempdir(), "harness_orientation_raw.md")
+
+def _refresh_orientation():
+    """Launch /orientation as a visible agent subprocess, then read its raw doc into cache."""
+    global _orientation_doc
+    import time
+    print("[server] orientation: launching agent subprocess...")
+    run_id = _launch("/orientation", triggered_by="orientation_cache")
+    # Wait up to 5 minutes for the agent run to finish
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        time.sleep(2)
+        with _lock:
+            if run_id not in _active:
+                break
+    # Read raw doc written by agent.py's _handle_orientation()
+    try:
+        if os.path.exists(_ORIENTATION_RAW):
+            doc = open(_ORIENTATION_RAW, encoding="utf-8").read()
+            with _orientation_lock:
+                _orientation_doc = doc
+            print(f"[server] orientation cache refreshed ({len(doc)} chars)")
+        else:
+            print("[server] orientation raw file not found after run")
+    except Exception as e:
+        print(f"[server] orientation cache read failed: {e}")
+
+def _get_orientation() -> str:
+    with _orientation_lock:
+        return _orientation_doc
 
 # ── In-memory state ──────────────────────────────────────────────────────────
 
@@ -96,9 +159,13 @@ def _launch(task: str, triggered_by: str = "manual") -> str:
             text=True, bufsize=1, encoding="utf-8", errors="replace",
             cwd=HERE,
             env={**os.environ,
-                 "PYTHONIOENCODING": "utf-8",
-                 "PYTHONUNBUFFERED": "1",
-                 "AGENT_TASK": task},
+                 "PYTHONIOENCODING":    "utf-8",
+                 "PYTHONUNBUFFERED":    "1",
+                 "AGENT_TASK":          task,
+                 "HARNESS_PROJECT_ID":  _server_project_id,
+                 "HARNESS_SESSION_ID":  _server_session.session_id if _server_session else "",
+                 "HARNESS_RUN_ID":      "",   # RunTrace will generate a fresh one
+                 },
         )
         with _lock:
             run["proc"] = proc
@@ -339,6 +406,87 @@ def api_sched_delete(sched_id):
     return jsonify({"deleted": sched_id})
 
 
+@app.route("/api/state")
+def api_state():
+    """
+    Full hierarchical state: projects → sessions → recent runs + artifacts.
+    The dashboard polls this every 5 s for live updates.
+    No messages — those are fetched on demand via /api/messages?run_id=...
+    """
+    # Projects — latest record per project_id
+    proj_records = _read_jsonl(PROJECTS_PATH)
+    proj_latest: dict[str, dict] = {}
+    for r in proj_records:
+        pid = r.get("project_id")
+        if pid:
+            proj_latest[pid] = r
+    projects = list(proj_latest.values())
+
+    # Sessions — merge start + end events into one record per session_id
+    sess_records = _read_jsonl(SESSIONS_PATH)
+    sess_map: dict[str, dict] = {}
+    for r in sess_records:
+        sid = r.get("session_id")
+        if not sid:
+            continue
+        if sid not in sess_map:
+            sess_map[sid] = dict(r)
+        else:
+            sess_map[sid].update({k: v for k, v in r.items() if v is not None})
+    sessions = sorted(sess_map.values(), key=lambda s: s.get("started_at", ""), reverse=True)
+
+    # Artifacts — last 500
+    art_records = _read_jsonl(ARTIFACTS_PATH)
+    artifacts = art_records[-500:]
+
+    # Live in-memory state
+    with _lock:
+        active = [
+            {k: v for k, v in r.items() if k not in ("log_event", "proc", "log_lines", "log_done")}
+            for r in _active.values()
+        ]
+        queue = [
+            {**item, "position": i + 1} for i, item in enumerate(_queue)
+        ]
+        schedules = [{k: v for k, v in s.items() if k != "_job"} for s in _sched.values()]
+
+    return jsonify({
+        "server_project_id": _server_project_id,
+        "server_session_id": _server_session.session_id if _server_session else "",
+        "projects":   projects,
+        "sessions":   sessions,
+        "artifacts":  artifacts,
+        "live": {
+            "active":    active,
+            "queue":     queue,
+            "schedules": schedules,
+        },
+    })
+
+
+@app.route("/api/messages")
+def api_messages():
+    """Return messages for a specific run_id from messages.jsonl."""
+    run_id = request.args.get("run_id", "").strip()
+    if not run_id:
+        return jsonify({"error": "run_id required"}), 400
+    msgs_path = os.path.join(HERE, "messages.jsonl")
+    if not os.path.exists(msgs_path):
+        return jsonify([])
+    records = []
+    with open(msgs_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    r = json.loads(line)
+                    if r.get("run_id") == run_id:
+                        records.append(r)
+                except Exception:
+                    pass
+    return jsonify(records)
+
+
 _FEEDBACK_JSONL  = Path(__file__).parent / "feedback.jsonl"
 _FINETUNE_METRICS = Path(__file__).parent / "finetune_metrics.jsonl"
 
@@ -407,6 +555,115 @@ def api_feedback_list():
     return jsonify(records)
 
 
+# ── Voice endpoint ────────────────────────────────────────────────────────────
+
+@app.route("/api/voice", methods=["POST"])
+def api_voice():
+    """
+    Receive an audio blob, transcribe with whisper, process with LLM, return markdown.
+    Body: multipart/form-data with field 'audio' (webm/ogg/wav blob).
+    Response: {transcript, response}
+    """
+    import tempfile, traceback
+    from youtube_transcribe import _ensure_ffmpeg, WHISPER_MODEL, WHISPER_DEVICE
+
+    audio_file = request.files.get("audio")
+    if not audio_file:
+        return jsonify({"error": "no audio field"}), 400
+
+    try:
+        import tempfile as _tmp
+        import subprocess as _sp
+        import shutil, whisper
+
+        with _tmp.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+            tmp_path = tmp.name
+            audio_file.save(tmp_path)
+
+        # Resolve ffmpeg: system PATH → imageio_ffmpeg bundled binary
+        ffmpeg_exe = shutil.which("ffmpeg")
+        if not ffmpeg_exe:
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except ImportError:
+                ffmpeg_exe = None
+        if not ffmpeg_exe:
+            raise RuntimeError("ffmpeg not found — install via winget or pip install imageio-ffmpeg")
+
+        # Convert webm → 16kHz mono wav so whisper never needs to call ffmpeg itself
+        wav_path = tmp_path + ".wav"
+        r = _sp.run(
+            [ffmpeg_exe, "-y", "-i", tmp_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+            capture_output=True,
+        )
+        os.unlink(tmp_path)
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg conversion failed: {r.stderr.decode()[:300]}")
+
+        # Load audio as numpy array and pass directly — bypasses whisper's internal ffmpeg call
+        import numpy as np
+        audio_np = np.frombuffer(
+            _sp.run(
+                [ffmpeg_exe, "-y", "-i", wav_path, "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"],
+                capture_output=True, check=True,
+            ).stdout,
+            dtype=np.int16,
+        ).astype(np.float32) / 32768.0
+
+        os.unlink(wav_path)
+        model = whisper.load_model(WHISPER_MODEL, device=WHISPER_DEVICE)
+        result = model.transcribe(audio_np)
+        transcript = (result.get("text") or "").strip()
+    except Exception as e:
+        return jsonify({"error": f"transcription failed: {e}"}), 500
+
+    if not transcript:
+        return jsonify({"error": "transcript empty"}), 400
+
+    try:
+        import inference, urllib.request
+        producer = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen-32b").strip()
+        # If the configured model isn't loaded, fall back to the first available vLLM model
+        try:
+            vllm_base = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+            with urllib.request.urlopen(f"{vllm_base}/models", timeout=2) as r:
+                models = json.loads(r.read())["data"]
+                if models and not any(m["id"] == producer for m in models):
+                    producer = models[0]["id"]
+        except Exception:
+            pass
+        orientation = _get_orientation()
+        if orientation:
+            system_msg = (
+                "You are the Harness Engineering research agent. "
+                "You MUST answer using ONLY the project orientation below — "
+                "do not invent capabilities, models, or skills not listed there. "
+                "Format your response in markdown.\n\n"
+                f"## Project orientation\n\n{orientation}"
+            )
+        else:
+            system_msg = (
+                "You are the Harness Engineering research agent. "
+                "Orientation context is still building — answer from general knowledge "
+                "but note that the project context is not yet available. "
+                "Format your response in markdown."
+            )
+        resp = inference.chat(
+            model=producer,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": transcript},
+            ],
+            options={"temperature": 0.3, "num_predict": 2048},
+        )
+        answer = resp.message.content.strip()
+    except Exception as e:
+        return jsonify({"transcript": transcript, "error": f"LLM failed: {e}"}), 500
+
+    return jsonify({"transcript": transcript, "response": answer})
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -414,6 +671,22 @@ if __name__ == "__main__":
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="127.0.0.1")
     args = p.parse_args()
+    _init_session()
+    # Build orientation cache in background so startup isn't blocked
+    threading.Thread(target=_refresh_orientation, daemon=True).start()
+    # Schedule periodic refresh
+    if CRON_OK:
+        _scheduler.add_job(_refresh_orientation, "interval", seconds=_ORIENTATION_INTERVAL,
+                           id="orientation_refresh")
+    else:
+        # Fallback: simple timer loop if APScheduler unavailable
+        def _orientation_loop():
+            import time
+            while True:
+                time.sleep(_ORIENTATION_INTERVAL)
+                _refresh_orientation()
+        threading.Thread(target=_orientation_loop, daemon=True).start()
     print(f"[server] http://{args.host}:{args.port}")
     print(f"[server] cron: {'enabled' if CRON_OK else 'disabled (pip install apscheduler)'}")
+    print(f"[server] orientation: building in background, refreshes every {_ORIENTATION_INTERVAL//60}min")
     app.run(host=args.host, port=args.port, debug=False, threaded=True)

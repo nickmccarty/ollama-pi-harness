@@ -26,7 +26,8 @@ from datetime import datetime
 from pathlib import Path
 
 import inference as ollama
-from jinja2 import Environment, FileSystemLoader, Markup
+from jinja2 import Environment, FileSystemLoader
+from markupsafe import Markup
 
 MODEL = "pi-qwen-32b"
 DEFAULT_NODES = 10

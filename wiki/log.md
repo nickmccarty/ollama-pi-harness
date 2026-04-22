@@ -227,3 +227,53 @@ Six improvements shipped:
 **files added:** `youtube_transcribe.py`
 
 **env vars added:** `INFERENCE_BACKEND`, `VLLM_BASE_URL`, `VLLM_MODEL_MAP`, `WIGGUM_EVALUATOR_MODEL`, `WIGGUM_PRODUCER_MODEL`, `LLAMA_OCR_BASE_URL`
+
+
+## [2026-04-22] build | Session 21-22 — HARNESS_ENDPOINTS multi-backend routing, /orientation skill, voice input, YouTube rewrite, Claude usage stats
+
+Eleven features and fixes shipped:
+
+1. **`HARNESS_ENDPOINTS` per-model routing** (`inference.py`) — highest-priority routing layer (above `INFERENCE_BACKEND`/`VLLM_MODEL_MAP`). JSON dict: `{"tag": {"url": "...", "model_id": "...", "backend": "vllm"|"llamacpp"|"openai"}}`. Enables vLLM on port 8000 + llama-server GGUFs on port 8001 simultaneously. `backend="llamacpp"` sends `chat_template_kwargs` (recent llama.cpp honors it via Jinja2 renderer); `backend="openai"` skips Qwen-specific headers. `top_k`, `top_p`, `presence_penalty` now forwarded from `options` to OAI kwargs. `get_active_vllm_model(base_url=)` accepts optional URL param. `list_endpoints()` introspection helper added.
+
+2. **llama-server GGUF path unlocked** — `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` (MoE: 35B total, 3B activated; 262K native context; ~22GB Q4_K_XL) is the primary target. Serve: `llama-server.exe -m <path> --port 8001 -ngl 99 -c 65536 --alias qwen3.6-35b`. Wire: `HARNESS_ENDPOINTS={"qwen3.6": {"url": "http://localhost:8001/v1", "model_id": "qwen3.6-35b", "backend": "llamacpp"}}`.
+
+3. **`/orientation` skill** (`orientation_skill.py` NEW, `agent.py`, `skills.py`) — standalone handler gathering situational awareness: directory tree (mtime + size), .env config (secrets redacted), recent runs summary, active experiments with run counts, git log, GPU state (nvidia-smi), wiki self-knowledge. Compresses via LLM if >14K chars. Raw doc written to `<tmp>/harness_orientation_raw.md` for server cache pickup. `final_content` and `output_bytes` written to RunTrace so synthesis output appears in dashboard inspector.
+
+4. **Orientation refresh as live DAG run** (`server.py`) — `_refresh_orientation()` now calls `_launch("/orientation")` instead of `build_orientation()` directly. Orientation cache refresh appears as a real agent subprocess in the dashboard run list with full streaming stdout. Server reads `_ORIENTATION_RAW` after subprocess completes to populate `_orientation_doc`.
+
+5. **Voice input** (`dashboard.py`, `server.py`) — mic FAB → MediaRecorder (webm) → POST `/api/voice` → imageio_ffmpeg conversion → whisper transcription → LLM with orientation context → markdown response with copy button. Orientation doc used as system grounding context. Active vLLM model queried as fallback when configured model returns 404.
+
+6. **YouTube transcription rewrite** (`youtube_transcribe.py`) — yt-dlp removed entirely (Chrome cookie WSL2 lock issue). New strategy: youtube-transcript-api (auto-captions, no download) → pytubefix + whisper fallback. Direct media URLs (mp4/mp3/wav/webm etc.) via ffmpeg + whisper. `_get_ffmpeg()` resolves binary: system PATH → imageio_ffmpeg portable fallback. `WHISPER_DEVICE=cuda` default (set in `.env`).
+
+7. **Claude Code usage stats** (`dashboard.py`) — reads `~/.claude/stats-cache.json`. Three charts: daily activity (requests/day), daily tokens (input+output stacked), input vs output by model (stacked bar). Filtered to Claude models only.
+
+8. **Model naming fix** — `pi-qwen3-14b` renamed to `pi-qwen25-14b` throughout `inference.py`, `.env`, `experiments/producer_model_factor/spec.json` (it's Qwen2.5-14B-Instruct-AWQ, not Qwen3).
+
+9. **`experiment_runner.py` fixes** — `_load_checkpoint` now only marks `ok=True` runs as completed (was incorrectly skipping failed runs, blocking re-runs). `--treatment <level>` flag added for single-treatment execution (avoids 404s when vLLM serves only one model at a time).
+
+10. **`autoresearch.py` pdfminer fix** — stderr redirected to devnull during `_md.convert(url)` to suppress hundreds of color warning lines from pdfminer when processing arxiv PDFs.
+
+11. **`qwen3_think_mode` experiment spec** (`experiments/qwen3_think_mode/spec.json` NEW) — factor: `HARNESS_PRODUCER_THINK` (think_off vs think_on); model: `qwen3-14b`; tests whether chain-of-thought reasoning improves wiggum score_r1 delta >= 0.5.
+
+**env vars added:** `HARNESS_ENDPOINTS`
+**files added:** `orientation_skill.py`, `experiments/qwen3_think_mode/spec.json`
+**model serve commands:** see `.env.example` for `--max-model-len` values (pi-qwen25-14b: 23000, qwen3-14b: 28000)
+
+## [2026-04-21] build | Session 20 — synth_instruction_prose_deep experiment, wiggum mid-run fixes, refactor audit
+
+Three areas of work:
+
+1. **`synth_instruction_prose_deep` experiment running** (`experiments/synth_instruction_prose_deep/`): tests whether a 4-paragraph prose instruction (mechanism → boundary conditions w/ real config values → failure modes w/ log patterns → decision rule + case study) recovers depth_r1 to baseline levels while preserving the grounded_r1 gain from prose_depth. Primary metric: `score_r1` composite delta >= 0.2. Secondary: grounded_r1 >= 7.0, depth_r1 >= 6.5. First-ever PASS observed on run 1 (T_A prose_grounded_deep). Experiment still in progress at session end.
+
+2. **Wiggum mid-run fixes** (`wiggum.py`) — three bugs caught and patched while experiment was running (changes apply to future subprocess invocations without restart):
+   - **Style reminder in REVISE_PROMPT**: `_revise_style_reminder()` injects `HARNESS_SYNTH_INSTRUCTION` into the revision prompt so grounded constraints are maintained across revision rounds. Root cause: grounded dropped 8→6→8 during revision because REVISE_PROMPT had no reference to original output constraints.
+   - **Language consistency rule** in `EVAL_PROMPT` universal rules: caps `structure` at 3 if non-English characters appear in the output. Root cause: Qwen2.5-14B code-switched to Chinese in a JPMorgan paragraph; Selene gave a PASS despite mixed-language output.
+   - **Restore message display fix**: `cmp = ">" if best_score > score else "="` — previously always showed `>` even when scores were equal, making cycling logs misleading.
+
+3. **Refactor audit + technical debt roadmap** (`wiki/roadmap.md`) — full directory survey and import dependency audit:
+   - Root directory has 130+ items; catalogued into 4 cleanup phases (TD-1 through TD-4 in roadmap)
+   - Import audit: `inference.py` has 16 dependents; `*_skill.py` files and `panel.py` import only `inference` and are safe to move to `skills/`; `experiment_runner.py` is also invoked as a subprocess (impacts move planning)
+   - Trace pipeline gap identified: `_write_trace()` never calls `log_artifact()`, making traces invisible to the session data model. Proposed fix: session-scoped subdirectories + artifact registration + experiment-context label
+   - All findings documented as TD-1 through TD-4 in roadmap under new "Technical debt / pre-refactor cleanup" section
+
+**files modified:** `wiggum.py`, `wiki/roadmap.md`, `wiki/log.md`

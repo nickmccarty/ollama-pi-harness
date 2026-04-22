@@ -1,0 +1,37 @@
+{
+  "title": "synth_instruction_depth",
+  "hypothesis": "Replacing the code-template SYNTH_INSTRUCTION with a prose-depth instruction improves mean depth_r1 by >= 1.0 point.",
+  "falsified_if": "mean depth_r1 delta < 1.0",
+  "factor": {
+    "name": "SYNTH_INSTRUCTION variant",
+    "levels": [
+      "baseline",
+      "prose_depth"
+    ]
+  },
+  "tasks": [
+    "T_A",
+    "T_B",
+    "T_C"
+  ],
+  "replications": 3,
+  "response_variables": [
+    "depth_r1",
+    "score_r1"
+  ],
+  "controlled_variables": {
+    "producer_model": "pi-qwen-32b",
+    "evaluator_model": "atla/selene-mini",
+    "search_rounds": 2,
+    "max_rounds": 3
+  },
+  "mutable_scope": {
+    "type": "env",
+    "var": "HARNESS_SYNTH_INSTRUCTION",
+    "levels": {
+      "baseline": "",
+      "prose_depth": "Output ONLY the markdown starting with #. For each item: (1) state the core mechanism in one precise sentence \u2014 what it does and why it works at a technical level; (2) give a concrete operational scenario with specific numbers (e.g. chunk size, timeout, threshold, latency budget) that a practitioner would actually configure; (3) name the two most common failure modes and exactly what symptom each produces in production; (4) state the decision rule for when to use this approach versus its nearest alternative; (5) name at least one production system or published case study that uses this approach and what outcome they observed. Write in prose paragraphs \u2014 no bullet scaffolding, no code blocks unless a snippet is genuinely irreplaceable. Every claim must be specific enough that a practitioner could validate it against their own system."
+    }
+  },
+  "notes": ""
+}

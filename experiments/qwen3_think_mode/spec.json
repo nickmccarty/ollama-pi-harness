@@ -1,0 +1,40 @@
+{
+  "title": "qwen3_think_mode",
+  "hypothesis": "Enabling thinking mode (HARNESS_PRODUCER_THINK=1) on Qwen3-14B-AWQ improves mean score_r1 by >= 0.3 points over think=False on T_A/T_B/T_C.",
+  "falsified_if": "mean score_r1 delta < 0.3",
+  "factor": {
+    "name": "think_mode",
+    "levels": [
+      "think_off",
+      "think_on"
+    ]
+  },
+  "tasks": [
+    "T_A",
+    "T_B",
+    "T_C"
+  ],
+  "replications": 3,
+  "response_variables": [
+    "score_r1",
+    "grounded_r1",
+    "depth_r1",
+    "completeness_r1"
+  ],
+  "controlled_variables": {
+    "producer_model": "qwen3-14b",
+    "synth_instruction": "",
+    "evaluator_model": "atla/selene-mini",
+    "search_rounds": 2,
+    "max_rounds": 3
+  },
+  "mutable_scope": {
+    "type": "env",
+    "var": "HARNESS_PRODUCER_THINK",
+    "levels": {
+      "think_off": "",
+      "think_on": "1"
+    }
+  },
+  "notes": "Motivated by producer_model_factor result: qwen3-14b (think=False) scored 0.344 points below qwen25-14b. Hypothesis: disabling thinking stripped the capability advantage of Qwen3. think_on doubles num_predict to 16384 (see agent.py _synth_options) so thinking tokens do not crowd out the response. Controlled: HARNESS_PRODUCER_MODEL=qwen3-14b set manually before both treatment runs \u2014 the mutable_scope only toggles HARNESS_PRODUCER_THINK. Pre-run: ensure vLLM is serving Qwen/Qwen3-14B-AWQ --served-model-name qwen3-14b --max-model-len 28000 --reasoning-parser qwen3 before starting. Run think_off first (already cached in search_cache.db from producer_model_factor), then think_on."
+}

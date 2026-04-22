@@ -1,0 +1,39 @@
+{
+  "title": "synth_instruction_additive_grounding",
+  "hypothesis": "A lightweight additive grounding sentence appended per item \u2014 requiring one named production system or benchmark with one measured outcome \u2014 preserves baseline completeness and depth while retaining the grounded_r1 gain, improving composite score_r1 by >= 0.2 points over baseline.",
+  "falsified_if": "mean score_r1 delta < 0.2",
+  "factor": {
+    "name": "SYNTH_INSTRUCTION variant",
+    "levels": [
+      "baseline",
+      "additive_grounding"
+    ]
+  },
+  "tasks": [
+    "T_A",
+    "T_B",
+    "T_C"
+  ],
+  "replications": 3,
+  "response_variables": [
+    "score_r1",
+    "grounded_r1",
+    "depth_r1",
+    "completeness_r1"
+  ],
+  "controlled_variables": {
+    "producer_model": "pi-qwen3-14b",
+    "evaluator_model": "atla/selene-mini",
+    "search_rounds": 2,
+    "max_rounds": 3
+  },
+  "mutable_scope": {
+    "type": "env",
+    "var": "HARNESS_SYNTH_INSTRUCTION",
+    "levels": {
+      "baseline": "",
+      "additive_grounding": "Output ONLY the markdown starting with #. Write naturally and completely \u2014 do not impose a rigid paragraph structure. After writing each item, add one sentence in italics naming a specific production system or published benchmark that uses this approach, with one measured outcome (a specific throughput, latency, cost, or error rate figure). The system name and number must be verifiable against public documentation or published benchmarks. Do not invent API method names or library calls that do not exist. Write entirely in English."
+    }
+  },
+  "notes": "Follows synth_instruction_prose_deep (delta score_r1=-0.034, FALSIFIED). Key finding: the 4-paragraph-per-item template improved grounded_r1 by +2.0 (6.0\u21928.0) but simultaneously hurt completeness (-0.6), depth (-0.5), relevance (-0.5), and structure (-0.5) \u2014 net composite effect near zero. Root cause: the rigid template forces the model to spend tokens on mandated structure rather than topic coverage. T_A byte count 12\u201316KB vs baseline 8\u201310KB: longer outputs, no score gain. T_B (fewer items) was the only task where prose_grounded_deep won (8.0 vs 7.8), confirming the template works when item count is low but fails when completeness requires covering many concepts. This experiment tests the minimal intervention: one additive italic sentence per item appended to whatever structure the model chooses naturally. Primary metric: score_r1 composite (did the lightweight constraint move the needle?). Secondary: grounded_r1 >= 7.5 (retain most of the +2.0 gain), depth_r1 >= 6.7 (no regression from baseline 6.9), completeness_r1 >= 7.8 (no regression from baseline 8.0)."
+}

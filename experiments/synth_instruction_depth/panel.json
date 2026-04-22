@@ -1,0 +1,55 @@
+{
+  "reviews": [
+    {
+      "persona": "Methodologist",
+      "score": 7,
+      "verdict": "MARGINAL",
+      "issues": [
+        "The hypothesis is falsifiable with a specified measurable threshold of >= 1.0 point improvement in mean depth_r1.",
+        "Confounds are controlled as only one variable, the SYNTH_INSTRUCTION variant, is changed at a time.",
+        "Replication adequacy is questionable due to the high number of failures across tasks and rounds, suggesting that more replications may be needed to distinguish signal from noise.",
+        "Run order randomization is not explicitly mentioned in the provided information."
+      ],
+      "strengths": [
+        "The hypothesis is clearly defined with a falsifiable threshold.",
+        "Confounds are well-controlled by changing only one variable at a time."
+      ],
+      "raw": "```json\n{\n  \"score\": 7,\n  \"verdict\": \"MARGINAL\",\n  \"issues\": [\n    \"The hypothesis is falsifiable with a specified measurable threshold of >= 1.0 point improvement in mean depth_r1.\",\n    \"Confounds are controlled as only one variable, the SYNTH_INSTRUCTION variant, is changed at a time.\",\n    \"Replication adequacy is questionable due to the high number of failures across tasks and rounds, suggesting that more replications may be needed to distinguish signal from noise.\",\n    \"Run order randomization is not explicitly mentioned in the provided information.\"\n  ],\n  \"strengths\": [\n    \"The hypothesis is clearly defined with a falsifiable threshold.\",\n    \"Confounds are well-controlled by changing only one variable at a time.\"\n  ]\n}\n```"
+    },
+    {
+      "persona": "Knowledge Auditor",
+      "score": 6,
+      "verdict": "INCONCLUSIVE",
+      "issues": [
+        "The feedback was often not acted upon meaningfully between rounds, as evidenced by identical scores and content excerpts across multiple rounds.",
+        "There is a lack of clear information gain or new knowledge produced from the revisions. The output seems to be iterative but does not show significant changes in depth or specificity beyond what was already known."
+      ],
+      "strengths": [
+        "The feedback provided consistent guidance on areas for improvement, such as adding concrete examples and implementation notes.",
+        "There is a focus on providing actionable steps and specific parameters which could enhance the practical application of the content."
+      ],
+      "raw": "{\n  \"score\": 6,\n  \"verdict\": \"INCONCLUSIVE\",\n  \"issues\": [\n    \"The feedback was often not acted upon meaningfully between rounds, as evidenced by identical scores and content excerpts across multiple rounds.\",\n    \"There is a lack of clear information gain or new knowledge produced from the revisions. The output seems to be iterative but does not show significant changes in depth or specificity beyond what was already known.\"\n  ],\n  \"strengths\": [\n    \"The feedback provided consistent guidance on areas for improvement, such as adding concrete examples and implementation notes.\",\n    \"There is a focus on providing actionable steps and specific parameters which could enhance the practical application of the content.\"\n  ]\n}"
+    },
+    {
+      "persona": "Loop Optimizer",
+      "score": 3,
+      "verdict": "REDESIGN",
+      "issues": [
+        "No significant effect size observed for depth_r1 delta; all tasks show consistent failure with no improvement over baseline",
+        "The prose-depth instruction does not appear to be effectively guiding the model to increase depth, suggesting the instruction format may be flawed or misaligned with the task",
+        "The response variables (depth_r1, score_r1) show minimal variation across conditions and tasks, indicating lack of signal"
+      ],
+      "strengths": [
+        "The experiment clearly isolates the effect of SYNTH_INSTRUCTION variant on model behavior, which is a strong foundation for future work"
+      ],
+      "raw": "{\n  \"score\": 3,\n  \"verdict\": \"REDESIGN\",\n  \"issues\": [\n    \"No significant effect size observed for depth_r1 delta; all tasks show consistent failure with no improvement over baseline\",\n    \"The prose-depth instruction does not appear to be effectively guiding the model to increase depth, suggesting the instruction format may be flawed or misaligned with the task\",\n    \"The response variables (depth_r1, score_r1) show minimal variation across conditions and tasks, indicating lack of signal\"\n  ],\n  \"strengths\": [\n    \"The experiment clearly isolates the effect of SYNTH_INSTRUCTION variant on model behavior, which is a strong foundation for future work\"\n  ],\n  \"next_experiment_suggestion\": \"factor=SYNTH_INSTRUCTION variant, levels=[baseline, prose_depth, prose_depth_with_examples], tasks=[T_A, T_B, T_C], change=update HARNESS_SYNTH_INSTRUCTION env var in harness.py to include example-based instruction format that explicitly shows how to apply the mechanism with concrete numbers and failure modes\"\n}",
+      "next_experiment_suggestion": "factor=SYNTH_INSTRUCTION variant, levels=[baseline, prose_depth, prose_depth_with_examples], tasks=[T_A, T_B, T_C], change=update HARNESS_SYNTH_INSTRUCTION env var in harness.py to include example-based instruction format that explicitly shows how to apply the mechanism with concrete numbers and failure modes"
+    }
+  ],
+  "decision": {
+    "decision": "REDESIGN",
+    "confidence": 0.7,
+    "rationale": "Loop Optimizer: REDESIGN \u2014 findings insufficient to advance",
+    "next_experiment_suggestion": "factor=SYNTH_INSTRUCTION variant, levels=[baseline, prose_depth, prose_depth_with_examples], tasks=[T_A, T_B, T_C], change=update HARNESS_SYNTH_INSTRUCTION env var in harness.py to include example-based instruction format that explicitly shows how to apply the mechanism with concrete numbers and failure modes"
+  }
+}

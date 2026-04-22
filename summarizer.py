@@ -12,8 +12,10 @@ Two modes:
                              condenses the rest so the revision prompt fits in context.
 
 Thresholds:
-  EVAL_THRESHOLD    = 5500  chars (just below wiggum's current content[:6000] hard cap)
-  REVISE_THRESHOLD  = 5000  chars (document large enough to risk num_predict exhaustion)
+  EVAL_THRESHOLD    = 32000 chars (Selene Mini / Llama-3.1-8B has 128K ctx; summarizing
+                                   earlier destroys depth signal the evaluator needs)
+  REVISE_THRESHOLD  = 5000  chars (document large enough to risk num_predict exhaustion
+                                   in the producer model during revision)
 """
 
 from __future__ import annotations
@@ -27,8 +29,8 @@ _KEEP_ALIVE = int(os.environ.get("OLLAMA_KEEP_ALIVE", -1))
 _chat = _OllamaLike(keep_alive=_KEEP_ALIVE).chat
 
 SUMMARIZER_MODEL  = os.environ.get("SUMMARIZER_MODEL", "glm4:9b")
-EVAL_THRESHOLD    = int(os.environ.get("SUMMARIZER_EVAL_THRESHOLD",    5500))
-REVISE_THRESHOLD  = int(os.environ.get("SUMMARIZER_REVISE_THRESHOLD",  5000))
+EVAL_THRESHOLD    = int(os.environ.get("SUMMARIZER_EVAL_THRESHOLD",   32000))
+REVISE_THRESHOLD  = int(os.environ.get("SUMMARIZER_REVISE_THRESHOLD",   5000))
 
 
 # ---------------------------------------------------------------------------

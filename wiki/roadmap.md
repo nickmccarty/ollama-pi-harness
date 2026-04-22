@@ -109,6 +109,138 @@ python orchestrator.py "/cite /deep /finance NVDA DCF valuation save to nvda_dcf
 
 ---
 
+## Technical debt / pre-refactor cleanup
+**Source:** session 20 (2026-04-21) — directory audit + data model review
+
+Three categories of work that should be resolved before any major refactor. Documented here so the refactor has a complete picture of what exists and why it's shaped this way.
+
+---
+
+### TD-1: Trace pipeline registration gap
+**Files:** `logger.py` (`_write_trace`), `schema.py`
+**Severity:** medium — traces are invisible to the data model
+
+`_write_trace()` writes Chrome Trace JSON to `traces/` but never calls `log_artifact()`, so traces are not registered in `artifacts.jsonl`. You cannot query "all artifacts for session X" and get traces back — they are filesystem orphans despite `RunTrace` carrying `session_id`, `experiment_id`, `treatment_level`, and `task_id`.
+
+**Current state:** `runs.jsonl`, `artifacts.jsonl`, `messages.jsonl`, `plans.jsonl` are all queryable by `session_id`. Traces are not.
+
+**Fix (two changes to `logger.py`):**
+
+1. **Organize by session** — change `TRACE_DIR` to write into `traces/{session_id}/` so `ls traces/{session_id}/` gives every trace for a session without grepping:
+```python
+session_dir = os.path.join(TRACE_DIR, self.session_id or "untracked")
+os.makedirs(session_dir, exist_ok=True)
+path = os.path.join(session_dir, f"{self.run_id}__{label}.json")
+```
+
+2. **Register in artifacts.jsonl** — one line after writing the file:
+```python
+self.log_artifact(path, artifact_type="trace")
+```
+
+3. **Meaningful label** — use experiment context when available, fall back to short task slug:
+```python
+if self.experiment_id and self.task_id and self.treatment_level:
+    label = f"{self.experiment_id}__{self.task_id}__{self.treatment_level}"
+else:
+    raw = re.sub(r"[^\w]+", "_", self._task).strip("_")
+    label = raw[:35].rsplit("_", 1)[0] if len(raw) > 35 else raw
+```
+
+**Result:** `traces/20260421T...-session123/20260421T...-abc123__synth_prose_deep__T_A__baseline.json`
+
+**Note on existing 227 traces:** leave them as-is. The `run_id` prefix is intact for joins; retroactive renaming risks breaking any artifact registry pointers. Future runs will be clean.
+
+**Effort:** low (~15 lines in `logger.py`).
+
+---
+
+### TD-2: Directory cleanup — Phase 1 (no code changes)
+**Files:** root directory (130+ items)
+**Severity:** low — cosmetic, but slows navigation and obscures the actual module surface area
+
+Zero-risk moves that require no import changes:
+
+**Delete outright:**
+- `tinytroupe.20260409_*.log`, `tinytroupe.20260415_*.log` (3 stale log files)
+- `_email_out.txt`, `_panel_test.md` (scratch outputs)
+- `eval_compare_out.txt` (ad-hoc output)
+- `harness-engineering/` nested directory (contains only `vllm_test_output.md` — move that to `scratch/` or delete)
+- Deduplicate `email-drafts/` vs `email_drafts/` — confirm which is current, delete other
+
+**Move to `data/`:**
+- `3dgs-paper-markdown.csv` (12MB), `geo-week-talks.csv` (1MB)
+- `arxiv_agentic_papers.csv/md`, `arxiv_agentic_papers_annotated.csv`
+- `arxiv_agentic_harness_engineering_papers.md`, `arxiv_agentic_harness_engineering_papers_annotated.csv`
+- `arxiv_functional_nutrition.csv`, `arxiv_prompt_injection.csv` (untracked)
+- `annotated-abstracts.csv`, `autoresearch.tsv`
+- `finetune_dataset.jsonl` (660KB), `finetune_dataset_v2.jsonl` (4MB), `finetune_metrics.jsonl`
+
+**Move to `modelfiles/`:**
+- `Modelfile`, `Modelfile.32b`, `Modelfile.qwen3.6`, `Modelfile.v2`
+
+**Move to `archive/` or delete:**
+- `experiment-01.md` through `experiment-04.md` (pre-framework manual notes)
+- `ablation-1round.md`, `ablation-5round.md`
+- `2308.04079-annotated.md`, `2602.16928-annotated.md`
+- `orchestrator-test.md`, `orchestrator-test-2.md` (untracked), `introspection-test.md`, `lifecycle_test.md`
+- `bench-parallel-2.md`, `bench_vllm_results.jsonl` (untracked bench outputs)
+- `eval-qwen36-test.md`, `top-5-nutrient-synergies.md`, `guide.md` (untracked)
+- `context-engineering.md`, `cost-management.md`, `verification-patterns.md`, `agent-failure-modes.md` (superseded by wiki/)
+- `autoresearch_program.md`, `annotate-test.md`, `pipeline-lifecycle.md`
+
+**Move to `experiments/` (treatment sample snapshots):**
+- `eval-agent-failure-modes.md` + `-baseline`, `-off`, `-on`, `-prose_depth`, `-prose_grounded_deep`, `-qwen35` variants
+- `eval-context-engineering.md` + all variants
+- `eval-cost-management.md` + all variants
+- `eval-context-window.md`, `eval-prompt-injection.md`
+- These are per-treatment wiggum output samples; consider `experiments/{name}/samples/`
+
+**Effort:** low — file moves only, no code changes, no import impact.
+
+---
+
+### TD-3: Directory cleanup — Phase 2 (script graveyard)
+**Files:** various root-level one-off scripts
+**Severity:** low — these are never imported, just clutter the module surface
+
+Scripts with no local importers (verified by import audit) that should move to `scripts/`:
+- `analyze_exp01.py` through `analyze_exp04.py` — replaced by `experiment_analyzer.py`
+- `run_exp03.py`, `run_exp04.py` — replaced by `experiment_runner.py`
+- `backfill_metrics.py`, `mine_knowledge.py`, `index_papers.py`
+- `build_dpo_dataset.py`, `build_finetune_from_annotations.py`, `hf_export.py`
+- `finetune_annotate.py`, `run_annotations.py`
+- `bench_vllm_parallel.py`, `bench_model_compare.py`
+- `fix_vllm_patch.py`, `patch_vllm_cpu_offload.py`
+- `eval_compare_evaluators.py`, `inspect_run.py`
+
+These are all importless (confirmed: no other root-level module imports them). Move is safe.
+
+**Effort:** low — file moves only.
+
+---
+
+### TD-4: Package refactor — Phase 3 (import path updates required)
+**Files:** multiple — requires coordinated changes
+**Severity:** medium — do this after Phase 1/2, not before
+
+**Import audit summary (session 20):**
+- `inference.py` — 16 dependents (imported by almost everything; must stay importable from root or become a proper package)
+- `schema.py` — 2 dependents (`logger`, `server`)
+- `wiggum.py` — 2 dependents (`agent`, `orchestrator`)
+- `experiment_panel.py` — 3 dependents (`experiment_analyzer`, `experiment_design`, `experiment_runner`); also invoked as subprocess by panel
+- All `*_skill.py` files and `panel.py` — import only `inference`; relatively isolated
+
+**Proposed groupings:**
+- `skills/` — `email_skill.py`, `github_skill.py`, `lit_review_skill.py`, `review_skill.py`, `skills.py`, `panel.py`, `tinytroupe_tasks.py`
+- `server/` — `server.py`, `mcp_server.py`, `mcp_dispatch.py`, `dashboard.py`
+
+**Prerequisite:** convert root to a proper Python package (`__init__.py`) or add a `sys.path` shim in moved files so `import inference` still resolves. The subprocess invocation of `experiment_runner.py` in `experiment_panel.py` must also be updated if runner moves.
+
+**Effort:** medium — coordinated import path updates across ~20 files; test all entry points after move.
+
+---
+
 ## Pending (lower priority)
 
 ### Novelty threshold tuning

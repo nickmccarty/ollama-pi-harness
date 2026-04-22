@@ -144,7 +144,7 @@ def mentions_skill_names(required: list[str]):
 def no_hallucinated_skills():
     """Output must not contain fabricated skill names not in the real registry."""
     FAKE = [
-        "/knowledge_graph", "/research", "/visualize", "/translate",
+        "/research", "/visualize", "/translate",
         "/validate", "/compress", "/enumerate", "/summarize",
         "/writetofile", "/writetodisk", "/writetolog", "/writetotag",
         "/writetotemplate", "/writetotext", "/writetotitle", "/writetotopic",
@@ -272,7 +272,7 @@ SUITE = [
             min_bytes(400),
             min_lines(10),
             has_h1_heading(),
-            mentions_skill_names(["/annotate", "/cite", "/deep", "/kg", "/panel",
+            mentions_skill_names(["/annotate", "/cite", "/deep", "/knowledge-graph", "/panel",
                                    "/recall", "/review", "/email", "/lit-review"]),
             no_hallucinated_skills(),
             no_placeholders(),

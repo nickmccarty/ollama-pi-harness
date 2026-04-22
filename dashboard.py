@@ -27,8 +27,9 @@ def fmt_ts(ts_str):
     except Exception:
         return ts_str[:19].replace("T", " ")
 
-RUNS_PATH = os.path.join(os.path.dirname(__file__), "runs.jsonl")
-OUT_PATH  = os.path.join(os.path.dirname(__file__), "dashboard.html")
+RUNS_PATH        = os.path.join(os.path.dirname(__file__), "runs.jsonl")
+OUT_PATH         = os.path.join(os.path.dirname(__file__), "dashboard.html")
+CLAUDE_STATS_PATH = os.path.expanduser(r"~\.claude\stats-cache.json")
 
 STAGE_COLORS = {
     "synth":              "#4f8ef7",
@@ -91,6 +92,64 @@ def load_runs():
 def first_wiggum_score(run):
     scores = run.get("wiggum_scores") or []
     return scores[0] if scores else None
+
+
+_CLAUDE_MODELS = {"claude-"}  # prefix filter — excludes local gguf/qwen models
+
+def load_claude_stats() -> dict:
+    """Load Claude Code stats-cache.json and return chart-ready data."""
+    try:
+        with open(CLAUDE_STATS_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+
+    activity = sorted(raw.get("dailyActivity", []), key=lambda x: x["date"])
+    model_usage = raw.get("modelUsage", {})
+
+    # Filter to Claude-only models
+    claude_usage = {k: v for k, v in model_usage.items() if k.startswith("claude-")}
+
+    total_input  = sum(v.get("inputTokens", 0) for v in claude_usage.values())
+    total_output = sum(v.get("outputTokens", 0) for v in claude_usage.values())
+    total_cache  = sum(v.get("cacheReadInputTokens", 0) for v in claude_usage.values())
+
+    # Daily messages / tool calls
+    dates         = [a["date"] for a in activity]
+    msg_counts    = [a["messageCount"] for a in activity]
+    tool_counts   = [a["toolCallCount"] for a in activity]
+
+    # Tokens by model (Claude only)
+    model_names   = list(claude_usage.keys())
+    model_in      = [claude_usage[m].get("inputTokens", 0) for m in model_names]
+    model_out     = [claude_usage[m].get("outputTokens", 0) for m in model_names]
+
+    # Daily token totals (Claude models only, from dailyModelTokens)
+    daily_tok_map = defaultdict(int)
+    for entry in raw.get("dailyModelTokens", []):
+        for model, tokens in entry.get("tokensByModel", {}).items():
+            if model.startswith("claude-"):
+                daily_tok_map[entry["date"]] += tokens
+    tok_dates  = sorted(daily_tok_map)
+    tok_values = [daily_tok_map[d] for d in tok_dates]
+
+    return {
+        "total_sessions":  raw.get("totalSessions", 0),
+        "total_messages":  raw.get("totalMessages", 0),
+        "total_input":     total_input,
+        "total_output":    total_output,
+        "total_cache":     total_cache,
+        "first_date":      (raw.get("firstSessionDate") or "")[:10],
+        "last_date":       raw.get("lastComputedDate", ""),
+        "dates":           dates,
+        "msg_counts":      msg_counts,
+        "tool_counts":     tool_counts,
+        "model_names":     model_names,
+        "model_in":        model_in,
+        "model_out":       model_out,
+        "tok_dates":       tok_dates,
+        "tok_values":      tok_values,
+    }
 
 
 def build_payload(runs):
@@ -391,6 +450,7 @@ def build_payload(runs):
         "recent_runs":   recent,
         "dag_runs":      dag_runs,
         "cost":          cost,
+        "claude_stats":  load_claude_stats(),
     }
 
 
@@ -492,6 +552,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Harness Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -819,12 +880,106 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .insp-dim-bar { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .insp-dim-fill { height: 100%; border-radius: 3px; }
   .insp-dim-val { width: 18px; font-size: 10px; color: var(--text); text-align: right; flex-shrink: 0; }
+
+  /* ── Voice panel ──────────────────────────────────────────────────────────── */
+  #voice-fab {
+    position: fixed; bottom: 28px; right: 28px; z-index: 999;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: var(--blue); border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(0,0,0,.5);
+    transition: background .2s, transform .15s;
+  }
+  #voice-fab:hover { background: #3a7de0; transform: scale(1.07); }
+  #voice-fab.recording { background: var(--red); animation: pulse-ring 1.2s ease-out infinite; }
+  @keyframes pulse-ring {
+    0%   { box-shadow: 0 0 0 0 rgba(248,81,73,.55); }
+    70%  { box-shadow: 0 0 0 14px rgba(248,81,73,0); }
+    100% { box-shadow: 0 0 0 0 rgba(248,81,73,0); }
+  }
+  #voice-fab svg { width: 24px; height: 24px; fill: #fff; }
+
+  #voice-panel {
+    position: fixed; bottom: 92px; right: 28px; z-index: 998;
+    width: 420px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    display: none; flex-direction: column; overflow: hidden;
+  }
+  #voice-panel.open { display: flex; }
+  #voice-panel-header {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  #voice-panel-header span { font-size: 13px; font-weight: 600; color: var(--text); }
+  #voice-status { font-size: 11px; color: var(--muted); }
+  #voice-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px; line-height:1; padding: 0 2px; }
+  #voice-close:hover { color: var(--text); }
+  #voice-transcript {
+    padding: 12px 16px 0; font-size: 12px; color: var(--muted);
+    font-style: italic; min-height: 0; max-height: 80px;
+    overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  #voice-response {
+    padding: 12px 16px; font-size: 13px; color: var(--text);
+    line-height: 1.6; max-height: 340px; overflow-y: auto;
+  }
+  #voice-response h1,h2,h3 { margin: 8px 0 4px; font-size: 14px; color: var(--text); }
+  #voice-response p { margin: 4px 0; }
+  #voice-response ul,ol { padding-left: 18px; margin: 4px 0; }
+  #voice-response code {
+    background: rgba(255,255,255,.07); border-radius: 3px;
+    padding: 1px 4px; font-size: 12px; font-family: monospace;
+  }
+  #voice-response pre { background: rgba(255,255,255,.05); border-radius: 6px; padding: 10px; overflow-x: auto; }
+  #voice-response pre code { background: none; padding: 0; }
+  #voice-copy-row {
+    padding: 8px 16px 12px; display: flex; justify-content: flex-end;
+    border-top: 1px solid var(--border);
+  }
+  #voice-copy-btn {
+    display: flex; align-items: center; gap: 5px;
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--muted); cursor: pointer; font-size: 11px; padding: 4px 10px;
+    transition: background .15s, color .15s;
+  }
+  #voice-copy-btn:hover { background: rgba(255,255,255,.06); color: var(--text); }
+  #voice-copy-btn svg { width: 13px; height: 13px; }
 </style>
 </head>
 <body>
 
 <h1>Harness Engineering — Run Dashboard</h1>
 <p class="subtitle" id="subtitle">Loading...</p>
+
+<!-- Voice FAB -->
+<button id="voice-fab" title="Voice query">
+  <svg id="voice-icon-mic" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 17.93V21H9v2h6v-2h-2v-2.07A8 8 0 0 0 20 11h-2a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93z"/>
+  </svg>
+  <svg id="voice-icon-stop" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="display:none">
+    <rect x="5" y="5" width="14" height="14" rx="2"/>
+  </svg>
+</button>
+
+<!-- Voice panel -->
+<div id="voice-panel">
+  <div id="voice-panel-header">
+    <span>Voice Query</span>
+    <span id="voice-status">Ready</span>
+    <button id="voice-close">&#x2715;</button>
+  </div>
+  <div id="voice-transcript"></div>
+  <div id="voice-response"></div>
+  <div id="voice-copy-row" style="display:none">
+    <button id="voice-copy-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+      </svg>
+      Copy response
+    </button>
+  </div>
+</div>
 
 <div class="kpi-grid" id="kpi-grid"></div>
 
@@ -923,6 +1078,33 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="card-title">Cumulative cost over time — cheapest cloud tier vs local electricity</div>
     <div class="chart-wrap" style="height:200px">
       <canvas id="cumulCostChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<h2 class="section-heading">Claude Code usage</h2>
+
+<div class="kpi-grid" id="claude-kpi-grid"></div>
+
+<div class="chart-grid col-2">
+  <div class="card">
+    <div class="card-title">Daily messages &amp; tool calls</div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="claudeActivityChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Daily tokens (Claude models)</div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="claudeTokChart"></canvas>
+    </div>
+  </div>
+</div>
+<div class="chart-grid col-1">
+  <div class="card">
+    <div class="card-title">Input vs output tokens by model</div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="claudeModelChart"></canvas>
     </div>
   </div>
 </div>
@@ -1881,6 +2063,86 @@ new Chart($('cumulCostChart'), {
 });
 
 // ---------------------------------------------------------------------------
+// Claude Code usage
+// ---------------------------------------------------------------------------
+(function () {
+  const cs = DATA.claude_stats || {};
+  if (!cs.total_sessions) return;
+
+  // KPI cards
+  const fmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : String(n);
+  const kpis = [
+    { label: 'Sessions',       value: cs.total_sessions,  cls: 'blue'   },
+    { label: 'Messages',       value: fmt(cs.total_messages), cls: 'purple' },
+    { label: 'Input tokens',   value: fmt(cs.total_input),   cls: 'green'  },
+    { label: 'Output tokens',  value: fmt(cs.total_output),  cls: 'orange' },
+    { label: 'Cache reads',    value: fmt(cs.total_cache),   cls: 'yellow' },
+    { label: 'Since',          value: cs.first_date,          cls: ''       },
+  ];
+  document.getElementById('claude-kpi-grid').innerHTML = kpis.map(k =>
+    `<div class="kpi ${k.cls}"><div class="kpi-label">${k.label}</div><div class="kpi-value">${k.value}</div></div>`
+  ).join('');
+
+  // Daily activity chart
+  new Chart(document.getElementById('claudeActivityChart'), {
+    type: 'bar',
+    data: {
+      labels: cs.dates || [],
+      datasets: [
+        { label: 'Messages',   data: cs.msg_counts  || [], backgroundColor: 'rgba(167,139,250,0.75)', yAxisID: 'y' },
+        { label: 'Tool calls', data: cs.tool_counts || [], backgroundColor: 'rgba(79,142,247,0.75)',  yAxisID: 'y' },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#8b949e', maxRotation: 45, font: { size: 10 } }, grid: { color: 'rgba(48,54,61,.5)' } },
+        y: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: 'rgba(48,54,61,.5)' } },
+      },
+    },
+  });
+
+  // Daily token trend
+  new Chart(document.getElementById('claudeTokChart'), {
+    type: 'bar',
+    data: {
+      labels: cs.tok_dates || [],
+      datasets: [{ label: 'Tokens', data: cs.tok_values || [], backgroundColor: 'rgba(79,142,247,0.75)' }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#8b949e', maxRotation: 45, font: { size: 10 } }, grid: { color: 'rgba(48,54,61,.5)' } },
+        y: { ticks: { color: '#8b949e', font: { size: 10 }, callback: v => fmt(v) }, grid: { color: 'rgba(48,54,61,.5)' } },
+      },
+    },
+  });
+
+  // Input vs output by model — stacked bar
+  const modelNames = (cs.model_names || []).map(n => n.replace('claude-','').replace(/-\d{8}$/,''));
+  new Chart(document.getElementById('claudeModelChart'), {
+    type: 'bar',
+    data: {
+      labels: modelNames,
+      datasets: [
+        { label: 'Input tokens',  data: cs.model_in  || [], backgroundColor: 'rgba(79,142,247,0.8)',  stack: 'tok' },
+        { label: 'Output tokens', data: cs.model_out || [], backgroundColor: 'rgba(167,139,250,0.8)', stack: 'tok' },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: 'rgba(48,54,61,.5)' } },
+        y: { ticks: { color: '#8b949e', font: { size: 10 }, callback: v => fmt(v) }, grid: { color: 'rgba(48,54,61,.5)' }, stacked: true },
+      },
+    },
+  });
+})();
+
+// ---------------------------------------------------------------------------
 // Fine-tuning live metrics — polls /api/finetune/metrics every 8s
 // ---------------------------------------------------------------------------
 (function () {
@@ -2333,6 +2595,98 @@ new Chart($('cumulCostChart'), {
     });
   }, 1000);
 
+})();
+
+// ---------------------------------------------------------------------------
+// Voice query
+// ---------------------------------------------------------------------------
+(function () {
+  const fab       = document.getElementById('voice-fab');
+  const panel     = document.getElementById('voice-panel');
+  const statusEl  = document.getElementById('voice-status');
+  const transcEl  = document.getElementById('voice-transcript');
+  const respEl    = document.getElementById('voice-response');
+  const copyRow   = document.getElementById('voice-copy-row');
+  const copyBtn   = document.getElementById('voice-copy-btn');
+  const closeBtn  = document.getElementById('voice-close');
+  const iconMic   = document.getElementById('voice-icon-mic');
+  const iconStop  = document.getElementById('voice-icon-stop');
+
+  let recorder = null, chunks = [], recording = false, lastMarkdown = '';
+
+  function setStatus(msg) { statusEl.textContent = msg; }
+
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        sendAudio();
+      };
+      recorder.start();
+      recording = true;
+      fab.classList.add('recording');
+      iconMic.style.display = 'none';
+      iconStop.style.display = '';
+      panel.classList.add('open');
+      transcEl.textContent = '';
+      respEl.innerHTML = '';
+      copyRow.style.display = 'none';
+      setStatus('Recording…');
+    } catch (e) {
+      setStatus('Mic error: ' + e.message);
+    }
+  }
+
+  function stopRecording() {
+    if (recorder && recording) {
+      recorder.stop();
+      recording = false;
+      fab.classList.remove('recording');
+      iconMic.style.display = '';
+      iconStop.style.display = 'none';
+      setStatus('Transcribing…');
+    }
+  }
+
+  async function sendAudio() {
+    const blob = new Blob(chunks, { type: 'audio/webm' });
+    const fd = new FormData();
+    fd.append('audio', blob, 'voice.webm');
+    try {
+      const r = await fetch('/api/voice', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (d.error) { setStatus('Error: ' + d.error); return; }
+      transcEl.textContent = '🎤 ' + d.transcript;
+      lastMarkdown = d.response || '';
+      respEl.innerHTML = marked.parse(lastMarkdown);
+      copyRow.style.display = 'flex';
+      setStatus('Done');
+    } catch (e) {
+      setStatus('Request failed: ' + e.message);
+    }
+  }
+
+  fab.addEventListener('click', () => {
+    if (recording) { stopRecording(); }
+    else { startRecording(); }
+  });
+
+  closeBtn.addEventListener('click', () => {
+    if (recording) stopRecording();
+    panel.classList.remove('open');
+  });
+
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(lastMarkdown).then(() => {
+      copyBtn.querySelector('span') && (copyBtn.querySelector('span').textContent = 'Copied!');
+      copyBtn.textContent = '✓ Copied';
+      setTimeout(() => { copyBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy response'; }, 1800);
+    });
+  });
 })();
 </script>
 </body>

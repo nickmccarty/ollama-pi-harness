@@ -360,9 +360,13 @@ def analyze(spec_path: str, run_panel: bool = True) -> None:
     # and were produced before task_id tagging was implemented.
     runs = []
     skipped = 0
+    errored = 0
     rep_counters: dict[tuple, int] = defaultdict(int)
     for r in raw_runs:
         extracted = extract_run(r)
+        if extracted.get("final") == "ERROR" and extracted.get("score_r1") is None:
+            errored += 1
+            continue
         task_id = r.get("task_id") or _infer_task_id(r, spec)
         if task_id == "?":
             skipped += 1
@@ -373,6 +377,8 @@ def analyze(spec_path: str, run_panel: bool = True) -> None:
         extracted["_rep"]     = rep_counters[(task_id, treatment)]
         extracted["_raw"]     = r
         runs.append(extracted)
+    if errored:
+        print(f"  [warn] excluded {errored} ERROR run(s) with no scores (crashed before completion)")
     if skipped:
         print(f"  [warn] skipped {skipped} run(s) with unresolvable task_id (pre-tagging runs)")
 

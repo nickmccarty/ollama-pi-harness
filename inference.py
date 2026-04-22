@@ -2,8 +2,7 @@
 inference.py — unified LLM backend shim.
 
 Drop-in replacement for `import ollama` throughout the harness. Routes calls to
-either the local Ollama daemon (default) or a vLLM-served OpenAI-compatible
-endpoint, based on the INFERENCE_BACKEND env var.
+Ollama, vLLM, llama-server, or any OpenAI-compatible endpoint.
 
 Environment variables
 ---------------------
@@ -12,6 +11,14 @@ VLLM_BASE_URL       vLLM server URL (default: http://localhost:8000/v1)
 VLLM_API_KEY        auth key — vLLM ignores this by default ("none")
 VLLM_MODEL_MAP      JSON dict overriding the built-in Ollama-tag → served-name map
                     e.g. '{"pi-qwen3.6": "pi-qwen3.6", "pi-qwen-32b": "pi-qwen-32b"}'
+
+Per-model endpoint routing (takes priority over INFERENCE_BACKEND / VLLM_MODEL_MAP):
+HARNESS_ENDPOINTS   JSON dict: {"tag": {"url": "...", "model_id": "...", "backend": "..."}}
+                    backend: "vllm" (enables Qwen thinking-mode headers) |
+                             "llamacpp" | "openai"  (generic OpenAI-compatible, no special headers)
+                    Example — vLLM on 8000 + llama-server GGUF on 8001 simultaneously:
+                    '{"qwen3-14b": {"url": "http://localhost:8000/v1", "model_id": "qwen3-14b", "backend": "vllm"},
+                      "phi4-mini": {"url": "http://localhost:8001/v1", "model_id": "phi-4-mini-q8", "backend": "llamacpp"}}'
 
 Migration
 ---------
@@ -47,7 +54,8 @@ _VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
 _MODEL_MAP: dict[str, str] = {
     "pi-qwen3.6":                     "pi-qwen3.6",             # --served-model-name pi-qwen3.6
     "qwen3.6:35b-a3b":                "pi-qwen3.6",             # alias → same served name
-    "pi-qwen3-14b":                   "pi-qwen3-14b",           # Qwen/Qwen2.5-14B-Instruct-AWQ, --served-model-name pi-qwen3-14b
+    "pi-qwen25-14b":                  "pi-qwen25-14b",          # Qwen/Qwen2.5-14B-Instruct-AWQ, --served-model-name pi-qwen25-14b
+    "qwen3-14b":                      "qwen3-14b",              # Qwen/Qwen3-14B-AWQ, --served-model-name qwen3-14b
     "pi-qwen3-32b":                   "pi-qwen3-32b",           # Qwen3-32B-AWQ via vLLM (--served-model-name pi-qwen3-32b)
     "pi-qwen-32b":                    "Qwen/Qwen2.5-32B-Instruct",  # Qwen2.5-32B (distinct from Qwen3-32B)
     "pi-qwen":                        "Qwen/Qwen2.5-7B-Instruct",
@@ -77,10 +85,45 @@ if _env_map:
     except Exception as _e:
         print(f"  [inference] VLLM_MODEL_MAP parse error: {_e}")
 
+# ---------------------------------------------------------------------------
+# Per-model endpoint registry — HARNESS_ENDPOINTS
+# Highest-priority routing: checked before INFERENCE_BACKEND / VLLM_MODEL_MAP.
+# Each entry: {"url": "http://host:port/v1", "model_id": "<served name>",
+#              "backend": "vllm"|"llamacpp"|"openai"}
+# ---------------------------------------------------------------------------
+_ENDPOINTS: dict[str, dict] = {}
+_raw_ep = os.environ.get("HARNESS_ENDPOINTS", "")
+if _raw_ep:
+    try:
+        _ENDPOINTS = json.loads(_raw_ep)
+        print(f"  [inference] HARNESS_ENDPOINTS: {list(_ENDPOINTS)}")
+    except Exception as _e:
+        print(f"  [inference] HARNESS_ENDPOINTS parse error: {_e}")
+
 
 def _resolve_model(name: str) -> str:
     """Return the vLLM model ID for an Ollama model tag, or the name unchanged."""
     return _MODEL_MAP.get(name, name)
+
+
+def get_active_vllm_model(base_url: str | None = None) -> str | None:
+    """Return the first model ID loaded at base_url (defaults to VLLM_BASE_URL), or None."""
+    try:
+        import urllib.request, json as _json
+        root = (base_url or _VLLM_BASE).rstrip("/")
+        if not root.endswith("/v1"):
+            root += "/v1"
+        with urllib.request.urlopen(root + "/models", timeout=3) as r:
+            data = _json.loads(r.read())
+        models = data.get("data", [])
+        return models[0]["id"] if models else None
+    except Exception:
+        return None
+
+
+def list_endpoints() -> dict[str, dict]:
+    """Return the loaded HARNESS_ENDPOINTS registry (tag → {url, model_id, backend})."""
+    return dict(_ENDPOINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -253,11 +296,18 @@ def _stream_vllm_call(client, vllm_model: str, messages: list, oai_kwargs: dict)
     )
 
 
-def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
+def _chat_vllm(
+    model: str,
+    messages: list,
+    base_url: str = _VLLM_BASE,
+    backend: str = "vllm",
+    model_id: str | None = None,
+    **kwargs,
+) -> _OllamaResponse:
     from openai import OpenAI
-    client = OpenAI(base_url=_VLLM_BASE, api_key=_VLLM_API_KEY)
+    client = OpenAI(base_url=base_url, api_key=_VLLM_API_KEY)
 
-    # Strip Ollama-specific kwargs vLLM doesn't understand
+    # Strip Ollama-specific kwargs vLLM/llama-server don't understand
     kwargs.pop("keep_alive", None)
     options = kwargs.pop("options", {}) or {}
 
@@ -266,16 +316,18 @@ def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
         oai_kwargs["temperature"] = options["temperature"]
     if "num_predict" in options:
         oai_kwargs["max_tokens"] = options["num_predict"]
-    # num_ctx is a server-startup concern for vLLM (--max-model-len), not per-request
-    #
-    # Thinking mode: always emit enable_thinking for Qwen/QwQ vLLM models.
-    # Default to False when the caller didn't specify — the vLLM server may be running
-    # a thinking model (e.g. Qwen3.6) even when the Ollama tag suggests otherwise
-    # (e.g. pi-qwen-32b → Qwen/Qwen2.5-32B-Instruct resolves to the loaded Qwen3.6).
-    # Without an explicit enable_thinking=false, Qwen3.6 enters unbounded reasoning
-    # and never returns within the num_predict budget.
-    vllm_name = _resolve_model(model).lower()
-    if any(k in vllm_name for k in ("qwen", "qwq")):
+    # num_ctx is a server-startup concern (--max-model-len / -c), not per-request.
+    if "top_p" in options:
+        oai_kwargs["top_p"] = options["top_p"]
+    if "presence_penalty" in options:
+        oai_kwargs["presence_penalty"] = options["presence_penalty"]
+    if "top_k" in options:
+        oai_kwargs.setdefault("extra_body", {})["top_k"] = options["top_k"]
+
+    # Thinking mode: vLLM and llama-server (recent builds) both honor chat_template_kwargs
+    # via their Jinja2 renderer. Skip only for generic "openai" backend where it's unknown.
+    vllm_model = model_id if model_id else _resolve_model(model)
+    if backend in ("vllm", "llamacpp") and any(k in vllm_model.lower() for k in ("qwen", "qwq")):
         chat_tmpl: dict = {}
         if "think" in options:
             chat_tmpl["enable_thinking"] = bool(options["think"])
@@ -283,9 +335,8 @@ def _chat_vllm(model: str, messages: list, **kwargs) -> _OllamaResponse:
             chat_tmpl["enable_thinking"] = False  # safe default: no unbounded reasoning
         if "preserve_thinking" in options:
             chat_tmpl["preserve_thinking"] = bool(options["preserve_thinking"])
-        oai_kwargs["extra_body"] = {"chat_template_kwargs": chat_tmpl}
-
-    vllm_model = _resolve_model(model)
+        eb = oai_kwargs.setdefault("extra_body", {})
+        eb["chat_template_kwargs"] = chat_tmpl
 
     # Retry up to 2× on context-length or server-disconnect errors.
     # Server disconnects (RemoteProtocolError / APIConnectionError with "Server disconnected")
@@ -353,13 +404,21 @@ def chat(model: str, messages: list, **kwargs) -> object:
     """
     Drop-in replacement for ollama.chat().
 
-    Routes to vLLM or Ollama based on INFERENCE_BACKEND and VLLM_MODEL_MAP.
-
-    Hybrid routing: when VLLM_MODEL_MAP is set, only the listed models go to vLLM;
-    everything else (small utilities, evaluators) falls back to Ollama. This lets
-    vLLM serve the large producer model while Ollama handles glm4:9b, selene-mini, etc.
-    When VLLM_MODEL_MAP is unset (_VLLM_ROUTE is None), all calls go to vLLM.
+    Routing priority (highest first):
+      1. HARNESS_ENDPOINTS — per-model {url, model_id, backend}; covers vLLM, llama-server, any OAI API
+      2. INFERENCE_BACKEND=vllm + VLLM_MODEL_MAP — hybrid vLLM/Ollama routing
+      3. INFERENCE_BACKEND=ollama (default) — all calls to local Ollama daemon
     """
+    if model in _ENDPOINTS:
+        ep = _ENDPOINTS[model]
+        return _chat_vllm(
+            model=model,
+            messages=messages,
+            base_url=ep["url"],
+            backend=ep.get("backend", "openai"),
+            model_id=ep.get("model_id"),
+            **kwargs,
+        )
     if _BACKEND == "vllm" and (_VLLM_ROUTE is None or model in _VLLM_ROUTE):
         return _chat_vllm(model=model, messages=messages, **kwargs)
     return _chat_ollama(model=model, messages=messages, **kwargs)

@@ -1,0 +1,39 @@
+{
+  "title": "producer_model_factor",
+  "hypothesis": "Qwen3-14B-AWQ (newer generation, same VRAM budget) improves mean score_r1 by >= 0.3 points over Qwen2.5-14B-Instruct-AWQ on T_A/T_B/T_C with no SYNTH_INSTRUCTION applied.",
+  "falsified_if": "mean score_r1 delta < 0.3",
+  "factor": {
+    "name": "producer_model",
+    "levels": [
+      "qwen25_14b",
+      "qwen3_14b"
+    ]
+  },
+  "tasks": [
+    "T_A",
+    "T_B",
+    "T_C"
+  ],
+  "replications": 3,
+  "response_variables": [
+    "score_r1",
+    "grounded_r1",
+    "depth_r1",
+    "completeness_r1"
+  ],
+  "controlled_variables": {
+    "synth_instruction": "",
+    "evaluator_model": "atla/selene-mini",
+    "search_rounds": 2,
+    "max_rounds": 3
+  },
+  "mutable_scope": {
+    "type": "env",
+    "var": "HARNESS_PRODUCER_MODEL",
+    "levels": {
+      "qwen25_14b": "pi-qwen25-14b",
+      "qwen3_14b": "qwen3-14b"
+    }
+  },
+  "notes": "Motivated by four consecutive FALSIFIED SYNTH_INSTRUCTION experiments (synth_instruction_depth, synth_instruction_grounded, synth_instruction_prose_deep, synth_instruction_additive_grounding) \u2014 all showing delta near zero on score_r1 composite. Hypothesis: the binding constraint is producer model capability, not instruction format. pi-qwen3-14b (Qwen2.5-14B-Instruct-AWQ) has been the fixed producer across all prior experiments. This experiment holds SYNTH_INSTRUCTION at baseline (empty) and varies the producer. qwen3-14b (Qwen/Qwen3-14B-AWQ) was successfully served in session 19 with --reasoning-parser qwen3 and fits in 16GB VRAM without cpu_offload. Key questions: (1) Does Qwen3-14B produce higher grounded_r1 without any instruction nudge? (2) Does it change the depth/completeness tradeoff profile? (3) Does a stronger base model move the composite ceiling? Threshold set at 0.3 (higher than SYNTH_INSTRUCTION experiments) because a model-generation change should produce larger effect if the hypothesis is correct. Pre-run checklist: ensure qwen3-14b is registered in inference.py _MODEL_MAP and vLLM is serving Qwen/Qwen3-14B-AWQ before starting the qwen3_14b treatment runs. The runner executes both levels interleaved \u2014 consider running with --dry-run first to verify task routing, then run qwen25_14b treatment first (already cached in search_cache.db), then swap vLLM serve for qwen3_14b treatment."
+}

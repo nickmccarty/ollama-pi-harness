@@ -1,8 +1,9 @@
 ---
 title: Agent Architecture
-updated: 2026-04-10
-sources: [agent.py, logger.py, planner.py, orchestrator.py, memory.py, wiggum.py, skills.py, chunker.py, panel.py, search_cache.py]
-tags: [architecture, pipeline, agent]
+updated: 2026-04-22
+sources: [agent.py, logger.py, planner.py, orchestrator.py, memory.py, wiggum.py, skills.py, chunker.py, panel.py, search_cache.py, schema.py, supervisor.py, inference.py, orientation_skill.py, server.py]
+tags: [architecture, pipeline, agent, introspect]
+introspect: true
 ---
 
 # Agent Architecture
@@ -45,18 +46,27 @@ task string
 | `vision.py` | Image reading via llama3.2-vision |
 | `eval_suite.py` | Batch eval runner; computes composite score |
 | `autoresearch.py` | Autonomous synthesis instruction improvement loop |
+| `orientation_skill.py` | `/orientation` skill — gathers directory tree, .env, runs, experiments, git log, GPU state, wiki |
+| `server.py` | Flask server; `/api/voice` voice input; orientation cache via `_launch()` DAG subprocess |
 | `search_cache.py` | SQLite TTL cache: DDGS results (`search_cache` table) + full research contexts (`research_cache` table) |
 
 ## Models
 
-| Role | Model | Notes |
-|------|-------|-------|
-| Producer (default) | `pi-qwen-32b` (Qwen2.5-32B Q4_K_M) | Custom Modelfile; ~20GB |
-| Producer (fallback) | `pi-qwen` (qwen2.5:7b) | Faster, lower quality |
-| Evaluator | `Qwen3-Coder:30b` | Must differ from producer; drives revision loop |
-| Planner / Compressor | `glm4:9b` | Fast; also used as `COMPRESS_MODEL` default |
-| Embeddings | `all-MiniLM-L6-v2` | sentence-transformers; memory retrieval + chunker |
-| Vision | `llama3.2-vision` | Image-to-text preprocessing only |
+| Role | Model | Backend | Notes |
+|------|-------|---------|-------|
+| Producer (Ollama) | `pi-qwen-32b` (Qwen2.5-32B Q4_K_M) | Ollama | Custom Modelfile; ~20GB |
+| Producer (vLLM) | `qwen3-14b` (Qwen3-14B-AWQ) | vLLM | `--reasoning-parser qwen3 --max-model-len 28000` |
+| Producer (GGUF) | `qwen3.6` (Qwen3.6-35B-A3B Q4_K_XL) | llama-server | MoE: 3B activated; 262K ctx; ~22GB |
+| Producer (vLLM) | `pi-qwen25-14b` (Qwen2.5-14B-Instruct-AWQ) | vLLM | `--max-model-len 23000` |
+| Evaluator | `atla/selene-mini` | Ollama | Llama-3.1-8B fine-tuned judge; outperforms GPT-4o on RewardBench |
+| Planner / Compressor | `glm4:9b` | Ollama | Fast; also used as `COMPRESS_MODEL` default |
+| Embeddings | `all-MiniLM-L6-v2` | local | sentence-transformers; memory retrieval + chunker |
+| Vision | `llama3.2-vision` | Ollama | Image-to-text preprocessing only |
+
+**Inference routing priority** (`inference.py`):
+1. `HARNESS_ENDPOINTS` — per-model `{url, model_id, backend}`; highest priority; enables simultaneous vLLM + llama-server
+2. `INFERENCE_BACKEND=vllm` + `VLLM_MODEL_MAP` — hybrid: listed models → vLLM, rest → Ollama
+3. `INFERENCE_BACKEND=ollama` (default) — all calls to local Ollama daemon
 
 `COMPRESS_MODEL` env var overrides the model used for `compress_knowledge()` and
 `plan_query()` — set to a lighter model to save VRAM during research.

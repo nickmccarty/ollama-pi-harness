@@ -204,14 +204,14 @@
   </style>
 </head>
 <body>
-<div id="app">
+<div id="app" class="light">
   <header>
     <div class="header-left">
       <h1>{{ title }}</h1>
       <span class="meta">{{ node_count }} nodes &middot; {{ edge_count }} edges &middot; {{ model }}</span>
     </div>
     <div class="controls">
-      <button id="btn-theme">&#9728; Light</button>
+      <button id="btn-theme">&#9790; Dark</button>
       <button id="btn-reset">&#8635; Reset</button>
       <button id="btn-export">&#8595; SVG</button>
       <div class="slider-group">
@@ -256,7 +256,7 @@
   let linkDistance = +document.getElementById('slider-distance').value;
   let chargeStrength = +document.getElementById('slider-charge').value;
   let selectedNode = null;
-  let isDark = true;
+  let isDark = false;
 
   const app  = document.getElementById('app');
   const tip  = document.getElementById('tooltip');

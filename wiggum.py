@@ -216,7 +216,8 @@ Universal rules:
 - feedback must tell the producer exactly what to add or change, not just that improvement is possible
 - Do not give 10 on any dimension unless it is genuinely exceptional — find at least one thing that could be improved
 - For every dimension you scored 8 or below, include at least one specific issue describing exactly what would raise the score
-- Be a strict grader. When in doubt, score lower rather than higher."""
+- Be a strict grader. When in doubt, score lower rather than higher.
+- Language consistency: if any portion of the output is not in English (e.g. Chinese, French, Arabic characters appear), cap structure at 3 and add an issue flagging the language switch. The document must be entirely in English."""
 
 
 # Task-type-specific criteria injected into EVAL_PROMPT
@@ -336,7 +337,15 @@ The evaluator found these issues:
 Evaluator feedback:
 {feedback}
 
-Produce a corrected version. Output ONLY the revised markdown starting with # — no preamble, no commentary."""
+{style_reminder}Produce a corrected version. Output ONLY the revised markdown starting with # — no preamble, no commentary."""
+
+
+def _revise_style_reminder() -> str:
+    """Return a style reminder paragraph if HARNESS_SYNTH_INSTRUCTION is active."""
+    instr = os.environ.get("HARNESS_SYNTH_INSTRUCTION", "").strip()
+    if not instr:
+        return ""
+    return f"Original output instructions (maintain these constraints while fixing issues):\n{instr}\n\n"
 
 
 def revise(task: str, content: str, eval_result: dict, _trace=None) -> str:
@@ -351,6 +360,7 @@ def revise(task: str, content: str, eval_result: dict, _trace=None) -> str:
         content=revision_content,
         issues=issues_text,
         feedback=eval_result.get("feedback", ""),
+        style_reminder=_revise_style_reminder(),
     )
 
     response = ollama.chat(
@@ -493,7 +503,8 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
         if round_num == max_rounds:
             # Restore the best-scoring round's content if later rounds regressed
             if best_round < round_num:
-                print(f"\n[wiggum] restoring round {best_round} output (score {best_score:.1f} > round {round_num} score {score:.1f})")
+                cmp = ">" if best_score > score else "="
+                print(f"\n[wiggum] restoring round {best_round} output (score {best_score:.1f} {cmp} round {round_num} score {score:.1f})")
                 with open(expanded, "w", encoding="utf-8") as f:
                     f.write(best_content)
             print(f"\n[wiggum] FAIL — max rounds reached without passing")
