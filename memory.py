@@ -137,6 +137,9 @@ def compress(task: str, task_type: str, queries: list[str], output_content: str,
 
 def _parse_compression(text: str) -> dict:
     """Parse the fixed-format compression response."""
+    # Strip markdown fences if model wrapped the response
+    text = re.sub(r"^```[a-z]*\s*", "", text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
     result = {"title": "", "narrative": "", "facts": []}
 
     title_m = re.search(r'^Title:\s*(.+)', text, re.MULTILINE)
