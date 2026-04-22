@@ -229,6 +229,21 @@ Six improvements shipped:
 **env vars added:** `INFERENCE_BACKEND`, `VLLM_BASE_URL`, `VLLM_MODEL_MAP`, `WIGGUM_EVALUATOR_MODEL`, `WIGGUM_PRODUCER_MODEL`, `LLAMA_OCR_BASE_URL`
 
 
+## [2026-04-22] build | Session 25 — bug fixes, qwen3_think_mode findings, playwright rewrite
+
+**qwen3_think_mode experiment — CONFIRMED (delta=+0.330):**
+75 runs (15 ERROR excluded), think_off=7.40 vs think_on=7.73. Delta exceeds 0.3 threshold.
+Panel verdict: REVISE (confidence=0.5) — recommends 30 reps per treatment for stronger inference.
+Practical decision: treat think_on as the default; delta is consistent across T_A/T_B/T_C.
+Moving on — no further replications planned unless a new experiment revisits this variable.
+
+**Fixes shipped:**
+- `playwright_skill.py` rewritten: ARIA accessibility-tree snapshots (`page.aria_snapshot()`) replace DOM link scraping. Actions now use semantic locators (`get_by_role`, `get_by_text`, `get_by_placeholder`). New action set: `fill` (role+name) + `press` (Enter) replaces old `search`; `click` matches visible text not href. More robust to dynamic pages.
+- `planner.py`: `prior_knowledge_pass()` now receives `memory_context` so the model sees existing high-quality answers and returns `gaps=[]` instead of re-searching answered tasks. `PRIOR_KNOWLEDGE_PROMPT` updated accordingly.
+- `agent.py`: auto-detect playwright intent from navigation verbs ("go to / navigate to / visit / open" + domain) — routes to `/playwright` without requiring explicit prefix. `_is_technical_task()` classifier + `SYNTH_INSTRUCTION_PROSE` fallback prevents Python code blocks being hallucinated into non-technical output (recipes, general knowledge, etc.).
+- `server.py`: `/orientation` skips agent subprocess on restart if `harness_orientation_raw.md` is fresher than 30 min; loads from disk instead. `_orientation_age()` helper; `force=True` param to bypass.
+- `memory.py`: `_parse_compression()` strips markdown fences before regex — fixes `\`\`\`json` being stored as observation title.
+
 ## [2026-04-22] build | Session 24 — /playwright skill, LLM-guided browser navigation
 
 Three components shipped:
