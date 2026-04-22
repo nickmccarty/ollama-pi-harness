@@ -24,7 +24,7 @@ Endpoints:
     DELETE /api/schedule/<id>     remove a scheduled task
 """
 
-import sys, os, uuid, threading, subprocess, argparse, json, atexit, tempfile
+import sys, os, uuid, threading, subprocess, argparse, json, atexit, tempfile, time
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
@@ -82,10 +82,37 @@ _ORIENTATION_INTERVAL     = 1800  # seconds between refreshes
 
 _ORIENTATION_RAW = os.path.join(tempfile.gettempdir(), "harness_orientation_raw.md")
 
-def _refresh_orientation():
-    """Launch /orientation as a visible agent subprocess, then read its raw doc into cache."""
+_ORIENTATION_MAX_AGE = 1800  # seconds — reuse existing file if fresher than this
+
+
+def _orientation_age() -> float | None:
+    """Return seconds since _ORIENTATION_RAW was last written, or None if it doesn't exist."""
+    try:
+        return time.time() - os.path.getmtime(_ORIENTATION_RAW)
+    except OSError:
+        return None
+
+
+def _refresh_orientation(force: bool = False):
+    """Launch /orientation as a visible agent subprocess, then read its raw doc into cache.
+
+    If the raw file already exists and is younger than _ORIENTATION_MAX_AGE seconds,
+    load it from disk and skip the agent run (unless force=True).
+    """
     global _orientation_doc
-    import time
+
+    age = _orientation_age()
+    if not force and age is not None and age < _ORIENTATION_MAX_AGE:
+        # Recent enough — just load from disk without re-running the skill
+        try:
+            doc = open(_ORIENTATION_RAW, encoding="utf-8").read()
+            with _orientation_lock:
+                _orientation_doc = doc
+            print(f"[server] orientation: reusing cached file ({int(age)}s old, {len(doc)} chars)")
+        except Exception as e:
+            print(f"[server] orientation cache load failed: {e}")
+        return
+
     print("[server] orientation: launching agent subprocess...")
     run_id = _launch("/orientation", triggered_by="orientation_cache")
     # Wait up to 5 minutes for the agent run to finish
@@ -727,7 +754,6 @@ if __name__ == "__main__":
     else:
         # Fallback: simple timer loop if APScheduler unavailable
         def _orientation_loop():
-            import time
             while True:
                 time.sleep(_ORIENTATION_INTERVAL)
                 _refresh_orientation()
