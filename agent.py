@@ -959,7 +959,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1518,6 +1518,130 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
             _store_memory(memory, task, "transcribe", trace.data, content)
 
+        def _handle_reorient():
+            import re as _re
+            import subprocess as _sp
+            import shutil as _sh
+            import tempfile as _tmp
+            import concurrent.futures as _cf
+            from pathlib import Path as _Path
+
+            print("\n[skill:re-orient] gathering orientation + GitHub state...")
+            trace.data["task_type"] = "re-orient"
+
+            # Optional focus question: everything after /re-orient token
+            question = _re.sub(r"^/re-orient\s*", "", task, flags=_re.IGNORECASE).strip()
+            question = question or "Summarise the current project state, what was recently shipped, and what should be prioritised next."
+
+            # ── 1. Read cached orientation doc ──────────────────────────────
+            _ori_path = os.path.join(_tmp.gettempdir(), "harness_orientation_raw.md")
+            orientation_doc = ""
+            ori_age_min = None
+            if os.path.exists(_ori_path):
+                import time as _t
+                ori_age_min = round((_t.time() - os.path.getmtime(_ori_path)) / 60, 1)
+                try:
+                    orientation_doc = open(_ori_path, encoding="utf-8").read()
+                    print(f"  [re-orient] orientation cache: {len(orientation_doc)} chars ({ori_age_min} min old)")
+                except Exception as _e:
+                    print(f"  [re-orient] orientation cache read failed: {_e}")
+            else:
+                print("  [re-orient] orientation cache not found — run /orientation first")
+
+            # ── 2. GitHub + git commands (parallel) ──────────────────────────
+            _GH = _sh.which("gh") or "gh"
+            _GIT = _sh.which("git") or "git"
+
+            def _run(cmd, label):
+                try:
+                    r = _sp.run(cmd, capture_output=True, text=True, timeout=15,
+                                cwd=os.getcwd())
+                    out = r.stdout.strip()
+                    if out:
+                        print(f"  [re-orient] {label}: {len(out)} chars")
+                    return label, out
+                except Exception as _e:
+                    return label, f"(error: {_e})"
+
+            _cmds = [
+                (["git", "log", "--oneline", "-20"], "recent_commits"),
+                ([_GH, "pr", "list", "--state", "merged", "--limit", "10",
+                  "--json", "number,title,mergedAt,author"], "merged_prs"),
+                ([_GH, "pr", "list",
+                  "--json", "number,title,author,createdAt,headRefName"], "open_prs"),
+                ([_GH, "issue", "list", "--limit", "10",
+                  "--json", "number,title,labels,createdAt,state"], "open_issues"),
+                ([_GH, "run", "list", "--limit", "5",
+                  "--json", "status,conclusion,name,createdAt,headBranch"], "ci_runs"),
+            ]
+
+            gh_sections = {}
+            with _cf.ThreadPoolExecutor(max_workers=5) as _pool:
+                futures = {_pool.submit(_run, cmd, label): label for cmd, label in _cmds}
+                for fut in _cf.as_completed(futures):
+                    label, out = fut.result()
+                    gh_sections[label] = out
+
+            # ── 3. Build context block ────────────────────────────────────────
+            _age_note = f"(cached {ori_age_min} min ago)" if ori_age_min is not None else "(cache missing)"
+            context_parts = []
+            if orientation_doc:
+                context_parts.append(f"## Project orientation {_age_note}\n\n{orientation_doc[:6000]}")
+
+            _gh_labels = {
+                "recent_commits": "Recent commits (git log)",
+                "merged_prs":     "Recently merged PRs",
+                "open_prs":       "Open PRs",
+                "open_issues":    "Open issues",
+                "ci_runs":        "Recent CI runs",
+            }
+            for key in ["recent_commits", "merged_prs", "open_prs", "open_issues", "ci_runs"]:
+                val = gh_sections.get(key, "")
+                if val and not val.startswith("(error"):
+                    context_parts.append(f"## {_gh_labels[key]}\n\n```\n{val[:1200]}\n```")
+
+            full_context = "\n\n".join(context_parts)
+            if not full_context.strip():
+                print("[error] no orientation data or GitHub output available")
+                trace.finish("ERROR")
+                return
+
+            # ── 4. LLM synthesis ─────────────────────────────────────────────
+            _prompt = (
+                f"You are reviewing the current state of an agentic research engineering project.\n\n"
+                f"{full_context}\n\n"
+                f"---\n\nQuestion / focus: {question}\n\n"
+                "Answer concisely in well-structured markdown. "
+                "Draw on all context above — orientation doc, recent commits, PRs, issues, and CI runs. "
+                "Be specific: reference commit messages, PR titles, issue numbers where relevant."
+            )
+            print(f"  [re-orient] synthesizing ({len(_prompt)} char prompt)...")
+            with trace.span("reorient_synth", model=producer_model):
+                _resp = inference.chat(
+                    model=producer_model,
+                    messages=[{"role": "user", "content": _prompt}],
+                    options={"temperature": 0.2, "num_predict": 2048},
+                )
+            trace.log_usage(_resp, stage="reorient_synth")
+            content = clean_synthesis_output(
+                (_resp.message.content or "").strip()
+            )
+            if not content:
+                print("[error] synthesis returned empty output")
+                trace.finish("ERROR")
+                return
+
+            print("\n" + content[:1200] + ("\n...[truncated]" if len(content) > 1200 else "") + "\n")
+
+            if path:
+                write_output(content, path, trace)
+            else:
+                trace.data["final_content"] = content[:16_000]
+                trace.data["output_bytes"]  = len(content.encode())
+
+            trace.finish("PASS")
+            _store_memory(memory, task, "re-orient", trace.data, content)
+
         def _handle_sync_wiki():
             print("\n[skill:sync-wiki] extracting implementation facts from source code...")
             trace.data["task_type"] = "sync_wiki"
@@ -1574,6 +1698,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "sync-wiki":    _handle_sync_wiki,
             "playwright":   _handle_playwright,
             "transcribe":   _handle_transcribe,
+            "re-orient":    _handle_reorient,
         }
 
         for _skill in explicit_skills:

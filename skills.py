@@ -223,6 +223,19 @@ REGISTRY: dict[str, dict] = {
         "auto":   None,   # explicit only — triggered by /playwright token or voice intent
     },
 
+    "re-orient": {
+        "description": (
+            "Fast project state snapshot combining the cached /orientation doc with live "
+            "GitHub data (recent commits, merged PRs, open PRs, open issues, CI runs). "
+            "Runs in seconds — no agent subprocess, no wiggum loop. "
+            "Optionally steered by a focus question. "
+            "Invocation: /re-orient [optional question or focus]"
+        ),
+        "hook":   "standalone",
+        "prompt": None,
+        "auto":   None,
+    },
+
     "transcribe": {
         "description": (
             "Transcribe a local audio file using OpenAI Whisper. "
