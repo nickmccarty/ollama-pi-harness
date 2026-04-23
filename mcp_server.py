@@ -218,9 +218,8 @@ def run_task(task: str, api_key: str = "") -> str:
     if not ok:
         return f"[error] {err}"
 
-    acquired = _semaphore.acquire(blocking=False)
-    if not acquired:
-        return f"[error] server busy (max {_MAX_CONCURRENCY} concurrent tasks) — retry shortly"
+    # Block until a slot is free — callers queue here rather than getting an error
+    _semaphore.acquire(blocking=True)
     try:
         result = _run_subprocess(_AGENT_SCRIPT, task)
     finally:
@@ -254,9 +253,7 @@ def run_orchestrated(task: str, api_key: str = "") -> str:
     if not ok:
         return f"[error] {err}"
 
-    acquired = _semaphore.acquire(blocking=False)
-    if not acquired:
-        return f"[error] server busy (max {_MAX_CONCURRENCY} concurrent tasks) — retry shortly"
+    _semaphore.acquire(blocking=True)
     try:
         result = _run_subprocess(_ORCH_SCRIPT, task, timeout=1800)
     finally:

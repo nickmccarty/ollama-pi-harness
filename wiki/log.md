@@ -229,6 +229,48 @@ Six improvements shipped:
 **env vars added:** `INFERENCE_BACKEND`, `VLLM_BASE_URL`, `VLLM_MODEL_MAP`, `WIGGUM_EVALUATOR_MODEL`, `WIGGUM_PRODUCER_MODEL`, `LLAMA_OCR_BASE_URL`
 
 
+## [2026-04-23] build | Session 26 — eval loop order, explore/exploit modes, subagent demos, HTML renderer, memory injection gate
+
+**Autoresearch loop restructured — generate → verify → revise (Ralph pattern):**
+- Old order: evaluate (old feedback) → revise → verify. Proposer never saw signal from the eval it triggered — always one loop stale.
+- New order: propose → apply → eval → capture fresh feedback immediately → feed to next proposal.
+- On discard: tight inner loop — no research re-gather, fresh signal used directly.
+- On keep: research context refreshed before next proposal (outer loop).
+- `--mode explore|exploit|auto` added. `auto` (default): exploit by default, switches to explore after `PLATEAU_DISCARDS=3` consecutive discards with `|delta| < 0.05`. Explore re-gathers web research context; exploit skips it. `consecutive_discards` counter resets on keep or after auto-explore fires.
+
+**`subagent_demo.py` / `subagent_demo_v2.py` — sequential and parallel subagent demos:**
+- `subagent_demo.py`: submits 6 research tasks ("State of Agentic AI in 2026") to server queue; polls until idle; prints file summary.
+- `subagent_demo_v2.py`: 5 grounded self-analysis tasks (read actual files: `autoresearch.tsv`, `runs.jsonl`, `skills.py`, `agent.py`, `wiki/`) — harder to hallucinate, signal is verifiable.
+- `--parallel` mode: fires all tasks simultaneously via MCP HTTP server (`ThreadPoolExecutor`); `--workers N` sets concurrency. `--sequential` (default) uses Flask queue.
+- MCP semaphore changed from `blocking=False` (immediate rejection) to `blocking=True` (queues at server) so parallel submissions don't get refused.
+
+**`render_html.py` — deterministic markdown → HTML renderer:**
+- LLMs produce markdown; HTML with a specific design system is a rendering problem, not a generation problem.
+- Converts any directory of `.md` files: `index.html` (landing page, card grid, click-to-expand) + individual `<slug>.html` per report.
+- Fixed design system: `#0d1117` bg, `#58a6ff` accent, card grid, JS expand-on-click previews, no external deps.
+- `render_dir(out_dir, title, subtitle)` callable from scripts; CLI: `python render_html.py <dir> --title "..."`.
+- Requires `markdown` + `jinja2`; falls back to basic converter if missing.
+- `subagent_demo_v2.py` calls `render_dir()` as final step after all tasks complete — landing page is guaranteed to match design system regardless of what the agents produced.
+
+**agent.py fixes:**
+- `extract_path()` rewritten: prefers "save to `<path>`" phrasing over first path found — previously grabbed read-paths from task description, overwriting source wiki files. Falls back to last `.md`/`.html` path in task.
+- `detect_text_files()` extended: now matches relative paths (`autoresearch.tsv`, `wiki/log.md`, `runs.jsonl`) in addition to absolute paths. Resolves against harness directory; deduplicates.
+- Research gate: when local files were read (`text_files` non-empty), sets `_skip_research=True` — agent synthesises from file content instead of web-searching for data already on disk.
+- `_is_technical_task()`: data-analysis phrasing ("analyze", "extract", "trace how", "read autoresearch", "which dimensions", etc.) now routes to `SYNTH_INSTRUCTION_PROSE` — prevents Python tutorials being generated instead of actual analysis.
+
+**wiggum.py fixes:**
+- `format="json"` added to both `ollama.chat` eval calls — constrains token-level output to valid JSON.
+- `<think>...</think>` stripping added to parse path.
+- `_extract_eval_from_prose()`: regex fallback that extracts dimension scores from markdown prose (`**Relevance**: 8/10`) when model ignores `format=json`. Logs `prose fallback succeeded` when it fires. Prevents `score=0.0` parse failures from tanking the wiggum loop.
+
+**server.py fix:**
+- `import re` added to module-level imports (was missing; `/api/voice` "Note:" prefix check failed with `NameError`).
+
+**memory.py — prompt injection gate on write paths:**
+- `_scan_obs(title, narrative, facts)`: runs `scan_for_injection()` from `security.py` on compressed observation content before any SQLite/ChromaDB write.
+- Applied to both `compress_and_store()` and `store_direct()`.
+- Motivation: web-fetched or synthesised content riding into future sessions as trusted memory context via a poisoned page. Reuses existing injection patterns — no new logic.
+
 ## [2026-04-22] build | Session 25 — bug fixes, qwen3_think_mode findings, playwright rewrite
 
 **qwen3_think_mode experiment — CONFIRMED (delta=+0.330):**

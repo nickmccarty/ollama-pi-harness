@@ -217,8 +217,22 @@ _TECHNICAL_KEYWORDS = frozenset({
     "inference", "tokenizer", "tensor", "gpu", "cuda", "vllm", "ollama",
 })
 
+_ANALYSIS_PHRASES = frozenset({
+    "analyze", "analyse", "extract", "identify patterns", "score trajectory",
+    "summarize the", "summarise the", "characterize", "characterise",
+    "trace how", "identify which", "identify what", "read and report",
+    "what the evaluator", "what types of changes", "which dimensions",
+    "trends report", "analytical report", "read wiki", "read runs",
+    "read autoresearch", "read bench", "read the current",
+})
+
 def _is_technical_task(task: str) -> bool:
     lower = task.lower()
+    # Data-analysis tasks that read local files should use prose, not code tutorials
+    if any(phrase in lower for phrase in _ANALYSIS_PHRASES):
+        # Only override to prose if there are no explicit coding keywords
+        if not any(kw in lower for kw in ("implement", "code", "script", "function", "api", "deploy")):
+            return False
     return any(kw in lower for kw in _TECHNICAL_KEYWORDS)
 
 
@@ -302,18 +316,35 @@ def fetch_task_url_context(urls: list[str]) -> str:
 
 def detect_text_files(task: str, exclude_path: str = None) -> list[str]:
     """Find readable file paths referenced in the task (non-image, non-output).
-    Returns both plain-text and rich-document paths; caller uses extension to route."""
-    pattern = r'(~[\w/\\.\-]+|[A-Za-z]:[\w/\\.\-]+|/[\w/.\-]+)'
-    candidates = re.findall(pattern, task)
+    Returns both plain-text and rich-document paths; caller uses extension to route.
+    Matches absolute paths (~/..., C:/..., /...) and relative paths (wiki/log.md, runs.jsonl).
+    """
+    # Absolute path patterns
+    abs_pattern = r'(~[\w/\\.\-]+|[A-Za-z]:[\w/\\.\-]+|/[\w/.\-]+)'
+    # Relative path pattern: bare filenames and subdir/file.ext with known extensions
+    known_exts = "|".join(
+        e.lstrip(".") for e in (TEXT_EXTENSIONS | RICH_EXTENSIONS)
+    )
+    rel_pattern = rf'(?<![/\w])([a-zA-Z][\w\-]*(?:/[\w\-\.]+)*\.(?:{known_exts}))'
+    candidates = re.findall(abs_pattern, task) + re.findall(rel_pattern, task)
+    seen = set()
     found = []
+    cwd = os.path.dirname(os.path.abspath(__file__))
     for c in candidates:
         expanded = os.path.expanduser(c)
         _, ext = os.path.splitext(expanded)
         if ext.lower() not in TEXT_EXTENSIONS and ext.lower() not in RICH_EXTENSIONS:
             continue
-        if exclude_path and os.path.abspath(expanded) == os.path.abspath(os.path.expanduser(exclude_path)):
+        # Resolve relative paths against the harness directory
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(cwd, expanded)
+        abs_expanded = os.path.abspath(expanded)
+        if exclude_path and abs_expanded == os.path.abspath(os.path.expanduser(exclude_path)):
+            continue
+        if abs_expanded in seen:
             continue
         if os.path.isfile(expanded):
+            seen.add(abs_expanded)
             found.append(expanded)
     return found
 
@@ -857,8 +888,23 @@ def synthesize_with_count(task: str, research_context: str, expected_count: int,
 
 
 def extract_path(task: str) -> str | None:
-    match = re.search(r"(~[\w/\\.\-]+\.md|[A-Za-z]:[\w/\\.\-]+\.md|/[\w/.\-]+\.md|[\w./\\\-]+\.md)", task)
-    return match.group(1) if match else None
+    """Extract the OUTPUT file path from a task string.
+
+    Prefers paths that follow "save to", "save ... to", or "output to" phrasing
+    so that read-path references in the task don't get mistaken for the output.
+    Falls back to the last .md/.html path in the task if no save-phrase is found.
+    """
+    _PATH_RE = r"(~[\w/\\.\-]+\.(?:md|html)|[A-Za-z]:[\w/\\.\-]+\.(?:md|html)|/[\w/.\-]+\.(?:md|html)|[\w./\\\-]+\.(?:md|html))"
+    # Priority 1: explicit save/write/output directive
+    save_match = re.search(
+        r"(?:save(?:\s+\S+){0,5}?\s+to|write\s+to|output\s+to)\s+" + _PATH_RE,
+        task, re.IGNORECASE,
+    )
+    if save_match:
+        return save_match.group(1)
+    # Priority 2: last .md/.html path in the task (output paths tend to appear last)
+    all_paths = re.findall(_PATH_RE, task)
+    return all_paths[-1] if all_paths else None
 
 
 def write_output(content: str, path: str, trace: RunTrace):
@@ -1775,14 +1821,18 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             else:
                 print("  [skill:contextualize] no context files found — falling back to web search")
 
+        # If local files were read, treat their content as the research source and
+        # skip web search — the data is already on disk, searching the web won't help.
+        if text_files and file_context and not _skip_research:
+            _skip_research = True
+            print(f"  [read_file] {len(text_files)} local file(s) loaded — skipping web search")
+
         if has_url_content or _skip_research:
-            if not has_url_content:
-                print("  [skill:contextualize] web search skipped")
-            else:
+            if has_url_content:
                 print("  [fetch_url] document already fetched — skipping web search")
-            # For contextualize, promote injected context to research slot so the
-            # model treats it as primary source material, not supplementary files.
-            if _skip_research and not has_url_content and file_context:
+            # Promote injected content to research slot so the model treats it as
+            # primary source material rather than supplementary context.
+            if file_context:
                 context = file_context
                 file_context = ""
             else:

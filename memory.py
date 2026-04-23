@@ -27,6 +27,22 @@ import sqlite3
 from datetime import datetime, timezone
 
 import inference as ollama
+from security import scan_for_injection
+
+
+def _scan_obs(title: str, narrative: str, facts: list[str] | None) -> bool:
+    """
+    Scan a compressed observation for prompt-injection patterns before writing
+    to SQLite/ChromaDB. Returns True if safe, False if blocked.
+    Web-fetched or synthesised content can carry adversarial instructions that
+    would be injected into future sessions as trusted memory context.
+    """
+    combined = "\n".join(filter(None, [title, narrative] + (facts or [])))
+    clean, matches = scan_for_injection(combined, source="memory_write")
+    if not clean:
+        print(f"  [memory] BLOCKED write — injection pattern detected: {matches[0]!r}")
+        return False
+    return True
 
 COMPRESSION_MODEL   = "glm4:9b"
 DB_PATH             = os.path.join(os.path.dirname(__file__), "memory.db")
@@ -326,6 +342,10 @@ class MemoryStore:
         score = wiggum_scores[-1] if wiggum_scores else None
         facts_json = json.dumps(obs["facts"]) if obs["facts"] else None
 
+        # Injection gate — block before any write touches persistent storage
+        if not _scan_obs(obs["title"], obs["narrative"], obs.get("facts")):
+            return obs  # return the obs dict so callers can log it; nothing stored
+
         # Write to SQLite
         with self._connect() as conn:
             cursor = conn.execute(
@@ -396,6 +416,10 @@ class MemoryStore:
 
         facts_json = json.dumps(facts) if facts else None
         ts = timestamp or datetime.now(timezone.utc).isoformat()
+
+        # Injection gate
+        if not _scan_obs(title, narrative, facts):
+            return -1
 
         with self._connect() as conn:
             cursor = conn.execute(

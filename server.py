@@ -24,7 +24,7 @@ Endpoints:
     DELETE /api/schedule/<id>     remove a scheduled task
 """
 
-import sys, os, uuid, threading, subprocess, argparse, json, atexit, tempfile, time
+import sys, os, uuid, threading, subprocess, argparse, json, atexit, tempfile, time, re
 from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path

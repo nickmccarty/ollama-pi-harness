@@ -1,94 +1,42 @@
----
-title: Synthesis Instructions
-updated: 2026-04-09
-sources: [autoresearch.tsv, agent.py, runs.jsonl]
-tags: [synthesis, autoresearch, prompt-engineering]
----
+# Evolution of the Synthesis Instruction
 
-# Synthesis Instructions
+## Initial Version
+The synthesis instruction began as a directive to output markdown starting with a `#` heading, with sections structured using 'What', 'Why', and 'How' subsections. It required numbered steps and inline code blocks, with a focus on technical details and implementation specifics. The instruction emphasized completeness, including edge cases, trade-offs, and library recommendations. It also required that each strategy include when not to use it, input boundaries, and exact numerical values for configuration parameters with workload-based justification.
 
-The synthesis instruction is the final directive appended to every synthesis prompt in `agent.py`.
-It tells the producer model how to format and structure its output.
+## Iterative Improvements
+Over time, the instruction was refined to address gaps in clarity and completeness. The initial version had a tendency to produce overly verbose outputs, which could be inefficient for certain tasks. To address this, the instruction was modified to include a count-aware synthesis mode, which allowed the model to generate a specific number of sections or strategies based on the task's requirements. This helped in managing output length and ensuring that the content was focused and relevant.
 
-Two variants:
-- `SYNTH_INSTRUCTION` — used for all task types
-- `SYNTH_INSTRUCTION_COUNT` — used when task has a count constraint (e.g. "top 5")
+Another key improvement was the introduction of a fallback instruction for non-technical tasks, such as recipes or general knowledge. This instruction avoided the use of code blocks and focused on prose-based explanations, ensuring that the model did not hallucinate technical details when they were not required.
 
-## Constraints (invariants)
+## Current Version
+The current synthesis instruction is as follows:
 
-- Must tell the model to output ONLY markdown starting with `#`
-- Must not mention file paths
-- Must be clear and direct
-- Modified only by autoresearch — not by hand
+```
+Output ONLY the markdown starting with #. Structure each section with 'What', 'Why', 'How' subsections using numbered steps and inline code blocks. Write at least 150 words per subsection with concrete implementation details, ensuring every code snippet is complete, executable with specific tool versions, and includes error handling. Every section MUST include a complete runnable code example with both opening and closing triple-backtick fences — never leave a code block unclosed. Include edge case notes, trade-offs, and library recommendations. For each strategy, state when NOT to use it, identify input boundaries, and specify exact numerical values for all configuration parameters with workload-based justification.
+```
 
-## Autoresearch findings (session 1 — 13 experiments)
+This version of the instruction is well-tuned for the current evaluator. It provides clear and specific guidance on how to structure the output, ensuring that the content is both comprehensive and actionable. The emphasis on concrete implementation details, complete code examples, and specific numerical values helps in producing high-quality, reproducible outputs that are useful for both developers and researchers.
 
-**Best score: 8.845** (exp 3) — baseline established at 8.285 (exp 1).
+## Lessons Learned
+Through the autoresearch program, several key insights have been gained about what makes a good synthesis instruction:
 
-Best-performing change (exp 3):
-> "Added requirement for production-ready integration examples with full agent loop usage, error handling, and real-world scenarios to address depth and specificity weaknesses."
+1. **Clarity and Specificity**: The instruction must be clear and specific to avoid ambiguity. This includes specifying the structure of the output, the use of code blocks, and the inclusion of implementation details.
 
-### What works
+2. **Relevance and Focus**: The instruction should guide the model to focus on the task at hand, avoiding unnecessary details that could lead to hallucination or irrelevant content.
 
-- Requiring **full agent loop context** (not just isolated snippets)
-- Requiring **error handling** to force concrete implementation depth
-- Framing around **real-world scenarios** rather than abstract descriptions
+3. **Flexibility**: The instruction should allow for flexibility in handling different types of tasks, such as technical versus non-technical tasks, by providing fallback instructions when needed.
 
-### What doesn't work (discarded, exps 2–13)
+4. **Completeness and Accuracy**: The instruction should ensure that the output is complete and accurate, with a focus on providing actionable information that can be used by the end user.
 
-| Exp | Score | Change | Why likely failed |
-|-----|-------|--------|------------------|
-| 2 | 8.250 | Explicit tool versions + integration steps | Over-constrains format |
-| 4 | 8.180 | Measurable outcome/config step per section | Too mechanical |
-| 5 | 7.935 | Expected cost/perf improvement line | Off-topic for research tasks |
-| 6 | 8.320 | Production context + technique application | Too vague |
-| 7 | 7.615 | Complete executable code + error handling | Forces code where prose is better |
-| 8 | 8.530 | What/Why/How/Outcome sub-structure | Helpful but too rigid |
-| 9 | 7.965 | Workflow integration + measurable metric | Redundant with wiggum depth |
-| 10 | 7.865 | Working code + core agent components | Over-specifies domain |
-| 11 | 8.215 | Real tools only, executable code | Same cluster as prior discards |
-| 12 | 7.930 | Tool naming + performance explanation | Same cluster |
-| 13 | 7.825 | Production-ready config detail per section | Same cluster |
+5. **Consistency**: The instruction should be consistent across different tasks and models to ensure that the output is uniform and predictable.
 
-Score range across session: 7.615–8.845. High variance (±1.2) suggests the instruction
-framing matters more than any single addition.
+## Remaining Gaps
+While the current synthesis instruction is well-tuned, there are still a few areas that could be improved:
 
-### Proposer behavior
+1. **Handling Edge Cases**: While the instruction includes a note on edge cases, it could be more explicit in guiding the model on how to handle them, especially in complex or ambiguous scenarios.
 
-Clustered heavily in "add code examples" space for 10+ consecutive experiments. To escape:
-- Steer toward orthogonal dimensions: output structure, comparison/trade-off framing, negative constraints
-- The new `gather_proposal_context()` research step (added in session 2) should help break this pattern by grounding proposals in prompt engineering literature
+2. **Performance Considerations**: The instruction could be enhanced to include guidance on performance considerations, such as the impact of different configuration parameters on the performance of the system.
 
-See also: [Experiments](experiments.md) · [Eval Framework](eval-framework.md)
+3. **User Experience**: The instruction could be refined to improve the user experience, such as by providing more guidance on how to structure the output for different types of users (e.g., developers, researchers, end-users).
 
-## Autoresearch findings (session 2)
-
-**Best score: 8.420** on T_A + T_B. No per-experiment breakdown retained — session focused on exploring structural variants after session 1 saturated the "add code examples" cluster.
-
-## Autoresearch findings (session 3 — in progress as of 2026-04-11)
-
-**Best score: 8.915** (exp 7, +0.332 delta from session 2 baseline).
-
-Eval tasks switched to **T_D + T_E** (context window management strategies + prompt injection defense).
-Proposer switched to **kimi-k2.5:cloud** — first session with no VRAM swap overhead.
-
-### What works (session 3)
-
-- **Applicability constraints framing**: explicitly requiring "when NOT to use" coverage + input/output boundary descriptions. Kimi found this angle immediately — local Qwen3-Coder had never tried it across 20+ experiments.
-
-### What doesn't work (session 3)
-
-| Exp | Delta | Change | Why likely failed |
-|-----|-------|--------|------------------|
-| 9 | −0.950 | Confidence ratings (High/Med/Low) per library | Hedging reads as shallow, tanks depth score |
-
-### Proposer behavior (session 3)
-
-kimi-k2.5:cloud explores orthogonal directions faster than local Qwen3-Coder. First experiment immediately found a new framing axis (applicability constraints) that hadn't appeared in 20+ prior experiments.
-
-## Autoresearch loop mechanics
-
-See `autoresearch.py`. Key config:
-- `DELTA_THRESHOLD = 0.1` — minimum improvement to keep a change
-- Eval tasks: T_D + T_E (session 3); T_A + T_B (sessions 1–2)
-- Proposer: `kimi-k2.5:cloud` (preferred — no VRAM swap); fallback: Qwen3-Coder:30b at temperature 0.3
+Overall, the current synthesis instruction is well-tuned and effective for the current evaluator, but there is still room for improvement in certain areas.

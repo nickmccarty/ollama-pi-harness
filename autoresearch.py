@@ -548,6 +548,23 @@ def git_discard():
 # Main loop
 # ---------------------------------------------------------------------------
 
+PLATEAU_DISCARDS = 3    # consecutive discards before auto-explore kicks in
+PLATEAU_DELTA    = 0.05  # |delta| below this counts as "stuck at plateau"
+
+
+def _should_explore(mode: str, consecutive_discards: int, last_deltas: list[float]) -> bool:
+    """Return True if the loop should re-gather research context before the next proposal."""
+    if mode == "explore":
+        return True
+    if mode == "exploit":
+        return False
+    # auto: explore after PLATEAU_DISCARDS consecutive discards all near zero
+    if consecutive_discards >= PLATEAU_DISCARDS:
+        plateau = all(abs(d) < PLATEAU_DELTA for d in last_deltas[-PLATEAU_DISCARDS:])
+        return plateau
+    return False
+
+
 def main():
     global PROPOSER_MODEL
     # Parse args
@@ -566,12 +583,23 @@ def main():
         idx = args.index("--proposer")
         if idx + 1 < len(args):
             PROPOSER_MODEL = args[idx + 1]
+    mode = "auto"
+    if "--mode" in args:
+        idx = args.index("--mode")
+        if idx + 1 < len(args):
+            mode = args[idx + 1].lower()
+    if mode not in ("explore", "exploit", "auto"):
+        print(f"[warn] unknown --mode '{mode}', defaulting to 'auto'")
+        mode = "auto"
 
     print("\n" + "=" * 60)
     print(" autoresearch — autonomous synthesis instruction improvement")
-    print(f" proposer:  {PROPOSER_MODEL}")
-    print(f" eval tasks: {task_ids}")
-    print(f" delta threshold: {delta_threshold}")
+    print(f" proposer:    {PROPOSER_MODEL}")
+    print(f" eval tasks:  {task_ids}")
+    print(f" delta thr:   {delta_threshold}")
+    print(f" mode:        {mode}  (explore|exploit|auto)")
+    if mode == "auto":
+        print(f"   auto-explore after {PLATEAU_DISCARDS} consecutive discards with |delta| < {PLATEAU_DELTA}")
     print("=" * 60 + "\n")
 
     init_tsv()
@@ -584,9 +612,8 @@ def main():
         log_experiment(0, baseline_score, baseline_score, "baseline", "initial baseline")
         print(f"[baseline] score: {baseline_score:.3f}\n")
     else:
-        # Extract best score from history
         scores = []
-        for line in history.splitlines()[1:]:  # skip header
+        for line in history.splitlines()[1:]:
             parts = line.split("\t")
             if len(parts) >= 2:
                 try:
@@ -598,26 +625,36 @@ def main():
 
     experiment = sum(1 for l in history.splitlines() if l and not l.startswith("experiment")) + 1
 
-    # LOOP FOREVER
+    # Seed fresh_feedback from most recent eval runs already in runs.jsonl
+    n_seed = get_run_count()
+    fresh_feedback = get_recent_eval_feedback(task_ids, max(0, n_seed - len(task_ids) * 2))
+    if not fresh_feedback or fresh_feedback == "(no eval feedback found)":
+        fresh_feedback = "(no prior eval feedback — first experiment)"
+
+    # Research context: seeded now, refreshed conditionally per mode logic
+    research_context = gather_proposal_context()
+
+    consecutive_discards = 0
+    last_deltas: list[float] = []
+
+    # LOOP FOREVER — generate → verify → revise
     while True:
+        # Mode decision: should we re-gather research before this proposal?
+        if _should_explore(mode, consecutive_discards, last_deltas):
+            print(f"  [mode] {'forced explore' if mode == 'explore' else 'auto-explore: plateau detected'} — re-gathering research context")
+            research_context = gather_proposal_context()
+            consecutive_discards = 0  # reset plateau counter after explore
+
         print(f"\n{'=' * 60}")
-        print(f" Experiment {experiment}")
+        print(f" Experiment {experiment}  |  mode={mode}  |  consecutive_discards={consecutive_discards}")
         print(f" Baseline: {baseline_score:.3f}")
         print(f"{'=' * 60}")
 
-        # 1. Get context
         current = read_instructions()
         history = read_history()
-        n_before = get_run_count()
 
-        # Get eval feedback from most recent runs of our eval tasks
-        eval_feedback = get_recent_eval_feedback(task_ids, max(0, n_before - len(task_ids) * 2))
-        if not eval_feedback or eval_feedback == "(no eval feedback found)":
-            eval_feedback = "(no prior eval feedback — first experiment)"
-
-        # 2. Gather external research context, then propose
-        research_context = gather_proposal_context()
-        proposal = propose_instructions(current, history, eval_feedback, research_context)
+        # 1. GENERATE — propose based on the signal from the LAST eval run
+        proposal = propose_instructions(current, history, fresh_feedback, research_context)
         if proposal is None:
             print("  [warn] proposer failed — skipping experiment")
             time.sleep(5)
@@ -625,49 +662,50 @@ def main():
 
         description = proposal["description"]
         print(f"  [proposal] {description}")
-        print(f"  [proposal] synth instruction (first 120 chars): {proposal['synth'][:120]!r}")
+        print(f"  [proposal] synth (first 120 chars): {proposal['synth'][:120]!r}")
 
-        # 3. Apply
-        write_instructions(
-            synth=proposal["synth"],
-            synth_count=proposal["synth_count"],
-        )
+        # 2. APPLY
+        write_instructions(synth=proposal["synth"], synth_count=proposal["synth_count"])
 
-        # 4. Git commit
         commit_msg = f"autoresearch exp {experiment}: {description}"
         try:
             git_commit(commit_msg)
         except subprocess.CalledProcessError as e:
             print(f"  [warn] git commit failed: {e} — continuing anyway")
 
-        # 5. Eval
+        # 3. VERIFY
         n_before_eval = get_run_count()
         score = run_eval(task_ids)
 
-        # 6. Keep or discard
+        # Capture THIS eval's feedback immediately — it feeds the next proposal
+        fresh_feedback = get_recent_eval_feedback(task_ids, n_before_eval)
+        if not fresh_feedback or fresh_feedback == "(no eval feedback found)":
+            fresh_feedback = "(no eval feedback from this run)"
+
+        # 4. KEEP or DISCARD
         delta = score - baseline_score
+        last_deltas.append(delta)
+
         if delta > delta_threshold:
             status = "keep"
             baseline_score = score
+            consecutive_discards = 0
             print(f"  [KEEP] {score:.3f} (+{delta:.3f}) — new baseline: {baseline_score:.3f}")
+            # On keep: refresh research only if in explore or auto mode
+            if mode != "exploit":
+                research_context = gather_proposal_context()
         else:
             status = "discard"
-            print(f"  [DISCARD] {score:.3f} (delta={delta:+.3f} <= threshold {delta_threshold})")
+            consecutive_discards += 1
+            print(f"  [DISCARD] {score:.3f} (delta={delta:+.3f} <= threshold {delta_threshold})  "
+                  f"[{consecutive_discards} consecutive]")
             try:
-                git_discard()
-                # Amend the commit to mark as discarded, or just leave it — git log shows the experiment
-                # For cleanliness, reset the commit too
                 subprocess.run(["git", "reset", "HEAD~1", "--soft"], check=True)
                 subprocess.run(["git", "checkout", "--", AGENT_PATH], check=True)
             except subprocess.CalledProcessError as e:
                 print(f"  [warn] git discard failed: {e}")
 
-        # 7. Log
-        log_experiment(experiment, score, baseline_score if status == "keep" else baseline_score, status, description)
-
-        # Refresh eval feedback for next round
-        # (new runs were just logged; next iteration will pick them up)
-
+        log_experiment(experiment, score, baseline_score, status, description)
         experiment += 1
         print(f"\n  [loop] experiment {experiment - 1} done. Starting {experiment}...")
 

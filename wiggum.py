@@ -147,6 +147,44 @@ def _playwright_extract(html_path: str) -> str:
 # Evaluation
 # ---------------------------------------------------------------------------
 
+_EVAL_DIMS = ["relevance", "completeness", "depth", "grounded", "specificity", "structure"]
+_DIM_WEIGHTS = {"relevance": 0.20, "completeness": 0.20, "depth": 0.25,
+                "grounded": 0.15, "specificity": 0.10, "structure": 0.10}
+
+
+def _extract_eval_from_prose(text: str) -> dict | None:
+    """
+    Fallback parser: extract dimension scores from prose when the model ignores
+    the JSON instruction (e.g. selene-mini returning markdown bullets).
+    Looks for patterns like 'relevance: 8', '* Score: 8/10', '**Depth**: 7/10'.
+    Returns a result dict if all six dimensions found, else None.
+    """
+    scores = {}
+    for dim in _EVAL_DIMS:
+        # Match patterns: "Relevance: 8", "* Score: 8/10", "relevance=8", "**Relevance**: 8/10"
+        m = re.search(
+            rf'(?i)\b{dim}\b[^\n]{{0,60}}?(\d{{1,2}})(?:\s*/\s*10)?',
+            text,
+        )
+        if m:
+            val = int(m.group(1))
+            if 0 <= val <= 10:
+                scores[dim] = val
+    if len(scores) < len(_EVAL_DIMS):
+        return None
+    composite = round(sum(scores[d] * _DIM_WEIGHTS[d] for d in _EVAL_DIMS), 1)
+    passed = composite >= 8.0
+    # Extract issues/feedback as the full prose (truncated)
+    feedback = text.strip()[:800]
+    return {
+        **scores,
+        "score": composite,
+        "passed": passed,
+        "issues": ["(parsed from prose — evaluator ignored JSON format)"],
+        "feedback": feedback,
+    }
+
+
 EVAL_PROMPT = """You are a strict evaluator. Score this output across five dimensions, then compute a weighted composite.
 
 Task:
@@ -269,6 +307,7 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
         model=EVALUATOR_MODEL,
         messages=[{"role": "user", "content": prompt}],
         options={"temperature": 0.0, "think": False},
+        format="json",
     )
     if _trace is not None:
         _trace.log_usage(response, stage="wiggum_eval")
@@ -281,12 +320,20 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
     # Strip markdown code fences if present
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
+    # Strip <think>...</think> blocks some models prepend
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
         print(f"  [warn] evaluator returned non-JSON: {raw[:200]}")
-        return {"passed": False, "score": 0.0, "issues": ["evaluator parse error"], "feedback": raw}
+        # Fallback: extract scores from prose (handles models that ignore format=json)
+        prose_result = _extract_eval_from_prose(raw)
+        if prose_result:
+            print(f"  [warn] prose fallback succeeded: score={prose_result['score']}")
+            result = prose_result
+        else:
+            return {"passed": False, "score": 0.0, "issues": ["evaluator parse error"], "feedback": raw}
 
     # Recompute composite from dimension scores in Python — don't trust model arithmetic
     dims = {
@@ -700,12 +747,14 @@ def loop_annotate(
             model=evaluator_model,
             messages=[{"role": "user", "content": eval_prompt}],
             options={"temperature": 0.0, "think": False},
+            format="json",
         )
         _local_trace.log_usage(response, stage="wiggum_eval")
 
         raw = response["message"]["content"].strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
         try:
             result = json.loads(raw)
