@@ -1038,32 +1038,86 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             _store_memory(memory, task, "annotate", trace.data, content)
 
         def _handle_email():
-            print("\n[skill:email] standalone mode — generating email drafts...")
-            from email_skill import run_email_standalone
-            tokens     = task.split()
-            csv_token  = next((t for t in tokens if t.endswith(".csv")), "")
-            out_token  = next((t for t in reversed(tokens) if "/" in t or t.endswith("/")), "email_drafts/")
-            goal       = " ".join(t for t in tokens if t not in (csv_token, out_token)).strip() or task
-            if not csv_token:
-                print("[error] /email requires a .csv path in the task string")
+            import re as _re
+            from email_skill import run_email_standalone, generate_single_email
+
+            print("\n[skill:email] parsing task...")
+            raw = task.strip()
+
+            _SOURCE_EXTS = {".pdf", ".txt", ".md", ".docx", ".html", ".pptx", ".csv"}
+            _out_dir = "email_drafts/"
+
+            # --- CSV batch mode ---
+            csv_token = next((t for t in raw.split() if t.endswith(".csv")), "")
+            if csv_token:
+                tokens = raw.split()
+                goal = " ".join(t for t in tokens if t != csv_token).strip() or raw
+                print(f"  [email] batch mode — csv={csv_token}")
+                with trace.span("email_drafts", model=producer_model):
+                    results = run_email_standalone(
+                        csv_path=csv_token,
+                        goal=goal,
+                        output_dir=_out_dir,
+                        producer_model=producer_model,
+                        sender_name=os.environ.get("SENDER_NAME", ""),
+                        sender_email=os.environ.get("SENDER_EMAIL", ""),
+                    )
+                tok_in  = results[0].get("_tokens_in",  0) if results else 0
+                tok_out = results[0].get("_tokens_out", 0) if results else 0
+                trace.data.update({"task_type": "email", "email_drafts": len(results),
+                                   "email_output_dir": _out_dir,
+                                   "input_tokens": tok_in, "output_tokens": tok_out})
+                trace.finish("PASS")
+                return
+
+            # --- Single contact mode ---
+            # Find email address (token containing @)
+            tokens = raw.split()
+            email_token = next((t for t in tokens if "@" in t and "." in t.split("@")[-1]), "")
+            if not email_token:
+                print("[error] /email usage:\n"
+                      "  Single: /email <name> <email@x.com> <file/url/text> <goal>\n"
+                      "  Batch:  /email <contacts.csv> <goal>")
                 trace.finish("ERROR")
                 return
-            with trace.span("email_drafts", model=producer_model):
-                results = run_email_standalone(
-                    csv_path=csv_token,
+
+            email_idx = tokens.index(email_token)
+            name = " ".join(tokens[:email_idx]).strip()
+            rest = tokens[email_idx + 1:]
+
+            # Find source: URL or recognisable file extension comes before the goal text
+            source = ""
+            goal_tokens = rest
+            if rest:
+                first = rest[0]
+                if first.startswith("http") or any(first.endswith(ext) for ext in _SOURCE_EXTS):
+                    source = first
+                    goal_tokens = rest[1:]
+
+            goal = " ".join(goal_tokens).strip()
+            if not goal:
+                goal = f"reach out to {name}"
+
+            print(f"  [email] single mode — to={email_token}  source={source or '(none)'}  goal={goal[:60]}")
+            with trace.span("email_single", model=producer_model):
+                result = generate_single_email(
+                    name=name,
+                    to_email=email_token,
+                    source=source,
                     goal=goal,
-                    output_dir=out_token,
+                    output_dir=_out_dir,
                     producer_model=producer_model,
                     sender_name=os.environ.get("SENDER_NAME", ""),
                     sender_email=os.environ.get("SENDER_EMAIL", ""),
                 )
-            print(f"\nGenerated {len(results)} email drafts -> {out_token}")
-            tok_in  = results[0].get("_tokens_in",  0) if results else 0
-            tok_out = results[0].get("_tokens_out", 0) if results else 0
-            trace.data.update({"task_type": "email", "email_drafts": len(results),
-                               "email_output_dir": out_token,
-                               "input_tokens": tok_in, "output_tokens": tok_out})
-            trace.finish("PASS")
+            if result:
+                trace.data.update({"task_type": "email", "email_drafts": 1,
+                                   "email_output_dir": _out_dir,
+                                   "input_tokens":  result.get("_tokens_in",  0),
+                                   "output_tokens": result.get("_tokens_out", 0)})
+                trace.finish("PASS")
+            else:
+                trace.finish("ERROR")
 
         def _handle_github():
             print("\n[skill:github] standalone mode...")

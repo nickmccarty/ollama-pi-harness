@@ -180,6 +180,132 @@ def _log_draft_trace(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+_SOURCE_EXTS = {".pdf", ".txt", ".md", ".docx", ".html", ".pptx"}
+
+
+def _load_source(source: str) -> str:
+    """Load content from a URL, local file, or treat as raw text."""
+    if not source:
+        return ""
+    if source.startswith("http"):
+        print(f"    [email] fetching URL: {source[:70]}")
+        return _fetch_url_markdown(source)
+    p = Path(source)
+    if p.exists():
+        suffix = p.suffix.lower()
+        if suffix in _SOURCE_EXTS:
+            try:
+                from markitdown import MarkItDown
+                result = MarkItDown(enable_plugins=False).convert(str(p))
+                return (result.text_content or "")[:8000]
+            except Exception:
+                pass
+        try:
+            return p.read_text(encoding="utf-8")[:8000]
+        except Exception as e:
+            print(f"    [email] file read failed: {e}")
+            return ""
+    # Treat as raw inline text
+    return source[:2000]
+
+
+def generate_single_email(
+    name: str,
+    to_email: str,
+    goal: str,
+    source: str = "",
+    output_dir: str = "email_drafts/",
+    producer_model: str = "qwen3-14b",
+    sender_name: str = "",
+    sender_email: str = "",
+    sender_company: str = "",
+    platform_url: str = "",
+) -> dict | None:
+    """
+    Generate a single personalized email draft for one contact.
+
+    source may be a URL, local file path, or raw text excerpt.
+    Returns the result dict (with _tokens_in/_tokens_out) or None on failure.
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    source_text = _load_source(source)
+    slide_excerpt = source_text[:_SLIDE_CHAR_LIMIT] if source_text else "(no content provided)"
+
+    first_name = name.split()[0] if name else "there"
+    goal_full  = f"{goal} (platform: {platform_url})" if platform_url else goal
+    sender_company_line = f" ({sender_company})" if sender_company else ""
+
+    print(f"  [email] drafting for {name} <{to_email}>...")
+    draft_start = time.monotonic()
+
+    subject_prompt = _SUBJECT_PROMPT_TMPL.format(
+        goal=goal_full,
+        sender_company=sender_company or sender_name,
+        name=name,
+        affiliation="",
+        keywords="",
+    )
+    subject, s_in, s_out = _ollama_chat(
+        producer_model,
+        [{"role": "system", "content": _SUBJECT_SYSTEM},
+         {"role": "user",   "content": subject_prompt}],
+        num_predict=64,
+    )
+
+    body_prompt = _EMAIL_PROMPT_TMPL.format(
+        goal=goal_full,
+        sender_name=sender_name or "Nick",
+        sender_company_line=sender_company_line,
+        name=name,
+        affiliation="",
+        keywords="",
+        summary="",
+        slide_excerpt=slide_excerpt,
+        first_name=first_name,
+    )
+    body, b_in, b_out = _ollama_chat(
+        producer_model,
+        [{"role": "system", "content": _EMAIL_SYSTEM},
+         {"role": "user",   "content": body_prompt}],
+        num_predict=512,
+    )
+
+    draft_duration = round(time.monotonic() - draft_start, 1)
+
+    record = {
+        "name":          name,
+        "affiliation":   "",
+        "to_email":      to_email,
+        "email_found":   True,
+        "sender_name":   sender_name,
+        "sender_email":  sender_email,
+        "subject":       subject,
+        "body":          body,
+        "generated_at":  datetime.now(timezone.utc).isoformat(),
+    }
+    json_path = out_dir / f"{_safe_filename(name)}.json"
+    json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    record["json_path"] = str(json_path.resolve())
+
+    _log_draft_trace(
+        name=name, affiliation="", to_email=to_email,
+        subject=subject, body=body,
+        subject_prompt=subject_prompt, body_prompt=body_prompt,
+        producer_model=producer_model,
+        tokens_in=s_in + b_in, tokens_out=s_out + b_out,
+        duration_s=draft_duration,
+        json_path=str(json_path.resolve()),
+        goal=goal_full,
+    )
+
+    print(f"    -> {json_path.name}  subject: {subject[:50]}")
+    record["_tokens_in"]  = s_in + b_in
+    record["_tokens_out"] = s_out + b_out
+    return record
+
+
 def run_email_standalone(
     csv_path: str,
     goal: str,

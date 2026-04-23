@@ -93,7 +93,15 @@ REGISTRY: dict[str, dict] = {
     },
 
     "email": {
-        "description": "Generate personalized .eml drafts from a CSV of contacts + a stated goal",
+        "description": (
+            "Generate personalized email JSON drafts, saved to email_drafts/ by default. "
+            "Two modes:\n"
+            "  Single: /email <Name> <email@x.com> <file/url/text> <goal>\n"
+            "  Batch:  /email <contacts.csv> <goal>\n"
+            "Source can be a URL, local file (pdf/txt/md/docx/html/pptx), or inline text. "
+            "Batch mode reads CSV columns: name, affiliation, emails/email, "
+            "topic_keywords, summary, markdown, content_url."
+        ),
         "hook":        "standalone",
         "prompt":      None,
         "auto":        None,   # explicit only
