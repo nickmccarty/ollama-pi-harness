@@ -217,30 +217,42 @@ def run_email_standalone(
         rows = [r for r in rows if kw in (r.get("topic_keywords", "") + r.get("domain", "") + r.get("summary", "")).lower()]
         print(f"  [email] filtered to {len(rows)} rows matching '{filter_keyword}'")
 
-    rows = rows[:max_emails]
-    print(f"  [email] generating {len(rows)} email draft(s) -> {out_dir}/")
+    print(f"  [email] generating up to {max_emails} email draft(s) -> {out_dir}/")
 
     results   = []
     total_in  = 0
     total_out = 0
 
     for i, row in enumerate(rows, 1):
+        if len(results) >= max_emails:
+            break
+
         name        = row.get("name", "").strip()
         affiliation = row.get("affiliation", "").strip()
         first_name  = name.split()[0] if name else "there"
         keywords    = ", ".join(_parse_list_field(row.get("topic_keywords", ""))) or row.get("domain", "")
         summary     = (row.get("summary", "") or "")[:400]
-        emails_raw  = row.get("emails", "") or row.get("emails_regex", "") or ""
-        to_email    = ""
-        all_emails  = []
-        if emails_raw and emails_raw not in ("[]", ""):
+
+        # Try common column name variants for email address
+        emails_raw = (
+            row.get("emails", "")
+            or row.get("emails_regex", "")
+            or row.get("email", "")
+            or row.get("contact_email", "")
+            or row.get("speaker_email", "")
+            or ""
+        )
+        all_emails = []
+        if emails_raw and emails_raw.strip() not in ("[]", ""):
             all_emails = [e for e in _parse_list_field(emails_raw) if "@" in e]
-        if not all_emails:
-            print(f"  [{i}/{len(rows)}] SKIP {name} — no email address found")
-            continue
-        if len(all_emails) > 1:
-            print(f"  [{i}/{len(rows)}] {name} has {len(all_emails)} addresses, using first: {all_emails[0]}")
-        to_email = all_emails[0]
+
+        if all_emails:
+            if len(all_emails) > 1:
+                print(f"  [{i}/{len(rows)}] {name} has {len(all_emails)} addresses, using first: {all_emails[0]}")
+            to_email = all_emails[0]
+        else:
+            to_email = ""
+            print(f"  [{i}/{len(rows)}] {name} — no email found, draft will use placeholder")
 
         # Slide content — prefer pre-converted markdown, fallback to URL fetch
         slide_md = (row.get("markdown", "") or "").strip()
@@ -307,7 +319,8 @@ def run_email_standalone(
         record = {
             "name":          name,
             "affiliation":   affiliation,
-            "to_email":      to_email,
+            "to_email":      to_email or "<email-not-found>",
+            "email_found":   bool(to_email),
             "sender_name":   sender_name,
             "sender_email":  sender_email,
             "subject":       subject,
@@ -337,7 +350,9 @@ def run_email_standalone(
     # Write manifest
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\n  [email] {len(results)} drafts saved to {out_dir}/ (manifest: manifest.json)")
+    n_with_email = sum(1 for r in results if r.get("email_found"))
+    print(f"\n  [email] {len(results)} drafts saved to {out_dir}/ "
+          f"({n_with_email} with email, {len(results)-n_with_email} placeholder) — manifest: manifest.json")
     print(f"  [email] tokens — in: {total_in:,}  out: {total_out:,}  total: {total_in + total_out:,}")
     for r in results:
         r["_tokens_in"]  = total_in
