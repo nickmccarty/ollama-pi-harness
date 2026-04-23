@@ -2405,8 +2405,29 @@ new Chart($('cumulCostChart'), {
   <div style="color:var(--muted);font-size:12px" id="noActiveRuns">No active runs.</div>
 </div>
 
+<!-- Pending queue -->
+<div style="display:flex;align-items:center;justify-content:space-between;margin-top:24px">
+  <div class="live-heading" style="font-size:12px;margin:0">Pending queue</div>
+  <button id="queueClearBtn"
+    style="display:none;background:none;border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:11px;padding:3px 10px;cursor:pointer">
+    Clear all
+  </button>
+</div>
+<div id="queueList" style="margin-bottom:24px">
+  <div class="sched-empty" id="noQueue" style="color:var(--muted);font-size:12px;padding:8px 0">No pending tasks.</div>
+  <table id="queueTable" style="display:none;width:100%;border-collapse:collapse;font-size:12px">
+    <tr>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border);width:32px">#</th>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Task</th>
+      <th style="text-align:left;padding:6px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Queued</th>
+      <th style="padding:6px 8px;border-bottom:1px solid var(--border);width:60px"></th>
+    </tr>
+    <tbody id="queueTbody"></tbody>
+  </table>
+</div>
+
 <!-- Scheduled tasks -->
-<div class="live-heading" style="margin-top:24px;font-size:12px">Scheduled tasks</div>
+<div class="live-heading" style="margin-top:8px;font-size:12px">Scheduled tasks</div>
 <div id="schedList" style="margin-bottom:32px">
   <div class="sched-empty" id="noSched">No scheduled tasks.</div>
   <table id="schedTable" style="display:none;width:100%;border-collapse:collapse;font-size:12px">
@@ -2535,8 +2556,10 @@ new Chart($('cumulCostChart'), {
     const task = $('liveTaskInput').value.trim();
     if (!task) { setMsg('Enter a task first.', 'var(--orange)'); return; }
     $('liveBtnRun').disabled = true;
-    setMsg('Starting…');
-    fetch('/api/run', {
+    setMsg('Queuing…');
+    // Route through /api/queue so tasks run sequentially.
+    // _maybe_launch_next() fires immediately if nothing is active.
+    fetch('/api/queue', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({task}),
@@ -2544,9 +2567,10 @@ new Chart($('cumulCostChart'), {
     .then(r => r.json())
     .then(d => {
       if (d.error) { setMsg(d.error, 'var(--red)'); return; }
-      setMsg(`Run ${d.run_id} started.`, 'var(--green)');
+      const pos = d.position;
+      setMsg(pos === 1 ? 'Started.' : `Queued at position ${pos}.`, 'var(--green)');
       $('liveTaskInput').value = '';
-      addRunCard({run_id: d.run_id, task, start_ts: new Date().toISOString(), status:'running'});
+      refreshQueue();
     })
     .catch(e => setMsg(String(e), 'var(--red)'))
     .finally(() => $('liveBtnRun').disabled = false);
@@ -2611,6 +2635,50 @@ new Chart($('cumulCostChart'), {
     .then(() => refreshSchedule());
   };
 
+  // ── Queue panel ──────────────────────────────────────────────────────────
+  function refreshQueue() {
+    fetch('/api/queue')
+    .then(r => r.json())
+    .then(d => {
+      const items    = d.items || [];
+      const noQ      = document.getElementById('noQueue');
+      const table    = document.getElementById('queueTable');
+      const tbody    = document.getElementById('queueTbody');
+      const clearBtn = document.getElementById('queueClearBtn');
+      if (!items.length) {
+        noQ.style.display = '';
+        table.style.display = 'none';
+        clearBtn.style.display = 'none';
+        return;
+      }
+      noQ.style.display = 'none';
+      table.style.display = '';
+      clearBtn.style.display = '';
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td style="padding:6px 8px;color:var(--muted)">${item.position}</td>
+          <td style="padding:6px 8px;color:var(--text);font-family:monospace;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+              title="${item.task.replace(/"/g,'&quot;')}">${item.name || item.task.slice(0,80)}</td>
+          <td style="padding:6px 8px;color:var(--muted)">${fmtTs(item.queued_at)}</td>
+          <td style="padding:6px 8px;text-align:right">
+            <button onclick="removeQueueItem('${item.queue_id}')"
+              style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--muted);font-size:11px;padding:2px 8px;cursor:pointer">
+              Remove
+            </button>
+          </td>
+        </tr>`).join('');
+    })
+    .catch(() => {});
+  }
+
+  window.removeQueueItem = function(id) {
+    fetch('/api/queue/' + id, {method:'DELETE'}).then(() => refreshQueue());
+  };
+
+  document.getElementById('queueClearBtn').addEventListener('click', () => {
+    fetch('/api/queue/clear', {method:'POST'}).then(() => refreshQueue());
+  });
+
   // ── Polling: pick up runs started externally (autoresearch, CLI, etc.) ────
   function pollActive() {
     fetch('/api/runs')
@@ -2623,8 +2691,9 @@ new Chart($('cumulCostChart'), {
 
   // Initial load + refresh every 10s
   refreshSchedule();
+  refreshQueue();
   pollActive();
-  setInterval(() => { refreshSchedule(); pollActive(); }, 10_000);
+  setInterval(() => { refreshSchedule(); refreshQueue(); pollActive(); }, 10_000);
 
   // Update elapsed time on active cards every second
   setInterval(() => {
@@ -2758,15 +2827,21 @@ new Chart($('cumulCostChart'), {
     approveBtn.disabled = true;
     approveBtn.textContent = 'Dispatching…';
     try {
-      const r = await fetch('/api/run', {
+      const r = await fetch('/api/queue', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({task}),
       });
       const d = await r.json();
       confirmEl.style.display = 'none';
-      setStatus('Run started: ' + (d.run_id || ''));
-      respEl.innerHTML = marked.parse(`Task dispatched to agent. Check the **Active runs** panel above.`);
+      const pos = d.position || 1;
+      setStatus(pos === 1 ? 'Task started.' : `Task queued at position ${pos}.`);
+      respEl.innerHTML = marked.parse(
+        pos === 1
+          ? 'Task dispatched. Check the **Active runs** panel above.'
+          : `Task queued at position **${pos}**. Check the **Pending queue** panel above.`
+      );
+      if (typeof refreshQueue === 'function') refreshQueue();
     } catch (e) {
       setStatus('Dispatch failed: ' + e.message);
     } finally {
