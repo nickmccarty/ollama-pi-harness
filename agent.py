@@ -959,7 +959,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1348,6 +1348,93 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
             _store_memory(memory, task, "playwright", trace.data, content)
 
+        def _handle_transcribe():
+            import re as _re
+            from pathlib import Path as _Path
+
+            print("\n[skill:transcribe] locating audio file...")
+            trace.data["task_type"] = "transcribe"
+
+            # Parse: /transcribe <filename or path> [to <output.md>]
+            raw = task.strip()
+            raw = _re.sub(r"^/transcribe\s*", "", raw, flags=_re.IGNORECASE).strip()
+
+            # Optional explicit output path: "... to path/to/output.md"
+            _out_match = _re.search(r"\bto\s+(\S+\.md)\s*$", raw, _re.IGNORECASE)
+            out_path = _out_match.group(1) if _out_match else None
+            audio_hint = raw[: _out_match.start()].strip() if _out_match else raw
+
+            if not audio_hint:
+                print("[error] usage: /transcribe <audio_file> [to <output.md>]")
+                trace.finish("ERROR")
+                return
+
+            # Locate the file: try as-is, then search common locations
+            _search_roots = [
+                os.getcwd(),
+                os.path.expanduser("~/Desktop"),
+                os.path.expanduser("~/Downloads"),
+                os.path.expanduser("~/Documents"),
+                os.path.expanduser("~/Music"),
+                os.path.expanduser("~/Videos"),
+            ]
+            audio_path = None
+            # First: treat as explicit path
+            if os.path.isfile(audio_hint):
+                audio_path = os.path.abspath(audio_hint)
+            else:
+                # Walk search roots for matching filename
+                _hint_name = _Path(audio_hint).name
+                for root in _search_roots:
+                    for dirpath, _, files in os.walk(root):
+                        for fname in files:
+                            if fname.lower() == _hint_name.lower():
+                                audio_path = os.path.join(dirpath, fname)
+                                break
+                        if audio_path:
+                            break
+                    if audio_path:
+                        break
+
+            if not audio_path:
+                print(f"[error] audio file not found: {audio_hint!r}")
+                print(f"  searched: {', '.join(_search_roots)}")
+                trace.finish("ERROR")
+                return
+
+            print(f"  [transcribe] found: {audio_path}")
+
+            # Transcribe
+            try:
+                from youtube_transcribe import _whisper_transcribe, _ensure_ffmpeg
+                _ensure_ffmpeg()
+                with trace.span("transcribe", model="whisper"):
+                    transcript = _whisper_transcribe(audio_path)
+            except Exception as _e:
+                print(f"[error] transcription failed: {_e}")
+                trace.finish("ERROR")
+                return
+
+            if not transcript:
+                print("[error] whisper returned empty transcript")
+                trace.finish("ERROR")
+                return
+
+            print(f"  [transcribe] {len(transcript)} chars transcribed")
+
+            # Build output markdown
+            stem = _Path(audio_path).stem
+            content = f"# Transcript: {stem}\n\n**Source:** `{audio_path}`\n\n---\n\n{transcript}\n"
+
+            # Determine output path
+            if not out_path:
+                safe_stem = _re.sub(r"[^\w\-]", "-", stem).strip("-").lower()
+                out_path = os.path.join(os.getcwd(), f"{safe_stem}-transcript.md")
+
+            write_output(content, out_path, trace)
+            trace.finish("PASS")
+            _store_memory(memory, task, "transcribe", trace.data, content)
+
         def _handle_sync_wiki():
             print("\n[skill:sync-wiki] extracting implementation facts from source code...")
             trace.data["task_type"] = "sync_wiki"
@@ -1403,6 +1490,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "orientation":  _handle_orientation,
             "sync-wiki":    _handle_sync_wiki,
             "playwright":   _handle_playwright,
+            "transcribe":   _handle_transcribe,
         }
 
         for _skill in explicit_skills:

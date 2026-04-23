@@ -215,6 +215,20 @@ REGISTRY: dict[str, dict] = {
         "auto":   None,   # explicit only — triggered by /playwright token or voice intent
     },
 
+    "transcribe": {
+        "description": (
+            "Transcribe a local audio file using OpenAI Whisper. "
+            "Searches common locations (Desktop, Downloads, Documents, Music, Videos) "
+            "if the file is not found at the given path. "
+            "Output saved to a user-specified .md file or auto-named <stem>-transcript.md "
+            "in the working directory. "
+            "Invocation: /transcribe <filename> [to <output.md>]"
+        ),
+        "hook":   "standalone",
+        "prompt": None,
+        "auto":   None,
+    },
+
 }
 
 # ---------------------------------------------------------------------------
