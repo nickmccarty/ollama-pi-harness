@@ -648,6 +648,49 @@ def api_voice():
     if not transcript:
         return jsonify({"error": "transcript empty"}), 400
 
+    # Note shortcut — "note: ..." bypasses LLM classification entirely.
+    # Save the wav to notes/ and return type=note immediately.
+    _note_match = re.match(r"^note[s]?\s*[:,-]?\s*", transcript, re.IGNORECASE)
+    if _note_match:
+        note_text  = transcript[_note_match.end():].strip() or transcript
+        notes_dir  = os.path.join(os.path.dirname(__file__), "notes")
+        os.makedirs(notes_dir, exist_ok=True)
+        ts         = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+        wav_dest   = os.path.join(notes_dir, f"op-note-{ts}.wav")
+        # Re-convert the original webm to a saved wav for archival
+        try:
+            import shutil as _sh, subprocess as _sp2
+            ffmpeg_exe2 = _sh.which("ffmpeg")
+            if not ffmpeg_exe2:
+                try:
+                    import imageio_ffmpeg as _iff
+                    ffmpeg_exe2 = _iff.get_ffmpeg_exe()
+                except ImportError:
+                    ffmpeg_exe2 = None
+            # write webm again from in-memory blob isn't possible here —
+            # encode the numpy audio_np back to wav via ffmpeg pipe
+            import numpy as _np2
+            import struct as _st
+            # Write PCM wav directly (no dependency on soundfile/scipy)
+            import wave as _wave
+            audio_int16 = (audio_np * 32768).clip(-32768, 32767).astype(_np2.int16)
+            with _wave.open(wav_dest, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(audio_int16.tobytes())
+        except Exception as _we:
+            print(f"[voice/note] wav save failed (non-fatal): {_we}")
+            wav_dest = None
+
+        return jsonify({
+            "type":       "note",
+            "transcript": transcript,
+            "note_text":  note_text,
+            "wav_path":   wav_dest,
+            "timestamp":  ts,
+        })
+
     try:
         import inference
         producer = os.environ.get("HARNESS_PRODUCER_MODEL", "pi-qwen-32b").strip()
@@ -735,6 +778,30 @@ Return exactly this JSON, no other text:
 
     parsed["transcript"] = transcript
     return jsonify(parsed)
+
+
+@app.route("/api/notes/save", methods=["POST"])
+def api_notes_save():
+    """Save a voice note as a markdown file. Body: {note_text, timestamp, filename?}"""
+    body      = request.get_json(force=True) or {}
+    note_text = (body.get("note_text") or "").strip()
+    ts        = body.get("timestamp") or datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    filename  = (body.get("filename") or f"op-note-{ts}.md").strip()
+    if not filename.endswith(".md"):
+        filename += ".md"
+
+    notes_dir = os.path.join(os.path.dirname(__file__), "notes")
+    os.makedirs(notes_dir, exist_ok=True)
+    out_path  = os.path.join(notes_dir, filename)
+
+    date_fmt  = ts[:10] if len(ts) >= 10 else ts
+    content   = f"# OP Note — {date_fmt}\n\n{note_text}\n"
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return jsonify({"saved": True, "path": out_path})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

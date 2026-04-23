@@ -997,6 +997,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </button>
     </div>
   </div>
+  <div id="voice-note-card" style="display:none">
+    <div style="padding:10px 16px 4px;font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.05em">OP NOTE</div>
+    <div style="padding:0 12px 8px">
+      <textarea id="voice-note-input" rows="5"
+        style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:8px;resize:vertical;font-family:monospace"></textarea>
+    </div>
+    <div style="padding:0 12px 4px;display:flex;align-items:center;gap:8px">
+      <input id="voice-note-filename" type="text" placeholder="filename (optional)"
+        style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:11px;padding:5px 8px;font-family:monospace" />
+    </div>
+    <div style="padding:6px 12px 12px;display:flex;gap:8px">
+      <button id="voice-note-save-btn"
+        style="flex:1;background:var(--accent);border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;padding:7px;cursor:pointer">
+        Save note
+      </button>
+      <button id="voice-note-discard-btn"
+        style="flex:1;background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:12px;padding:7px;cursor:pointer">
+        Discard
+      </button>
+    </div>
+  </div>
 </div>
 
 <div class="kpi-grid" id="kpi-grid"></div>
@@ -2675,6 +2696,24 @@ new Chart($('cumulCostChart'), {
   const taskInput   = document.getElementById('voice-task-input');
   const approveBtn  = document.getElementById('voice-approve-btn');
   const cancelBtn   = document.getElementById('voice-cancel-btn');
+  const noteCard    = document.getElementById('voice-note-card');
+  const noteInput   = document.getElementById('voice-note-input');
+  const noteFilename= document.getElementById('voice-note-filename');
+  const noteSaveBtn = document.getElementById('voice-note-save-btn');
+  const noteDiscardBtn = document.getElementById('voice-note-discard-btn');
+  let _noteTimestamp = '';
+
+  function showNote(d) {
+    _noteTimestamp = d.timestamp || '';
+    transcEl.textContent = '🎤 ' + (d.transcript || '');
+    noteInput.value = d.note_text || d.transcript || '';
+    noteFilename.value = '';
+    respEl.innerHTML = '';
+    copyRow.style.display = 'none';
+    confirmEl.style.display = 'none';
+    noteCard.style.display = '';
+    setStatus('Review note — save or discard');
+  }
 
   function showAnswer(d) {
     transcEl.textContent = (d.corrected_transcript || d.transcript)
@@ -2706,6 +2745,7 @@ new Chart($('cumulCostChart'), {
       const d = await r.json();
       if (d.error) { setStatus('Error: ' + d.error); return; }
       if (d.type === 'task') { showTaskConfirm(d); }
+      else if (d.type === 'note') { showNote(d); }
       else { showAnswer(d); }
     } catch (e) {
       setStatus('Request failed: ' + e.message);
@@ -2738,6 +2778,36 @@ new Chart($('cumulCostChart'), {
   cancelBtn.addEventListener('click', () => {
     confirmEl.style.display = 'none';
     setStatus('Cancelled');
+  });
+
+  noteSaveBtn.addEventListener('click', async () => {
+    const text = noteInput.value.trim();
+    if (!text) return;
+    const filename = noteFilename.value.trim() || '';
+    noteSaveBtn.disabled = true;
+    noteSaveBtn.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/notes/save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({note_text: text, timestamp: _noteTimestamp, filename}),
+      });
+      const d = await r.json();
+      noteCard.style.display = 'none';
+      const shortPath = (d.path || '').split(/[\\/]/).slice(-2).join('/');
+      setStatus('Note saved');
+      respEl.innerHTML = marked.parse(`Note saved to \`${shortPath}\``);
+    } catch (e) {
+      setStatus('Save failed: ' + e.message);
+    } finally {
+      noteSaveBtn.disabled = false;
+      noteSaveBtn.textContent = 'Save note';
+    }
+  });
+
+  noteDiscardBtn.addEventListener('click', () => {
+    noteCard.style.display = 'none';
+    setStatus('Note discarded');
   });
 
   fab.addEventListener('click', () => {
