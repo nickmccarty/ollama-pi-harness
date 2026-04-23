@@ -1071,34 +1071,62 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 return
 
             # --- Single contact mode ---
-            # Find email address (token containing @)
+            # Email address identified by @ token. If absent, agent will search online.
             tokens = raw.split()
             email_token = next((t for t in tokens if "@" in t and "." in t.split("@")[-1]), "")
-            if not email_token:
-                print("[error] /email usage:\n"
-                      "  Single: /email <name> <email@x.com> <file/url/text> <goal>\n"
-                      "  Batch:  /email <contacts.csv> <goal>")
-                trace.finish("ERROR")
-                return
 
-            email_idx = tokens.index(email_token)
-            name = " ".join(tokens[:email_idx]).strip()
-            rest = tokens[email_idx + 1:]
+            if email_token:
+                # Form 1: email address provided
+                email_idx   = tokens.index(email_token)
+                name        = " ".join(tokens[:email_idx]).strip()
+                rest        = tokens[email_idx + 1:]
+                source      = ""
+                goal_tokens = rest
+                if rest:
+                    first = rest[0].strip('"')
+                    if first.startswith("http") or any(first.endswith(ext) for ext in _SOURCE_EXTS):
+                        source = first
+                        goal_tokens = rest[1:]
+                goal = " ".join(goal_tokens).strip().strip('"')
+                if not goal:
+                    goal = f"reach out to {name}"
+                print(f"  [email] single mode (email known) — to={email_token}  goal={goal[:60]}")
+            else:
+                # Form 2: no email — parse name + context, search online for address
+                import re as _re2
+                # Name = leading words up to first quoted string or recognisable break
+                # Heuristic: first quoted segment is context, rest is goal
+                quoted = _re2.findall(r'"([^"]+)"', raw)
+                # Strip all quoted segments to isolate name + goal
+                stripped = _re2.sub(r'"[^"]+"', "", raw).split()
+                # Name is the leading capitalised words (stop at lowercase verb words)
+                name_parts = []
+                for tok in stripped:
+                    if tok[0].isupper() or (name_parts and tok.lower() in ("de","van","von","le","la")):
+                        name_parts.append(tok)
+                    else:
+                        break
+                name        = " ".join(name_parts).strip() or stripped[0] if stripped else "Unknown"
+                context     = " ".join(quoted)          # from quoted strings in task
+                goal_words  = [t for t in stripped if t not in name_parts]
+                goal        = " ".join(goal_words).strip() or f"reach out to {name}"
 
-            # Find source: URL or recognisable file extension comes before the goal text
-            source = ""
-            goal_tokens = rest
-            if rest:
-                first = rest[0]
-                if first.startswith("http") or any(first.endswith(ext) for ext in _SOURCE_EXTS):
-                    source = first
-                    goal_tokens = rest[1:]
+                print(f"  [email] single mode (find email) — name={name}  context={context[:60]}")
+                # Web search for email address
+                from search import web_search as _ws
+                _query   = f'"{name}" email contact {context[:60]}'
+                _results = _ws(_query)
+                _combined = " ".join(r.get("body", "") for r in (_results or []))
+                # Extract first email-looking string from results
+                _found = _re2.findall(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", _combined)
+                email_token = _found[0] if _found else ""
+                if email_token:
+                    print(f"  [email] found address via web search: {email_token}")
+                else:
+                    print(f"  [email] no email found online — draft will use placeholder")
+                # Use search results excerpt as source context
+                source = _combined[:1200] if _combined else context
 
-            goal = " ".join(goal_tokens).strip()
-            if not goal:
-                goal = f"reach out to {name}"
-
-            print(f"  [email] single mode — to={email_token}  source={source or '(none)'}  goal={goal[:60]}")
             with trace.span("email_single", model=producer_model):
                 result = generate_single_email(
                     name=name,
@@ -1109,6 +1137,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                     producer_model=producer_model,
                     sender_name=os.environ.get("SENDER_NAME", ""),
                     sender_email=os.environ.get("SENDER_EMAIL", ""),
+                    sender_company=os.environ.get("SENDER_COMPANY", ""),
                 )
             if result:
                 trace.data.update({"task_type": "email", "email_drafts": 1,

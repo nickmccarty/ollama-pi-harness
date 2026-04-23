@@ -708,13 +708,23 @@ def api_voice():
         orientation = _get_orientation()
         orientation_block = f"\n\n## Project orientation\n\n{orientation}" if orientation else ""
 
+        _sender_name    = os.environ.get("SENDER_NAME", "Nick")
+        _sender_email   = os.environ.get("SENDER_EMAIL", "")
+        _sender_company = os.environ.get("SENDER_COMPANY", "")
+
         system_msg = f"""You are the voice interface for the Harness Engineering agentic research pipeline.
 
 Your job is to interpret the user's spoken request and return a JSON object — nothing else, no markdown fences.
 
+## Sender context (always available for email tasks)
+Name: {_sender_name}
+Email: {_sender_email}
+Company: {_sender_company}
+
 ## Classification rules
 
 Classify as **"task"** when the user wants the agent to:
+- Send or draft an email (any mention of "email", "reach out", "follow up", "write to")
 - Search the web, fetch a URL, or find information
 - Write, save, or generate a file
 - Run an experiment, analysis, or pipeline operation
@@ -723,6 +733,31 @@ Classify as **"task"** when the user wants the agent to:
 Classify as **"answer"** when the user asks a question about:
 - The harness itself, its models, experiments, or architecture
 - Something answerable from the orientation context without web access
+
+## Email task rules
+
+When the user wants to send or draft an email, the task_string must start with `/email`.
+Three forms — choose the right one based on what information is available:
+
+**Form 1 — single contact, email address known:**
+`/email <Full Name> <email@domain.com> "<context about this person and the relationship>" <goal>`
+Example: `/email Frank Jones frank@sumbiz.com "sales rep met at GeoWeek, works in geospatial data" follow up after GeoWeek meeting`
+
+**Form 2 — single contact, email address NOT known (agent will search online):**
+`/email <Full Name> "<company or role context>" "<relationship/meeting context>" <goal>`
+(Omit the email address entirely — the agent will find it via web search)
+Example: `/email Frank Jones "works for Esri in sales" "met at GeoWeek 2026" follow up and introduce our platform`
+
+**Form 3 — batch CSV:**
+`/email <filename.csv> <goal>`
+Example: `/email geo-week-talks.csv thank speakers for their presentations and introduce our geospatial AI platform`
+
+Rules:
+- Wrap multi-word context strings in double quotes in the task_string.
+- For batch mode, common CSV filenames: geo-week-talks.csv, geoweek-talks.csv — pick the most likely one.
+- Include the meeting context, relationship, and goal naturally — the model uses this to personalise.
+- Do NOT add "save to X.md" for /email tasks — they save to email_drafts/ automatically.
+- The `suggested_path` field should be "email_drafts/" for all email tasks.
 
 ## ASR correction
 
@@ -735,13 +770,14 @@ Speech-to-text often garbles brand names and technical terms. Correct them:
 - "pie torch" → PyTorch
 - "lama" / "llama" → Llama
 - "fast api" → FastAPI
+- "geo week" / "geoweek" → GeoWeek
+- "esri" → Esri
 Apply similar corrections for any other obvious misrecognitions.
 
-## Output path rule
+## Output path rule (non-email tasks)
 
-Agent tasks must end with "save to <path>.md".
+Non-email agent tasks must end with "save to <path>.md".
 If the user didn't specify a path, invent a sensible snake_case filename in the working directory.
-Example: "langchain-latest-blog-post.md"
 
 ## Response format
 
@@ -751,8 +787,8 @@ Return exactly this JSON, no other text:
   "type": "task" | "answer",
   "corrected_transcript": "<ASR-corrected version of what the user said>",
   "reasoning": "<one sentence: what you understood and any corrections made>",
-  "task_string": "<complete agent task string ending in save to X.md — only for type=task>",
-  "suggested_path": "<relative filename like langchain-blog.md — only for type=task>",
+  "task_string": "<complete agent task string — see rules above>",
+  "suggested_path": "<relative path — email_drafts/ for email, X.md otherwise>",
   "response": "<markdown answer — only for type=answer>"
 }}{orientation_block}"""
 
