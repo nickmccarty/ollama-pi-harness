@@ -177,9 +177,17 @@ def build_payload(runs):
     by_date_input  = defaultdict(int)
     by_date_output = defaultdict(int)
     for r in runs:
-        date = (r.get("timestamp") or "")[:10]
-        if not date:
+        ts_raw = (r.get("timestamp") or "")
+        if not ts_raw:
             continue
+        try:
+            # Timestamps are UTC; convert to local date for bucketing
+            dt_utc = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            if dt_utc.tzinfo is None:
+                dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+            date = dt_utc.astimezone().strftime("%Y-%m-%d")
+        except ValueError:
+            date = ts_raw[:10]
         by_date_input[date]  += r.get("input_tokens", 0) or 0
         by_date_output[date] += r.get("output_tokens", 0) or 0
     dates_sorted = sorted(set(by_date_input) | set(by_date_output))
@@ -2428,7 +2436,7 @@ new Chart($('cumulCostChart'), {
 
 <!-- MCP parallel tasks -->
 <div class="live-heading" style="margin-top:24px;font-size:12px">MCP parallel tasks</div>
-<div id="mcpLog" style="font-family:monospace;font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:260px;overflow-y:auto;margin-bottom:16px">
+<div id="mcpLog" style="font-family:monospace;font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:520px;overflow-y:auto;margin-bottom:16px">
   <span style="color:var(--muted)">No MCP tasks yet.</span>
 </div>
 

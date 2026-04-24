@@ -271,6 +271,34 @@ Six improvements shipped:
 - Applied to both `compress_and_store()` and `store_direct()`.
 - Motivation: web-fetched or synthesised content riding into future sessions as trusted memory context via a poisoned page. Reuses existing injection patterns — no new logic.
 
+## [2026-04-23] build | Session 27 — llama-server parallel backend, MCP log panel, dashboard timezone fix
+
+**llama-server parallel inference (qwen3-8b, 8 slots):**
+- Ollama serializes all requests; llama.cpp `--parallel N --cont-batching` genuinely interleaves N inference streams on one GPU via continuous batching.
+- RTX 5000 Ada (16GB): qwen3-8b Q4_K_M (~4.4GB weights) leaves ~10GB for KV cache → 8 parallel slots at 8192 ctx each.
+- Theoretical: 5 subagent tasks in ~240s wall-clock vs ~20min sequential through Ollama (5x speedup).
+- GGUF extracted from Ollama blob: `~/.ollama/models/blobs/sha256-2bada8a...` → `models/qwen3-8b.gguf`.
+- llama-server found pre-built at `llama.cpp/build/bin/llama-server.exe` (CUDA-enabled).
+- WSL port conflict: port 8080 intercepted by `wslrelay.exe`; moved to 8082.
+- `.env` updated: `HARNESS_ENDPOINTS={"qwen3-8b": {"url": "http://localhost:8082/v1", ...}}` + `HARNESS_PRODUCER_MODEL=qwen3-8b`. `inference.py`'s existing `HARNESS_ENDPOINTS` routing handles the rest.
+- `subagent_demo_v2.py`: default workers bumped from 3 → 8.
+
+**MCP log panel (dashboard):**
+- `mcp_server.py`: `_run_subprocess` replaced `subprocess.run` with `Popen` + line-by-line streaming; status lines (`[agent]`, `[research]`, etc.) written to `mcp_tasks.jsonl` via `_log_event()`. `PYTHONUNBUFFERED=1` + `PYTHONIOENCODING=utf-8` + `encoding="utf-8"` on Popen fix real-time delivery and Unicode characters.
+- `server.py`: `/api/mcp/log` endpoint tails `mcp_tasks.jsonl` with optional `?since=` filter.
+- `dashboard.py`: "MCP parallel tasks" panel polls `/api/mcp/log` every 5s; renders start/line/done/fail events live. Panel height 520px.
+- Fixed: edits initially went to `dashboard.html` (static file); Flask serves from `dashboard.py` via `db.render()`.
+
+**Dashboard timezone fix:**
+- Token-by-date chart bucketed timestamps as UTC dates; at PDT (UTC-7) runs after 5PM appeared under next day.
+- Fix: `datetime.fromisoformat(ts).astimezone().strftime("%Y-%m-%d")` converts UTC → local before date bucketing.
+
+**MCP server fixes:**
+- `mcp_server.py --http`: FastMCP ignores `FASTMCP_PORT` env var at `run()` time; switched to `uvicorn.run(mcp.streamable_http_app(), host=..., port=...)`.
+- `subagent_demo_v2.py`: full MCP session handshake (initialize → Mcp-Session-Id → initialized → tools/call); SSE response parsing (`event: message\r\ndata: {...}`); `Accept: application/json, text/event-stream` header.
+
+**files modified:** `mcp_server.py`, `server.py`, `dashboard.py`, `subagent_demo_v2.py`, `.env` (gitignored)
+
 ## [2026-04-22] build | Session 25 — bug fixes, qwen3_think_mode findings, playwright rewrite
 
 **qwen3_think_mode experiment — CONFIRMED (delta=+0.330):**

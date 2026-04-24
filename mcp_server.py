@@ -167,13 +167,18 @@ def _run_subprocess(script: str, task: str, timeout: int = 600,
 
     _log_event(task_id, label, "start", task[:120])
 
+    _env = os.environ.copy()
+    _env["PYTHONUNBUFFERED"] = "1"
+    _env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.Popen(
-        [sys.executable, script, task_with_path],
+        [sys.executable, "-u", script, task_with_path],
         cwd=_BASE_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=os.environ.copy(),
+        encoding="utf-8",
+        errors="replace",
+        env=_env,
     )
 
     stdout_lines: list[str] = []
@@ -182,7 +187,9 @@ def _run_subprocess(script: str, task: str, timeout: int = 600,
         for line in proc.stdout:
             line = line.rstrip("\n")
             stdout_lines.append(line)
-            _log_event(task_id, label, "line", line)
+            # Only log agent status lines — skip synthesized content
+            if line.startswith("["):
+                _log_event(task_id, label, "line", line)
             if not run_id:
                 m = _re.search(r"run_id[=:\s]+([0-9T Z\-a-f]+)", line)
                 if m:

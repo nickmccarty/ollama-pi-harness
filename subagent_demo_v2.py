@@ -317,7 +317,7 @@ def main():
                        help="Submit to Flask queue (default, one at a time)")
     group.add_argument("--parallel", action="store_true",
                        help="Submit via MCP HTTP server (concurrent execution)")
-    parser.add_argument("--workers", type=int, default=3,
+    parser.add_argument("--workers", type=int, default=8,
                         help="Max concurrent workers in --parallel mode (default: 3)")
     args = parser.parse_args()
 
