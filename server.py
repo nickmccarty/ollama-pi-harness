@@ -52,8 +52,9 @@ except ImportError:
     CRON_OK = False
     print("[server] APScheduler not found — cron scheduling disabled (pip install apscheduler)")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-app  = Flask(__name__)
+HERE         = os.path.dirname(os.path.abspath(__file__))
+_MCP_LOG     = os.path.join(HERE, "mcp_tasks.jsonl")
+app          = Flask(__name__)
 
 # ── Project / session lifecycle ───────────────────────────────────────────────
 
@@ -381,6 +382,28 @@ def api_queue_clear():
         count = len(_queue)
         _queue.clear()
     return jsonify({"cleared": count})
+
+
+@app.route("/api/mcp/log")
+def api_mcp_log():
+    n = int(request.args.get("n", 200))
+    since = request.args.get("since", "")  # ISO ts filter
+    events = []
+    try:
+        with open(_MCP_LOG, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    if not since or ev.get("ts", "") > since:
+                        events.append(ev)
+                except json.JSONDecodeError:
+                    pass
+    except FileNotFoundError:
+        pass
+    return jsonify({"events": events[-n:]})
 
 
 @app.route("/api/schedule", methods=["GET"])

@@ -62,7 +62,9 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _AGENT_SCRIPT = os.path.join(_BASE_DIR, "agent.py")
 _ORCH_SCRIPT  = os.path.join(_BASE_DIR, "orchestrator.py")
 _RUNS_PATH    = os.path.join(_BASE_DIR, "runs.jsonl")
+_MCP_LOG_PATH = os.path.join(_BASE_DIR, "mcp_tasks.jsonl")
 _RECENT_N     = int(os.environ.get("MCP_RECENT_RUNS", 10))
+_log_lock     = threading.Lock()
 
 # Security limits
 _TASK_MAX_CHARS   = int(os.environ.get("MCP_TASK_MAX_CHARS", 2000))
@@ -142,18 +144,55 @@ def _ensure_output_path(task: str) -> tuple[str, str]:
     return f"{task} save to {tmp}", tmp
 
 
-def _run_subprocess(script: str, task: str, timeout: int = 600) -> dict:
-    """Run agent.py or orchestrator.py and return {content, ok, run_id, elapsed}."""
+def _log_event(task_id: str, label: str, event: str, text: str = "") -> None:
+    """Append one event to mcp_tasks.jsonl (thread-safe)."""
+    entry = json.dumps({
+        "ts":      time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "task_id": task_id,
+        "label":   label,
+        "event":   event,
+        "text":    text,
+    })
+    with _log_lock:
+        with open(_MCP_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+
+
+def _run_subprocess(script: str, task: str, timeout: int = 600,
+                    task_id: str = "", label: str = "") -> dict:
+    """Run agent.py or orchestrator.py, stream stdout to mcp_tasks.jsonl."""
+    import re as _re
     task_with_path, output_path = _ensure_output_path(task)
     t0 = time.time()
-    result = subprocess.run(
+
+    _log_event(task_id, label, "start", task[:120])
+
+    proc = subprocess.Popen(
         [sys.executable, script, task_with_path],
         cwd=_BASE_DIR,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
         env=os.environ.copy(),
     )
+
+    stdout_lines: list[str] = []
+    run_id = ""
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            stdout_lines.append(line)
+            _log_event(task_id, label, "line", line)
+            if not run_id:
+                m = _re.search(r"run_id[=:\s]+([0-9T Z\-a-f]+)", line)
+                if m:
+                    run_id = m.group(1).strip()
+        proc.wait(timeout=max(1, timeout - int(time.time() - t0)))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _log_event(task_id, label, "fail", "timeout")
+
+    stderr_tail = (proc.stderr.read() or "")[-500:]
     elapsed = round(time.time() - t0, 1)
 
     content = ""
@@ -162,18 +201,18 @@ def _run_subprocess(script: str, task: str, timeout: int = 600) -> dict:
         with open(expanded, "r", encoding="utf-8") as f:
             content = f.read()
 
-    # Extract run_id from stdout if available
-    import re as _re
-    run_id_m = _re.search(r"run_id[=:\s]+([0-9T Z\-a-f]+)", result.stdout)
-    run_id = run_id_m.group(1).strip() if run_id_m else ""
+    ok = proc.returncode == 0 and bool(content.strip())
+    _log_event(task_id, label, "done" if ok else "fail",
+               f"elapsed={elapsed}s rc={proc.returncode}")
 
+    stdout_text = "\n".join(stdout_lines)
     return {
-        "content":  content,
-        "ok":       result.returncode == 0 and bool(content.strip()),
-        "run_id":   run_id,
-        "elapsed":  elapsed,
-        "stdout":   result.stdout[-2000:] if result.stdout else "",
-        "stderr":   result.stderr[-500:]  if result.stderr else "",
+        "content": content,
+        "ok":      ok,
+        "run_id":  run_id,
+        "elapsed": elapsed,
+        "stdout":  stdout_text[-2000:],
+        "stderr":  stderr_tail,
     }
 
 
@@ -218,10 +257,11 @@ def run_task(task: str, api_key: str = "") -> str:
     if not ok:
         return f"[error] {err}"
 
-    # Block until a slot is free — callers queue here rather than getting an error
+    import uuid as _uuid
+    task_id = _uuid.uuid4().hex[:8]
     _semaphore.acquire(blocking=True)
     try:
-        result = _run_subprocess(_AGENT_SCRIPT, task)
+        result = _run_subprocess(_AGENT_SCRIPT, task, task_id=task_id, label="run_task")
     finally:
         _semaphore.release()
 
@@ -253,9 +293,12 @@ def run_orchestrated(task: str, api_key: str = "") -> str:
     if not ok:
         return f"[error] {err}"
 
+    import uuid as _uuid
+    task_id = _uuid.uuid4().hex[:8]
     _semaphore.acquire(blocking=True)
     try:
-        result = _run_subprocess(_ORCH_SCRIPT, task, timeout=1800)
+        result = _run_subprocess(_ORCH_SCRIPT, task, timeout=1800,
+                                 task_id=task_id, label="run_orchestrated")
     finally:
         _semaphore.release()
 
@@ -334,15 +377,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.http:
-        os.environ.setdefault("FASTMCP_PORT", str(args.port))
-        os.environ.setdefault("FASTMCP_HOST", args.host)
+        import uvicorn
         print(f"[mcp_server] streamable-http on {args.host}:{args.port}")
-        mcp.run(transport="streamable-http")
+        uvicorn.run(mcp.streamable_http_app(), host=args.host, port=args.port)
     elif args.sse:
-        os.environ.setdefault("FASTMCP_PORT", str(args.port))
-        os.environ.setdefault("FASTMCP_HOST", args.host)
+        import uvicorn
         print(f"[mcp_server] SSE on {args.host}:{args.port}")
-        mcp.run(transport="sse")
+        uvicorn.run(mcp.sse_app(), host=args.host, port=args.port)
     else:
         print("[mcp_server] stdio transport (for Claude Code / local clients)")
         mcp.run(transport="stdio")

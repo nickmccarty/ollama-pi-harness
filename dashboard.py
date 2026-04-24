@@ -2426,6 +2426,12 @@ new Chart($('cumulCostChart'), {
   </table>
 </div>
 
+<!-- MCP parallel tasks -->
+<div class="live-heading" style="margin-top:24px;font-size:12px">MCP parallel tasks</div>
+<div id="mcpLog" style="font-family:monospace;font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:260px;overflow-y:auto;margin-bottom:16px">
+  <span style="color:var(--muted)">No MCP tasks yet.</span>
+</div>
+
 <!-- Scheduled tasks -->
 <div class="live-heading" style="margin-top:8px;font-size:12px">Scheduled tasks</div>
 <div id="schedList" style="margin-bottom:32px">
@@ -2689,11 +2695,40 @@ new Chart($('cumulCostChart'), {
     .catch(() => {});
   }
 
-  // Initial load + refresh every 10s
+  // ── MCP log panel ────────────────────────────────────────────────────────
+  let _mcpSince = '';
+  const _mcpColors = { start:'var(--blue)', done:'var(--green)', fail:'var(--red)', line:'var(--muted)' };
+  function pollMcpLog() {
+    const url = '/api/mcp/log' + (_mcpSince ? '?since=' + encodeURIComponent(_mcpSince) : '');
+    fetch(url).then(r => r.json()).then(d => {
+      const box = document.getElementById('mcpLog');
+      if (!box) return;
+      const evts = (d.events || []).filter(ev => ev.event !== 'line' || ev.text.trim());
+      if (!evts.length) return;
+      if (box.querySelector('span')) box.innerHTML = '';
+      evts.forEach(ev => {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:1px 0;white-space:pre-wrap;word-break:break-all';
+        const color = _mcpColors[ev.event] || 'var(--text)';
+        const ts = (ev.ts || '').slice(11, 19);
+        const isLine = ev.event === 'line';
+        const prefix = isLine
+          ? '<span style="color:var(--muted)">'+xesc(ev.label||'')+'› </span>'
+          : '<span style="color:'+color+';font-weight:600">['+ev.event+'] </span><span style="color:var(--blue)">'+xesc(ev.label||'')+' </span>';
+        row.innerHTML = '<span style="color:var(--muted)">'+ts+' </span>'+prefix+'<span style="color:'+(isLine?'var(--text)':color)+'">'+xesc(ev.text||'')+'</span>';
+        box.appendChild(row);
+        if (ev.ts > _mcpSince) _mcpSince = ev.ts;
+      });
+      box.scrollTop = box.scrollHeight;
+    }).catch(() => {});
+  }
+
+  // Initial load + refresh every 5s
   refreshSchedule();
   refreshQueue();
   pollActive();
-  setInterval(() => { refreshSchedule(); refreshQueue(); pollActive(); }, 10_000);
+  pollMcpLog();
+  setInterval(() => { refreshSchedule(); refreshQueue(); pollActive(); pollMcpLog(); }, 5_000);
 
   // Update elapsed time on active cards every second
   setInterval(() => {

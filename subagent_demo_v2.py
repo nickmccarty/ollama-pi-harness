@@ -176,23 +176,61 @@ def run_sequential():
 # Parallel mode — MCP HTTP server
 # ---------------------------------------------------------------------------
 
-def _mcp_call_tool(tool: str, arguments: dict, timeout: int = 1800) -> str:
-    """Call a tool on the MCP streamable-http server via JSON-RPC."""
+_MCP_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+}
+
+def _mcp_post(payload: dict, session_id: str = "", timeout: int = 30) -> tuple[dict, str]:
+    """POST to MCP endpoint, return (parsed_body, session_id)."""
+    headers = dict(_MCP_HEADERS)
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+    req = urllib.request.Request(
+        f"{MCP_URL}/mcp",
+        data=json.dumps(payload).encode(),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        sid = resp.headers.get("Mcp-Session-Id", session_id)
+        raw = resp.read()
+        text = raw.decode("utf-8", errors="replace")
+        # SSE envelope: find first "data: ..." line
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                text = line[5:].strip()
+                break
+        return json.loads(text), sid
+
+
+def _mcp_open_session() -> str:
+    """Run MCP initialize + initialized handshake, return session_id."""
     import uuid
-    payload = json.dumps({
+    body, sid = _mcp_post({
+        "jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05",
+                   "clientInfo": {"name": "subagent_demo", "version": "1.0"},
+                   "capabilities": {}},
+    })
+    # Send initialized notification (no response expected)
+    try:
+        _mcp_post({"jsonrpc": "2.0", "method": "notifications/initialized"}, session_id=sid, timeout=5)
+    except Exception:
+        pass
+    return sid
+
+
+def _mcp_call_tool(tool: str, arguments: dict, timeout: int = 1800) -> str:
+    """Open a session then call a tool on the MCP streamable-http server."""
+    import uuid
+    sid = _mcp_open_session()
+    body, _ = _mcp_post({
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
         "method": "tools/call",
         "params": {"name": tool, "arguments": arguments},
-    }).encode()
-    req = urllib.request.Request(
-        f"{MCP_URL}/mcp",
-        data=payload,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read())
+    }, session_id=sid, timeout=timeout)
     # MCP response: {"result": {"content": [{"type": "text", "text": "..."}]}}
     content = body.get("result", {}).get("content", [])
     return content[0].get("text", "[no output]") if content else str(body)
@@ -200,21 +238,8 @@ def _mcp_call_tool(tool: str, arguments: dict, timeout: int = 1800) -> str:
 
 def _check_mcp_server() -> bool:
     try:
-        # MCP initialize handshake
-        payload = json.dumps({
-            "jsonrpc": "2.0", "id": "ping", "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05",
-                       "clientInfo": {"name": "subagent_demo", "version": "1.0"},
-                       "capabilities": {}},
-        }).encode()
-        req = urllib.request.Request(
-            f"{MCP_URL}/mcp",
-            data=payload,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5):
-            return True
+        _mcp_open_session()
+        return True
     except Exception:
         return False
 
