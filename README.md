@@ -104,6 +104,33 @@ VLLM_MODEL_MAP={"pi-qwen-32b":"Qwen/Qwen2.5-14B-Instruct-AWQ","pi-qwen":"Qwen/Qw
 
 See `requirements-vllm.txt` for pinned deps and known version constraints.
 
+**llama-server / GGUF (alternative to vLLM — native Windows, no WSL2 required):**
+
+Download a GGUF and run llama-server directly. `IQ3_S` (~13.7GB) fits a 16GB GPU with headroom for KV cache.
+
+```bash
+# Build llama.cpp with CUDA (must be recent — pre-b8914 crashes on Qwen3 MoE rope metadata)
+git clone https://github.com/ggerganov/llama.cpp && cd llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release -j
+
+# Start server (ctx-size 16384 gives 8192 tokens/slot with parallel=2)
+llama.cpp\build\bin\llama-server.exe \
+  --model models\Qwen3.6-35B-A3B-UD-IQ3_S.gguf \
+  --ctx-size 16384 \
+  --parallel 2 \
+  --port 8083 \
+  -ngl 99
+```
+
+Then in `.env`:
+```
+HARNESS_ENDPOINTS={"qwen3.6-35b": {"url": "http://localhost:8083/v1", "model_id": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "backend": "llamacpp"}}
+HARNESS_PRODUCER_MODEL=qwen3.6-35b
+```
+
+The `model_id` must match exactly what llama-server reports at `/v1/models` (the filename without path). Thinking mode is off by default; set `HARNESS_PRODUCER_THINK=1` to enable it (doubles `num_predict` budget to 16384).
+
 **Python environment (conda):**
 ```bash
 conda create -n ollama-pi python=3.11
@@ -278,6 +305,7 @@ python inspect_run.py --all    # summary table of all runs
 | Vision | `llama3.2-vision` | Image-to-text preprocessing only; does not replace producer |
 | GitHub skill | `llama3.2:3b` | Fast commit/PR/issue generation; override with `GITHUB_MODEL` env var |
 | vLLM (16GB laptop) | `Qwen/Qwen2.5-14B-Instruct-AWQ` | AWQ int4, ~9.4GB loaded; all harness tags remapped via `VLLM_MODEL_MAP` |
+| llama-server (16GB laptop) | `qwen3.6-35b` → `Qwen3.6-35B-A3B-UD-IQ3_S.gguf` | IQ3_S 13.7GB; port 8083; `HARNESS_ENDPOINTS`; native Windows, no WSL2 |
 
 **Producer candidates on-disk (not yet default):**
 

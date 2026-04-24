@@ -1954,3 +1954,82 @@ Model loads in ~15min on first run (downloads ~10GB), ~2min thereafter from cach
 | `test_inference_shim.py` | Unit test: model map resolution, live call, usage field extraction |
 | `test_harness_vllm.bat` | End-to-end harness test: shim test + agent run + output check |
 | `test_vllm.sh` | WSL2 smoke test: `/health` + `/v1/chat/completions` curl |
+
+## Session 28 — 2026-04-24: Qwen3.6-35B on llama-server + bench fixes
+
+### Qwen3.6-35B-A3B via llama-server (native Windows, no WSL2)
+
+**Model:** `Qwen3.6-35B-A3B-UD-IQ3_S.gguf` — 13.7GB, fits 16GB VRAM with ~2.3GB headroom.
+
+**Quant selection rationale for 16GB (RTX 5000 Ada, 16375 MiB):**
+
+| Quant | Size | Per-slot ctx (parallel=2) |
+|-------|------|--------------------------|
+| UD-IQ3_XXS | 13.2 GB | max headroom, lowest quality |
+| UD-IQ3_S | 13.7 GB | best quality that fits safely |
+| UD-Q3_K_S | 15.4 GB | only ~600 MB headroom — too tight |
+| UD-Q3_K_M | 16.6 GB | exceeds VRAM |
+
+**Known gotcha — llama.cpp version:** build b8914 crashes with:
+```
+error loading model hyperparameters: key qwen35moe.rope.dimension_sections has wrong array length; expected 4, got 3
+```
+This is a version mismatch: the GGUF stores 3 mrope sections `[11, 11, 10]` but b8914 expects 4. Fix: rebuild llama.cpp from latest main (`git pull && cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j`).
+
+**Server startup:**
+```bash
+llama.cpp\build\bin\llama-server.exe \
+  --model models\Qwen3.6-35B-A3B-UD-IQ3_S.gguf \
+  --ctx-size 16384 \
+  --parallel 2 \
+  --port 8083 \
+  -ngl 99
+```
+
+`--ctx-size 16384` with `--parallel 2` gives 8192 tokens per slot. The synthesis step sends ~5700 tokens so 4096 per slot (the original `--ctx-size 4096`) is too small. KV cache for this model is tiny (~300MB at 16384 ctx) because only 10 of 40 layers use full attention (`full_attention_interval=4`).
+
+**Harness wiring (`.env`):**
+```
+HARNESS_ENDPOINTS={"qwen3-8b": {...}, "qwen3.6-35b": {"url": "http://localhost:8083/v1", "model_id": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "backend": "llamacpp"}}
+HARNESS_PRODUCER_MODEL=qwen3.6-35b
+```
+
+The `model_id` must match the filename as reported by llama-server's `/v1/models` endpoint.
+
+### Thinking mode
+
+`qwen3.6-35b` matches `_THINKING_MODELS` in `agent.py`, so `think=False` is set by default to protect the token budget. To enable:
+
+```bash
+HARNESS_PRODUCER_THINK=1 python agent.py "<task>"
+```
+
+When enabled, `num_predict` doubles (8192 → 16384) because thinking tokens consume budget before output starts. Expect ~2× latency on synthesis steps.
+
+### bench_model_compare.py — task_type mismatch bug
+
+`run_task_live()` was looking up the run record by `task_type == "T_A"` (bench IDs), but `agent.py` writes semantic types (`"research"`, `"best_practices"`, `"enumerated"`) to `runs.jsonl`. The lookup always returned `{}`, giving 0% pass / NaN scores across all tasks.
+
+Fix: snapshot `pre_count = len(load_runs())` before the subprocess call, then find the first new record for that model after the run:
+```python
+new_runs = [r for r in all_runs[pre_count:] if r.get("producer_model") == model]
+run_record = new_runs[-1] if new_runs else {}
+```
+
+`historical_stats()` had the same bug. Fixed to match by `output_path` (from `spec["output"]`) rather than `task_type` string.
+
+### Initial benchmark results (qwen3.6-35b, think off, n=1 per task)
+
+| Task | Score | Pass | KB | Dur(s) |
+|------|-------|------|----|--------|
+| T_A (top 5, context engineering) | 7.8 | FAIL | 12.8 | 263 |
+| T_B (cost management) | 7.8 | FAIL | 6.4 | 209 |
+| T_C (agent failure modes) | 7.8 | FAIL | 5.8 | 230 |
+| T_D (context window management) | 7.8 | FAIL | 10.3 | 243 |
+| T_E (prompt injection defense) | 7.8 | FAIL | 6.2 | 193 |
+| T_F (introspect, no web search) | n/a | PASS | 5.2 | 25 |
+| T_G (file-based synthesis) | 7.5 | FAIL | 4.7 | 240 |
+| T_ANN (annotate) | n/a | FAIL | n/a | 6 |
+| T_H (OOD: nutrient synergies) | n/a | FAIL | n/a | 86 |
+
+Notes: uniform 7.8 scores suggest evaluator calibration issue (not model quality signal). T_ANN and T_H produced no output — separate failure modes to investigate. Full head-to-head vs `qwen3-14b` pending: `HARNESS_PRODUCER_THINK=1 python bench_model_compare.py --test-model qwen3.6-35b --baseline-model qwen3-14b --run-both`.

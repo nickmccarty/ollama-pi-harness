@@ -63,12 +63,18 @@ def load_runs(path: str = RUNS_FILE) -> list[dict]:
     return runs
 
 
-def historical_stats(runs: list[dict], model: str, task_type: str) -> dict | None:
-    """Aggregate stats from historical runs matching model + task_type."""
-    matching = [
-        r for r in runs
-        if r.get("producer_model") == model and r.get("task_type") == task_type
-    ]
+def historical_stats(runs: list[dict], model: str, task_type: str, output_path: str | None = None) -> dict | None:
+    """Aggregate stats from historical runs matching model + output_path (preferred) or task_type."""
+    if output_path:
+        matching = [
+            r for r in runs
+            if r.get("producer_model") == model and r.get("output_path") == output_path
+        ]
+    else:
+        matching = [
+            r for r in runs
+            if r.get("producer_model") == model and r.get("task_type") == task_type
+        ]
     if not matching:
         return None
 
@@ -115,6 +121,12 @@ def run_task_live(task: str, task_type: str, model: str) -> dict:
     env = os.environ.copy()
     env["HARNESS_PRODUCER_MODEL"] = model
 
+    # Snapshot run count so we can find the new record by position, not task_type.
+    # agent.py writes semantic types ("best_practices", "research", etc.) which don't
+    # match the bench task IDs ("T_A", "T_B", etc.), so filtering by task_type would
+    # always miss.
+    pre_count = len(load_runs())
+
     print(f"\n  → running {task_type} live with {model}...")
     t0 = time.monotonic()
     result = subprocess.run(
@@ -129,13 +141,10 @@ def run_task_live(task: str, task_type: str, model: str) -> dict:
     if result.returncode != 0:
         print(f"  [warn] {task_type} exited with code {result.returncode}")
 
-    # Read the run record just written to runs.jsonl
+    # Find the run record appended during this subprocess call.
     all_runs = load_runs()
-    matching = [
-        r for r in reversed(all_runs)
-        if r.get("producer_model") == model and r.get("task_type") == task_type
-    ]
-    run_record = matching[0] if matching else {}
+    new_runs = [r for r in all_runs[pre_count:] if r.get("producer_model") == model]
+    run_record = new_runs[-1] if new_runs else {}
 
     scores = run_record.get("wiggum_scores", [])
     tbs    = run_record.get("tokens_by_stage", {})
@@ -257,11 +266,13 @@ def main():
         tt   = spec["id"]
         task = spec["task"]
 
+        out_path = spec.get("output")
+
         # Baseline
         if args.run_both and not args.historical_only:
             stat = run_task_live(task, tt, args.baseline_model)
         else:
-            stat = historical_stats(all_runs, args.baseline_model, tt)
+            stat = historical_stats(all_runs, args.baseline_model, tt, output_path=out_path)
             if stat is None:
                 print(f"  [warn] no historical runs for {args.baseline_model} / {tt} — skipping baseline")
 
@@ -273,7 +284,7 @@ def main():
             stat = run_task_live(task, tt, args.test_model)
             rows.append(stat)
         else:
-            stat = historical_stats(all_runs, args.test_model, tt)
+            stat = historical_stats(all_runs, args.test_model, tt, output_path=out_path)
             if stat:
                 rows.append(stat)
             else:
