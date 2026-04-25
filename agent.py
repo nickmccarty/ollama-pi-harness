@@ -1787,10 +1787,14 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 "**Suggested task:** <one sentence describing the task>\n\n"
                 "**Why:** <2-3 sentences of rationale referencing specific evidence above>\n\n"
                 "**Command:** `<the exact command or action to take>`\n\n"
-                "Commands must be real harness CLI invocations. Valid entry points: "
-                "`python agent.py`, `python bench_model_compare.py`, `python autoresearch.py`, "
-                "`python eval_suite.py`, `python orchestrator.py`. "
-                "Do not invent module paths or subcommands that do not exist."
+                "The command must be a real, runnable shell invocation. "
+                "Use only these signatures:\n"
+                "  python agent.py \"<task description and output path>\"\n"
+                "  python bench_model_compare.py --test-model <tag> --baseline-model <tag> [--run-both]\n"
+                "  python autoresearch.py [--tasks T_A,T_B] [--rounds N]\n"
+                "  python eval_suite.py [--fast] [--no-wiggum]\n"
+                "  python orchestrator.py \"<compound task>\"\n"
+                "Do not invent flags, subcommands, or module paths that are not listed above."
             )
             print(f"  [suggest] synthesising ({len(_prompt)} char prompt)...")
             with trace.span("suggest_synth", model=producer_model):
