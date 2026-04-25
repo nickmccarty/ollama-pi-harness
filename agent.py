@@ -1005,7 +1005,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient", "suggest", "debug"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient", "suggest", "debug", "troubleshoot"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -2025,6 +2025,251 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
             _store_memory(memory, task, "suggest", trace.data, content)
 
+        def _handle_troubleshoot():
+            print("\n[skill:troubleshoot] diagnosing failures and planning next step...")
+            trace.data["task_type"] = "troubleshoot"
+
+            import re as _re_ts
+            import json as _json_ts
+            import time as _t_ts
+            import tempfile as _tmp_ts
+
+            _base_ts = Path(__file__).parent
+
+            # ── 1. Parse optional filter ──────────────────────────────────────
+            _filter_raw = _re_ts.sub(r"^/troubleshoot\s*", "", task, flags=_re_ts.IGNORECASE).strip()
+            _filter = _filter_raw.lower() if _filter_raw else ""
+
+            # ── 2. Load recent ERROR/FAIL runs ───────────────────────────────
+            _runs_path_ts = _base_ts / "runs.jsonl"
+            all_runs = []
+            if _runs_path_ts.exists():
+                try:
+                    for _line in _runs_path_ts.read_text(encoding="utf-8", errors="replace").splitlines():
+                        _line = _line.strip()
+                        if _line:
+                            try:
+                                all_runs.append(_json_ts.loads(_line))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            _excluded_types = {"debug", "suggest", "orientation", "re-orient", "troubleshoot"}
+
+            def _ts_run_matches(r):
+                if r.get("final") not in ("ERROR", "FAIL"):
+                    return False
+                if r.get("task_type") in _excluded_types:
+                    return False
+                if not _filter:
+                    return True
+                haystack = " ".join([
+                    r.get("task_type") or "",
+                    r.get("final") or "",
+                    r.get("run_id") or "",
+                    r.get("producer_model") or "",
+                    r.get("task") or "",
+                ]).lower()
+                return _filter in haystack
+
+            candidates = [r for r in all_runs if _ts_run_matches(r)]
+            targets = candidates[-2:] if candidates else []
+            if targets:
+                print(f"  [troubleshoot] {len(candidates)} failure(s) — analysing last {len(targets)}")
+            else:
+                print("  [troubleshoot] no recent failures — switching to suggest-only mode")
+
+            # ── 3. Project context: orientation, git log, autoresearch ────────
+            orientation_doc = ""
+            ori_age_min = None
+            _ori_path_ts = os.path.join(_tmp_ts.gettempdir(), "harness_orientation_raw.md")
+            if os.path.exists(_ori_path_ts):
+                ori_age_min = round((_t_ts.time() - os.path.getmtime(_ori_path_ts)) / 60, 1)
+                try:
+                    orientation_doc = open(_ori_path_ts, encoding="utf-8").read()[:3000]
+                except Exception:
+                    pass
+            if ori_age_min is None:
+                print("  [troubleshoot] no orientation cache — run /orientation for richer context")
+            elif ori_age_min > 30:
+                print(f"  [troubleshoot] orientation cache is {ori_age_min}min old — consider /re-orient")
+
+            git_log = ""
+            try:
+                git_log = subprocess.check_output(
+                    ["git", "log", "--oneline", "-12"],
+                    cwd=_base_ts, stderr=subprocess.DEVNULL, text=True,
+                ).strip()
+            except Exception:
+                pass
+
+            ar_state = ""
+            _ar_path_ts = _base_ts / "autoresearch.tsv"
+            if _ar_path_ts.exists():
+                try:
+                    _ar_lines = _ar_path_ts.read_text(encoding="utf-8", errors="replace").splitlines()
+                    ar_state = "\n".join(([_ar_lines[0]] if _ar_lines else []) + _ar_lines[-3:])
+                except Exception:
+                    pass
+
+            # ── 4. Failure detail: run records, source, trace events ──────────
+            _SOURCE_MAP_TS = {
+                "annotate":       [("skills.py",            "run_annotate_standalone")],
+                "introspect":     [("agent.py",              "_handle_introspect")],
+                "re-orient":      [("agent.py",              "_handle_reorient")],
+                "orientation":    [("orientation_skill.py",  "def build_orientation")],
+                "research":       [("agent.py",              "SYNTH_INSTRUCTION"), ("wiggum.py", "def loop")],
+                "best_practices": [("agent.py",              "SYNTH_INSTRUCTION"), ("wiggum.py", "def loop")],
+                "enumerated":     [("agent.py",              "SYNTH_INSTRUCTION_COUNT"), ("wiggum.py", "def loop")],
+            }
+
+            def _ts_extract_source(fname, anchor, max_chars=1200):
+                fpath = _base_ts / fname
+                if not fpath.exists():
+                    return ""
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+                idx = text.find(anchor)
+                start = max(0, (idx - 100) if idx != -1 else 0)
+                return text[start:start + max_chars]
+
+            def _ts_read_trace(run_id):
+                traces_dir = _base_ts / "traces"
+                if not traces_dir.exists():
+                    return ""
+                matches = list(traces_dir.glob(f"{run_id}_*.json"))
+                if not matches:
+                    return ""
+                try:
+                    data = _json_ts.loads(matches[0].read_text(encoding="utf-8", errors="replace"))
+                    lines = []
+                    for e in [e for e in data.get("traceEvents", []) if e.get("ph") == "X"]:
+                        dur_ms = round(e.get("dur", 0) / 1000)
+                        err_str = f"  ERROR: {e['args']['error']}" if e.get("args", {}).get("error") else ""
+                        lines.append(f"  {e['name']:35s} {dur_ms:6d}ms{err_str}")
+                    return "\n".join(lines)
+                except Exception:
+                    return ""
+
+            ctx_parts = []
+
+            # Failure run blocks
+            failure_blocks = []
+            for run in targets:
+                tt       = run.get("task_type", "unknown")
+                final    = run.get("final", "?")
+                model    = run.get("producer_model", "")
+                dur      = run.get("run_duration_s", 0)
+                run_id   = run.get("run_id", "")
+                task_str = (run.get("task") or "")[:120]
+                scores   = run.get("wiggum_scores") or []
+                eval_log = run.get("wiggum_eval_log") or []
+
+                block = [
+                    f"### Run {run_id}",
+                    f"task_type={tt}  final={final}  model={model}  duration={dur}s",
+                    f"task: {task_str}",
+                ]
+                if scores:
+                    block.append(f"wiggum_scores: {scores}")
+                for entry in eval_log[-2:]:
+                    dims   = entry.get("dims", {})
+                    issues = entry.get("issues", [])
+                    block.append(f"eval round {entry.get('round')}: score={entry.get('score')}  dims={dims}")
+                    if issues:
+                        block.append("issues:\n" + "\n".join(f"  - {i}" for i in issues[:4]))
+                events_str = _ts_read_trace(run_id)
+                if events_str:
+                    block.append(f"trace events:\n{events_str}")
+                failure_blocks.append("\n".join(block))
+
+            if failure_blocks:
+                ctx_parts.append("## Recent failures\n\n" + "\n\n".join(failure_blocks))
+
+            # Source excerpts for failure task types
+            seen_ts = set()
+            source_blocks = []
+            for tt in set(r.get("task_type", "") for r in targets):
+                for fname, anchor in _SOURCE_MAP_TS.get(tt, [("agent.py", "SYNTH_INSTRUCTION")]):
+                    if (fname, anchor) not in seen_ts:
+                        seen_ts.add((fname, anchor))
+                        snippet = _ts_extract_source(fname, anchor)
+                        if snippet:
+                            source_blocks.append(f"### {fname} (near `{anchor}`)\n```python\n{snippet}\n```")
+            if source_blocks:
+                ctx_parts.append("## Relevant source\n\n" + "\n\n".join(source_blocks))
+
+            # Project context
+            if orientation_doc:
+                age_note = f"(cached {ori_age_min}min ago)" if ori_age_min is not None else ""
+                ctx_parts.append(f"## Project orientation {age_note}\n\n{orientation_doc}")
+            if git_log:
+                ctx_parts.append(f"## Recent commits\n\n```\n{git_log}\n```")
+            if ar_state:
+                ctx_parts.append(f"## Autoresearch state\n\n```\n{ar_state}\n```")
+
+            if not ctx_parts:
+                print("[error] no context available — run /orientation first")
+                trace.finish("ERROR")
+                return
+
+            full_ctx = "\n\n".join(ctx_parts)
+
+            # ── 5. Unified synthesis ──────────────────────────────────────────
+            mode_note = (
+                "There are recent failures to diagnose. Identify the root cause and exact fix, "
+                "then recommend what to do NEXT once the fix is applied."
+                if targets else
+                "No recent failures found. Recommend the single most valuable next task "
+                "based on project state, recent commits, and autoresearch progress."
+            )
+
+            _prompt = (
+                "You are a senior engineer reviewing an agentic ML research harness. "
+                f"{mode_note}\n\n"
+                f"{full_ctx}\n\n"
+                "---\n\n"
+                "Respond in this exact format — nothing else:\n\n"
+                "**Issue:** <one sentence — active failure pattern, or 'No active failures'>\n\n"
+                "**Root cause:** <2-3 sentences — cite specific run IDs, scores, or source lines>\n\n"
+                "**Fix:**\n<concrete code change, config update, or shell command ready to apply>\n\n"
+                "**Next task after fix:** <one sentence — what to prioritise once the fix is in>\n\n"
+                "**Command:** `<exact shell command>`\n\n"
+                "Command must use only these signatures:\n"
+                "  python agent.py \"<task description and output path>\"\n"
+                "  python bench_model_compare.py --test-model <tag> --baseline-model <tag> [--run-both]\n"
+                "  python autoresearch.py [--tasks T_A,T_B] [--rounds N]\n"
+                "  python eval_suite.py [--fast] [--no-wiggum]\n"
+                "  python orchestrator.py \"<compound task>\"\n"
+                "Do not invent flags, subcommands, or module paths not listed above."
+            )
+
+            print(f"  [troubleshoot] synthesising ({len(_prompt)} char prompt)...")
+            with trace.span("troubleshoot_synth", model=producer_model):
+                _resp = ollama.chat(
+                    model=producer_model,
+                    messages=[{"role": "user", "content": _prompt}],
+                    options={"temperature": 0.1, "num_predict": 768},
+                )
+            trace.log_usage(_resp, stage="troubleshoot_synth")
+            content = clean_synthesis_output((_resp.message.content or "").strip())
+
+            if not content:
+                print("[error] synthesis returned empty output")
+                trace.finish("ERROR")
+                return
+
+            print("\n" + content + "\n")
+
+            if path:
+                write_output(content, path, trace)
+            else:
+                trace.data["final_content"] = content
+                trace.data["output_bytes"]  = len(content.encode())
+
+            trace.finish("PASS")
+            _store_memory(memory, task, "troubleshoot", trace.data, content)
+
         def _handle_sync_wiki():
             print("\n[skill:sync-wiki] extracting implementation facts from source code...")
             trace.data["task_type"] = "sync_wiki"
@@ -2084,6 +2329,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "re-orient":    _handle_reorient,
             "debug":        _handle_debug,
             "suggest":      _handle_suggest,
+            "troubleshoot": _handle_troubleshoot,
         }
 
         for _skill in explicit_skills:

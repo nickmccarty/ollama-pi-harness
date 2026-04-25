@@ -261,6 +261,21 @@ REGISTRY: dict[str, dict] = {
         "auto":   None,
     },
 
+    "troubleshoot": {
+        "description": (
+            "Higher-order skill combining /debug and /suggest in a single LLM call. "
+            "Loads recent ERROR/FAIL run records, wiggum eval logs, trace events, and relevant source "
+            "alongside orientation cache, git log, and autoresearch state, then synthesises a "
+            "four-part response: Issue / Root cause / Fix / Next task after fix. "
+            "Falls back to suggest-only mode when no active failures are found. "
+            "Optional filter: /troubleshoot [task_type | model | ERROR | FAIL] — defaults to last 2 failures. "
+            "Invocation: /troubleshoot [filter]"
+        ),
+        "hook":   "standalone",
+        "prompt": None,
+        "auto":   None,
+    },
+
     "transcribe": {
         "description": (
             "Transcribe a local audio file using OpenAI Whisper. "
