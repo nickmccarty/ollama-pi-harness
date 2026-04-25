@@ -236,6 +236,18 @@ REGISTRY: dict[str, dict] = {
         "auto":   None,
     },
 
+    "debug": {
+        "description": (
+            "Diagnose recent ERROR or FAIL runs and propose a specific fix. "
+            "Reads run records, wiggum eval logs, trace event sequences, and relevant source. "
+            "Handles both code crashes (ERROR) and quality failures (FAIL score). "
+            "Invocation: /debug [task_type | model | ERROR | FAIL]  — defaults to last failure"
+        ),
+        "hook":   "standalone",
+        "prompt": None,
+        "auto":   None,
+    },
+
     "suggest": {
         "description": (
             "Synthesise one concrete next task from current project state: recent runs, "

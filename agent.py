@@ -1005,7 +1005,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient", "suggest"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient", "suggest", "debug"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1688,6 +1688,204 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.finish("PASS")
             _store_memory(memory, task, "re-orient", trace.data, content)
 
+        def _handle_debug():
+            print("\n[skill:debug] diagnosing recent failures...")
+            trace.data["task_type"] = "debug"
+
+            import re as _re_d
+            _base_d = Path(__file__).parent
+
+            # ── 1. Parse filter from task string ────────────────────────────
+            # /debug [task_type | ERROR | FAIL | run_id | model_name]
+            _filter_raw = _re_d.sub(r"^/debug\s*", "", task, flags=_re_d.IGNORECASE).strip()
+            _filter = _filter_raw.lower() if _filter_raw else ""
+
+            # ── 2. Load runs and find matching failures ───────────────────────
+            _runs_path = _base_d / "runs.jsonl"
+            all_runs = []
+            if _runs_path.exists():
+                with open(_runs_path, encoding="utf-8", errors="replace") as _rf:
+                    for _line in _rf:
+                        _line = _line.strip()
+                        if _line:
+                            try:
+                                all_runs.append(json.loads(_line))
+                            except Exception:
+                                pass
+
+            def _run_matches(r):
+                if r.get("final") not in ("ERROR", "FAIL"):
+                    return False
+                if r.get("task_type") in ("debug", "suggest", "orientation", "re-orient"):
+                    return False
+                if not _filter:
+                    return True
+                haystack = " ".join([
+                    r.get("task_type") or "",
+                    r.get("final") or "",
+                    r.get("run_id") or "",
+                    r.get("producer_model") or "",
+                    r.get("task") or "",
+                ]).lower()
+                return _filter in haystack
+
+            candidates = [r for r in all_runs if _run_matches(r)]
+            if not candidates:
+                print(f"  [debug] no ERROR/FAIL runs found matching '{_filter or 'any'}'")
+                trace.finish("ERROR")
+                return
+
+            # Use last 2 matching runs for pattern detection
+            targets = candidates[-2:]
+            print(f"  [debug] found {len(candidates)} matching run(s), analysing last {len(targets)}")
+
+            # ── 3. Source file mapping: task_type → relevant files + anchors ──
+            _SOURCE_MAP = {
+                "annotate":      [("skills.py",         "run_annotate_standalone")],
+                "introspect":    [("agent.py",           "_handle_introspect")],
+                "re-orient":     [("agent.py",           "_handle_reorient")],
+                "orientation":   [("orientation_skill.py", "def build_orientation")],
+                "research":      [("agent.py",           "SYNTH_INSTRUCTION"), ("wiggum.py", "def loop")],
+                "best_practices":[("agent.py",           "SYNTH_INSTRUCTION"), ("wiggum.py", "def loop")],
+                "enumerated":    [("agent.py",           "SYNTH_INSTRUCTION_COUNT"), ("wiggum.py", "def loop")],
+            }
+
+            def _extract_source(fname, anchor, max_chars=1800):
+                fpath = _base_d / fname
+                if not fpath.exists():
+                    return ""
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+                idx = text.find(anchor)
+                if idx == -1:
+                    return text[:max_chars]
+                start = max(0, idx - 100)
+                return text[start:start + max_chars]
+
+            # ── 4. Read trace events for each target run ──────────────────────
+            def _read_trace_events(run_id):
+                traces_dir = _base_d / "traces"
+                if not traces_dir.exists():
+                    return ""
+                matches = list(traces_dir.glob(f"{run_id}_*.json"))
+                if not matches:
+                    return ""
+                try:
+                    data = json.loads(matches[0].read_text(encoding="utf-8", errors="replace"))
+                    events = [
+                        e for e in data.get("traceEvents", [])
+                        if e.get("ph") == "X"
+                    ]
+                    lines = []
+                    for e in events:
+                        dur_ms = round(e.get("dur", 0) / 1000)
+                        args = e.get("args", {})
+                        err = args.get("error", "")
+                        err_str = f"  ERROR: {err}" if err else ""
+                        lines.append(f"  {e['name']:35s} {dur_ms:6d}ms{err_str}")
+                    return "\n".join(lines)
+                except Exception:
+                    return ""
+
+            # ── 5. Assemble context blocks ────────────────────────────────────
+            ctx_parts = []
+
+            for run in targets:
+                tt       = run.get("task_type", "unknown")
+                final    = run.get("final", "?")
+                model    = run.get("producer_model", "")
+                dur      = run.get("run_duration_s", 0)
+                run_id   = run.get("run_id", "")
+                task_str = (run.get("task") or "")[:120]
+                scores   = run.get("wiggum_scores") or []
+                eval_log = run.get("wiggum_eval_log") or []
+
+                block = [
+                    f"## Run: {run_id}",
+                    f"task_type={tt}  final={final}  model={model}  duration={dur}s",
+                    f"task: {task_str}",
+                ]
+                if scores:
+                    block.append(f"wiggum_scores: {scores}")
+                if eval_log:
+                    for entry in eval_log[-2:]:
+                        dims  = entry.get("dims", {})
+                        issues = entry.get("issues", [])
+                        block.append(f"eval round {entry.get('round')}: score={entry.get('score')}  dims={dims}")
+                        if issues:
+                            block.append("issues:\n" + "\n".join(f"  - {i}" for i in issues[:5]))
+
+                events_str = _read_trace_events(run_id)
+                if events_str:
+                    block.append(f"trace events:\n{events_str}")
+
+                ctx_parts.append("\n".join(block))
+
+            # Source excerpts
+            combined_types = set(r.get("task_type", "") for r in targets)
+            seen_files = set()
+            source_blocks = []
+            for tt in combined_types:
+                for fname, anchor in _SOURCE_MAP.get(tt, [("agent.py", "SYNTH_INSTRUCTION")]):
+                    key = (fname, anchor)
+                    if key in seen_files:
+                        continue
+                    seen_files.add(key)
+                    snippet = _extract_source(fname, anchor)
+                    if snippet:
+                        source_blocks.append(f"### {fname} (near `{anchor}`)\n```python\n{snippet}\n```")
+
+            if source_blocks:
+                ctx_parts.append("## Relevant source\n\n" + "\n\n".join(source_blocks))
+
+            full_ctx = "\n\n".join(ctx_parts)
+
+            # ── 6. Synthesis ──────────────────────────────────────────────────
+            _is_code_error = any(r.get("final") == "ERROR" for r in targets)
+            fix_guidance = (
+                "Show the exact lines to change as a minimal diff or replacement block."
+                if _is_code_error else
+                "Suggest specific changes to the synthesis instruction, prompt, or harness config. "
+                "If the fix is a SYNTH_INSTRUCTION change, show the full replacement string."
+            )
+
+            _prompt = (
+                "You are debugging a failing agentic research harness. "
+                "Analyse the run records and source below, then diagnose the root cause.\n\n"
+                f"{full_ctx}\n\n"
+                "---\n\n"
+                f"{fix_guidance}\n\n"
+                "Respond in this exact format:\n\n"
+                "**Diagnosis:** <one sentence root cause>\n\n"
+                "**Evidence:** <2-3 specific observations from the run data above>\n\n"
+                "**Fix:**\n<concrete code change or config change, ready to apply>"
+            )
+
+            print(f"  [debug] synthesising ({len(_prompt)} char prompt)...")
+            with trace.span("debug_synth", model=producer_model):
+                _resp = ollama.chat(
+                    model=producer_model,
+                    messages=[{"role": "user", "content": _prompt}],
+                    options={"temperature": 0.1, "num_predict": 1024},
+                )
+            trace.log_usage(_resp, stage="debug_synth")
+            content = clean_synthesis_output((_resp.message.content or "").strip())
+
+            if not content:
+                print("[error] synthesis returned empty output")
+                trace.finish("ERROR")
+                return
+
+            print("\n" + content + "\n")
+
+            if path:
+                write_output(content, path, trace)
+            else:
+                trace.data["final_content"] = content
+                trace.data["output_bytes"]  = len(content.encode())
+
+            trace.finish("PASS")
+            _store_memory(memory, task, "debug", trace.data, content)
+
         def _handle_suggest():
             print("\n[skill:suggest] synthesising next task recommendation...")
             trace.data["task_type"] = "suggest"
@@ -1879,6 +2077,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "playwright":   _handle_playwright,
             "transcribe":   _handle_transcribe,
             "re-orient":    _handle_reorient,
+            "debug":        _handle_debug,
             "suggest":      _handle_suggest,
         }
 
