@@ -366,7 +366,7 @@ def read_file_context(paths: list[str], task: str = "") -> str:
             try:
                 result = _md_converter.convert(p)
                 content = result.text_content or ""
-                print(f"  [markitdown] {os.path.basename(p)} → {len(content)} chars")
+                print(f"  [markitdown] {os.path.basename(p)} -> {len(content)} chars")
             except Exception as e:
                 print(f"  [markitdown error] {os.path.basename(p)}: {e} — skipping")
                 continue
@@ -520,9 +520,9 @@ def enrich_with_page_content(results: list[dict], count: int, knowledge_state: s
         if content:
             blocks.append(f"**Full page: {r.get('title', url)}**\n{url}\n\n{content}")
             fetched += 1
-            print(f"    → {len(content)} chars")
+            print(f"    -> {len(content)} chars")
         else:
-            print(f"    → failed or empty")
+            print(f"    -> failed or empty")
     return "\n\n---\n\n".join(blocks)
 
 
@@ -660,7 +660,7 @@ def gather_research(task: str, trace: RunTrace, planned_queries: list[str] = Non
             print(f"  [novelty] round {round_num}: {novelty}/10{gate_label}")
             if novelty < novelty_gate:
                 if random.random() < NOVELTY_EPSILON:
-                    print(f"  [novelty] saturation but ε-greedy pass-through — continuing")
+                    print(f"  [novelty] saturation but eps-greedy pass-through -- continuing")
                 else:
                     print(f"  [novelty] saturation — stopping search")
                     break
@@ -1302,7 +1302,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             for i, row in enumerate(hits, 1):
                 score_str = f"  score={row['final_score']:.1f}" if show_scores and row["final_score"] else ""
                 date = (row["timestamp"] or "")[:10]
-                print(f"\n{'─'*60}")
+                print(f"\n{'-'*60}")
                 print(f"[{i}] {row['title']}")
                 print(f"     {date}{score_str}")
                 print(f"     {row['narrative']}")
@@ -1314,7 +1314,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                     except Exception:
                         print(f"     {row['facts']}")
 
-            print(f"\n{'─'*60}")
+            print(f"\n{'-'*60}")
             print(f"[recall] {len(hits)} result(s) for {query!r}")
             trace.finish("PASS")
 
@@ -2480,7 +2480,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 trimmed = trim_to_count(content, expected_count)
                 if trimmed is not None:
                     content = trimmed
-                    print(f"\n[count check] trimmed {actual_count}→{expected_count} items (Python, no retry)")
+                    print(f"\n[count check] trimmed {actual_count}->{expected_count} items (Python, no retry)")
                 else:
                     print(f"\n[count check] expected {expected_count} items, got {actual_count} — retrying synthesis")
                     trace.log_count_retry()
@@ -2494,7 +2494,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                         trimmed = trim_to_count(content, expected_count)
                         if trimmed is not None:
                             content = trimmed
-                            print(f"  [count check] trimmed {actual_count}→{expected_count} after retry")
+                            print(f"  [count check] trimmed {actual_count}->{expected_count} after retry")
                         else:
                             print(f"  [count check] still {actual_count} after retry — proceeding anyway")
             else:

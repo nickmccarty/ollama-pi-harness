@@ -245,7 +245,8 @@ Respond with valid JSON only — no preamble, no explanation:
   "score": composite as a number with one decimal place,
   "passed": true if composite >= 8.0 else false,
   "issues": ["issue naming section and what is missing"],
-  "feedback": "one paragraph of specific, actionable feedback for the producer"
+  "feedback": "one paragraph of specific, actionable feedback for the producer",
+  "tac_hours": decimal hours a skilled researcher/engineer would need to produce a PERFECT version of this task from scratch — use task complexity, not the quality of the output above; this is the reference human ceiling. Scale: 0.25=trivial lookup, 1=standard research question, 3=synthesis across many sources, 8=comprehensive technical guide with working examples, 24=novel research requiring primary data collection
 }}
 
 Universal rules:
@@ -359,6 +360,13 @@ def evaluate(task: str, content: str, prior_issues: list[str] = None, _trace=Non
 
     # Enforce threshold
     result["passed"] = composite >= PASS_THRESHOLD
+
+    # Extract tac_hours — clamp to sane range [0.1, 200]
+    try:
+        tac = float(result.get("tac_hours", 0) or 0)
+        result["tac_hours"] = round(max(0.1, min(tac, 200.0)), 2) if tac > 0 else None
+    except (TypeError, ValueError):
+        result["tac_hours"] = None
 
     # Attach thinking content if present (non-empty only)
     if thinking:
@@ -519,6 +527,8 @@ def loop(task: str, output_path: str, producer_model: str = PRODUCER_MODEL, eval
             "feedback": feedback,
             "content":  content[:8_000],   # capture synthesis text for DPO pairs
         }
+        if result.get("tac_hours") is not None:
+            round_record["tac_hours"] = result["tac_hours"]
         if result.get("thinking"):
             round_record["thinking"] = result["thinking"]
         if panel_reviews:
@@ -596,6 +606,10 @@ def _attach_token_stats(trace: dict, local_trace):
     trace["input_tokens"]    = local_trace.data["input_tokens"]
     trace["output_tokens"]   = local_trace.data["output_tokens"]
     trace["tokens_by_stage"] = local_trace.data["tokens_by_stage"]
+    # Bubble up TAC from the best-scoring round (most reliable estimate)
+    tac_by_round = [(r["score"], r.get("tac_hours")) for r in trace.get("rounds", []) if r.get("tac_hours")]
+    if tac_by_round:
+        trace["tac_hours"] = max(tac_by_round, key=lambda x: x[0])[1]
 
 
 # ---------------------------------------------------------------------------

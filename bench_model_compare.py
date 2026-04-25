@@ -98,6 +98,9 @@ def historical_stats(runs: list[dict], model: str, task_type: str, output_path: 
         if cots:
             cot_lens.append(sum(len(c) for c in cots))
 
+    leverages = [r["leverage"] for r in matching if r.get("leverage") is not None]
+    tac_vals  = [r["tac_hours"] for r in matching if r.get("tac_hours") is not None]
+
     return {
         "model":         model,
         "task_type":     task_type,
@@ -108,6 +111,8 @@ def historical_stats(runs: list[dict], model: str, task_type: str, output_path: 
         "mean_duration": _mean(durations),
         "mean_think_chars": _mean(think_chars) if think_chars else float("nan"),
         "mean_cot_len":  _mean(cot_lens) if cot_lens else float("nan"),
+        "mean_leverage": _mean(leverages) if leverages else float("nan"),
+        "mean_tac_h":   _mean(tac_vals) if tac_vals else float("nan"),
         "source":        "historical",
     }
 
@@ -162,6 +167,8 @@ def run_task_live(task: str, task_type: str, model: str) -> dict:
         "mean_duration": run_record.get("run_duration_s") or wall_s,
         "mean_think_chars": think_chars or float("nan"),
         "mean_cot_len":  cot_len or float("nan"),
+        "mean_leverage": run_record.get("leverage") or float("nan"),
+        "mean_tac_h":   run_record.get("tac_hours") or float("nan"),
         "source":        "live",
         "wall_s":        wall_s,
         "returncode":    result.returncode,
@@ -189,7 +196,7 @@ def print_report(rows: list[dict], use_color: bool = True):
     task_types = sorted({r["task_type"] for r in rows})
     models     = list(dict.fromkeys(r["model"] for r in rows))  # preserve insertion order
 
-    header = f"{'Task':<8} {'Model':<20} {'Score':>6} {'Pass%':>6} {'KB':>6} {'Dur(s)':>7} {'ThinkK':>7} {'CoTK':>6} {'Src':<10}"
+    header = f"{'Task':<8} {'Model':<20} {'Score':>6} {'Pass%':>6} {'KB':>6} {'Dur(s)':>7} {'TAC(h)':>7} {'Lev':>6} {'Src':<10}"
     print(f"\n{_c('=== Model Quality Comparison ===', 'bold', use_color)}\n")
     print(header)
     print("-" * len(header))
@@ -208,11 +215,11 @@ def print_report(rows: list[dict], use_color: bool = True):
             pass_pct = _fmt(r["pass_rate"] * 100, ".0f") + "%"
             kb       = _fmt((r["mean_bytes"] or 0) / 1024, ".1f")
             dur      = _fmt(r["mean_duration"])
-            think_k  = _fmt((r["mean_think_chars"] or 0) / 1000, ".1f") + "k"
-            cot_k    = _fmt((r["mean_cot_len"] or 0) / 1000, ".1f") + "k"
+            tac_h    = _fmt(r.get("mean_tac_h") or float("nan"), ".1f")
+            lev      = _fmt(r.get("mean_leverage") or float("nan"), ".1f") + "x"
             src      = f"({r['source']}, n={r['n']})"
             tag      = tt if mi == 0 else "  "
-            line     = f"{tag:<8} {model:<20} {score:>6} {pass_pct:>6} {kb:>6} {dur:>7} {think_k:>7} {cot_k:>6} {src:<10}"
+            line     = f"{tag:<8} {model:<20} {score:>6} {pass_pct:>6} {kb:>6} {dur:>7} {tac_h:>7} {lev:>6} {src:<10}"
             print(line)
 
         # Delta row when two models present
@@ -225,6 +232,13 @@ def print_report(rows: list[dict], use_color: bool = True):
                 sign  = "+" if ds >= 0 else ""
                 color = "green" if ds > 0 else ("red" if ds < 0 else "yellow")
                 print(f"{'':8} {'  Δ score':20} {_c(f'{sign}{ds:.1f}', color, use_color)}")
+            dl_a = ra.get("mean_leverage") or float("nan")
+            dl_b = rb.get("mean_leverage") or float("nan")
+            if not math.isnan(dl_a) and not math.isnan(dl_b):
+                dl = dl_b - dl_a
+                sign  = "+" if dl >= 0 else ""
+                color = "green" if dl > 0 else ("red" if dl < 0 else "yellow")
+                print(f"{'':8} {'  Δ leverage':20} {_c(f'{sign}{dl:.1f}x', color, use_color)}")
         print()
 
 

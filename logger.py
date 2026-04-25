@@ -126,6 +126,10 @@ class RunTrace:
             "wiggum_dims":          [],
             "wiggum_eval_log":      [],   # [{round, score, dims, issues, feedback}] per round
 
+            # Quality leverage
+            "tac_hours":            None,   # human ceiling estimate from evaluator
+            "leverage":             None,   # (tac_s * quality_norm) / (runtime_s + cost_s)
+
             "final":                None,
         }
 
@@ -365,6 +369,10 @@ class RunTrace:
             for r in rounds
         ]
 
+        # TAC hours from evaluator
+        if wiggum_trace.get("tac_hours") is not None:
+            self.data["tac_hours"] = wiggum_trace["tac_hours"]
+
         # Merge token stats from wiggum if present
         for stage, vals in wiggum_trace.get("tokens_by_stage", {}).items():
             s = self.data["tokens_by_stage"].setdefault(stage, {"input": 0, "output": 0, "calls": 0, "total_ms": 0})
@@ -379,10 +387,27 @@ class RunTrace:
         if final:
             self.data["final"] = final
         self.data["run_duration_s"] = round(time.monotonic() - self._run_start, 1)
+
+        # Compute leverage: (tac_s * quality_norm) / (runtime_s + cost_s)
+        tac_hours = self.data.get("tac_hours")
+        scores    = self.data.get("wiggum_scores") or []
+        if tac_hours and scores:
+            quality_norm  = scores[-1] / 10.0
+            tac_s         = tac_hours * 3600.0
+            runtime_s     = self.data["run_duration_s"]
+            energy_cost   = float(os.environ.get("HARNESS_ENERGY_COST_PER_RUN", 0.0))
+            infer_cost    = float(os.environ.get("HARNESS_INFERENCE_COST_PER_RUN", 0.0))
+            hourly_rate   = float(os.environ.get("HARNESS_HOURLY_RATE", 75.0))
+            cost_s        = ((energy_cost + infer_cost) / hourly_rate) * 3600.0
+            self.data["leverage"] = round((tac_s * quality_norm) / max(runtime_s + cost_s, 1.0), 2)
+
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(self.data) + "\n")
-        tok_in  = self.data["input_tokens"]
-        tok_out = self.data["output_tokens"]
-        dur     = self.data["run_duration_s"]
-        print(f"  [log] {dur}s  in={tok_in} out={tok_out} tok  -> {LOG_PATH}")
+        tok_in   = self.data["input_tokens"]
+        tok_out  = self.data["output_tokens"]
+        dur      = self.data["run_duration_s"]
+        leverage = self.data.get("leverage")
+        lev_str  = f"  leverage={leverage:.1f}x" if leverage is not None else ""
+        tac_str  = f"  tac={tac_hours}h" if tac_hours else ""
+        print(f"  [log] {dur}s  in={tok_in} out={tok_out} tok{tac_str}{lev_str}  -> {LOG_PATH}")
         self._write_trace()
