@@ -1005,7 +1005,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient", "suggest"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1663,7 +1663,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             )
             print(f"  [re-orient] synthesizing ({len(_prompt)} char prompt)...")
             with trace.span("reorient_synth", model=producer_model):
-                _resp = inference.chat(
+                _resp = ollama.chat(
                     model=producer_model,
                     messages=[{"role": "user", "content": _prompt}],
                     options={"temperature": 0.2, "num_predict": 2048},
@@ -1687,6 +1687,132 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
 
             trace.finish("PASS")
             _store_memory(memory, task, "re-orient", trace.data, content)
+
+        def _handle_suggest():
+            print("\n[skill:suggest] synthesising next task recommendation...")
+            trace.data["task_type"] = "suggest"
+
+            import time as _t
+            import tempfile as _tmp_s
+
+            _base_s = Path(__file__).parent
+
+            # ── 1. Orientation cache ─────────────────────────────────────────
+            _ori_path = os.path.join(_tmp_s.gettempdir(), "harness_orientation_raw.md")
+            orientation_doc = ""
+            ori_age_min = None
+            if os.path.exists(_ori_path):
+                ori_age_min = round((_t.time() - os.path.getmtime(_ori_path)) / 60, 1)
+                try:
+                    orientation_doc = open(_ori_path, encoding="utf-8").read()[:4000]
+                except Exception:
+                    pass
+            if ori_age_min is None:
+                print("  [suggest] orientation cache missing — run /orientation first for best results")
+            elif ori_age_min > 30:
+                print(f"  [suggest] orientation cache is {ori_age_min} min old — consider /re-orient")
+
+            # ── 2. Recent runs ────────────────────────────────────────────────
+            runs_lines = []
+            _runs_path = _base_s / "runs.jsonl"
+            if _runs_path.exists():
+                try:
+                    with open(_runs_path, encoding="utf-8", errors="replace") as _rf:
+                        all_r = [l.strip() for l in _rf if l.strip()]
+                    for _raw in all_r[-8:]:
+                        try:
+                            _r = json.loads(_raw)
+                            ts       = (_r.get("timestamp") or "")[:16].replace("T", " ")
+                            final    = _r.get("final", "?")
+                            score    = (_r.get("wiggum_scores") or [None])[-1]
+                            score_str = f"  score={score}" if score is not None else ""
+                            model    = _r.get("producer_model", "")
+                            task_str = (_r.get("task") or "")[:80]
+                            runs_lines.append(f"- [{ts}] {final}{score_str}  model={model}  {task_str}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # ── 3. Git log ────────────────────────────────────────────────────
+            git_log = ""
+            try:
+                git_log = subprocess.check_output(
+                    ["git", "log", "--oneline", "-12"],
+                    cwd=_base_s, stderr=subprocess.DEVNULL, text=True,
+                ).strip()
+            except Exception:
+                pass
+
+            # ── 4. Autoresearch state ─────────────────────────────────────────
+            ar_state = ""
+            _ar_path = _base_s / "autoresearch.tsv"
+            if _ar_path.exists():
+                try:
+                    lines = _ar_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    header = lines[0] if lines else ""
+                    recent = lines[-3:] if len(lines) > 1 else []
+                    ar_state = "\n".join([header] + recent)
+                except Exception:
+                    pass
+
+            # ── 5. Build context ──────────────────────────────────────────────
+            ctx_parts = []
+            if orientation_doc:
+                age_note = f"(cached {ori_age_min} min ago)" if ori_age_min is not None else ""
+                ctx_parts.append(f"## Project orientation {age_note}\n\n{orientation_doc}")
+            if git_log:
+                ctx_parts.append(f"## Recent commits\n\n```\n{git_log}\n```")
+            if runs_lines:
+                ctx_parts.append("## Recent runs\n\n" + "\n".join(runs_lines))
+            if ar_state:
+                ctx_parts.append(f"## Autoresearch state (last 3 rows)\n\n```\n{ar_state}\n```")
+
+            if not ctx_parts:
+                print("[error] no context available — run /orientation first")
+                trace.finish("ERROR")
+                return
+
+            full_ctx = "\n\n".join(ctx_parts)
+
+            # ── 6. Synthesise one recommendation ─────────────────────────────
+            _prompt = (
+                "You are advising an ML engineer on what to work on next.\n\n"
+                f"{full_ctx}\n\n"
+                "---\n\n"
+                "Based on the project state above, identify the single most valuable next task. "
+                "Consider: unresolved failures from recent runs, incomplete benchmarks, "
+                "open experiments, and natural follow-ons from recent commits.\n\n"
+                "Respond in this exact format — nothing else:\n\n"
+                "**Suggested task:** <one sentence describing the task>\n\n"
+                "**Why:** <2-3 sentences of rationale referencing specific evidence above>\n\n"
+                "**Command:** `<the exact command or action to take>`"
+            )
+            print(f"  [suggest] synthesising ({len(_prompt)} char prompt)...")
+            with trace.span("suggest_synth", model=producer_model):
+                _resp = ollama.chat(
+                    model=producer_model,
+                    messages=[{"role": "user", "content": _prompt}],
+                    options={"temperature": 0.15, "num_predict": 512},
+                )
+            trace.log_usage(_resp, stage="suggest_synth")
+            content = clean_synthesis_output((_resp.message.content or "").strip())
+
+            if not content:
+                print("[error] synthesis returned empty output")
+                trace.finish("ERROR")
+                return
+
+            print("\n" + content + "\n")
+
+            if path:
+                write_output(content, path, trace)
+            else:
+                trace.data["final_content"] = content
+                trace.data["output_bytes"]  = len(content.encode())
+
+            trace.finish("PASS")
+            _store_memory(memory, task, "suggest", trace.data, content)
 
         def _handle_sync_wiki():
             print("\n[skill:sync-wiki] extracting implementation facts from source code...")
@@ -1745,6 +1871,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "playwright":   _handle_playwright,
             "transcribe":   _handle_transcribe,
             "re-orient":    _handle_reorient,
+            "suggest":      _handle_suggest,
         }
 
         for _skill in explicit_skills:

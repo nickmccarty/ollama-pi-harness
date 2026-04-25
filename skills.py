@@ -236,6 +236,19 @@ REGISTRY: dict[str, dict] = {
         "auto":   None,
     },
 
+    "suggest": {
+        "description": (
+            "Synthesise one concrete next task from current project state: recent runs, "
+            "git log, orientation cache, and autoresearch progress. "
+            "Returns a single recommendation with rationale and a ready-to-run command. "
+            "Reads cached /orientation data — run /orientation first if cache is stale. "
+            "Invocation: /suggest"
+        ),
+        "hook":   "standalone",
+        "prompt": None,
+        "auto":   None,
+    },
+
     "transcribe": {
         "description": (
             "Transcribe a local audio file using OpenAI Whisper. "
