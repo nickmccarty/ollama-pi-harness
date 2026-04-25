@@ -1693,6 +1693,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             trace.data["task_type"] = "debug"
 
             import re as _re_d
+            import json as _json_d
             _base_d = Path(__file__).parent
 
             # ── 1. Parse filter from task string ────────────────────────────
@@ -1704,14 +1705,17 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             _runs_path = _base_d / "runs.jsonl"
             all_runs = []
             if _runs_path.exists():
-                with open(_runs_path, encoding="utf-8", errors="replace") as _rf:
-                    for _line in _rf:
+                try:
+                    _rf_content = _runs_path.read_text(encoding="utf-8", errors="replace")
+                    for _line in _rf_content.splitlines():
                         _line = _line.strip()
                         if _line:
                             try:
-                                all_runs.append(json.loads(_line))
+                                all_runs.append(_json_d.loads(_line))
                             except Exception:
                                 pass
+                except Exception:
+                    pass
 
             def _run_matches(r):
                 if r.get("final") not in ("ERROR", "FAIL"):
@@ -1770,7 +1774,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 if not matches:
                     return ""
                 try:
-                    data = json.loads(matches[0].read_text(encoding="utf-8", errors="replace"))
+                    data = _json_d.loads(matches[0].read_text(encoding="utf-8", errors="replace"))
                     events = [
                         e for e in data.get("traceEvents", [])
                         if e.get("ph") == "X"
@@ -1892,6 +1896,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
 
             import time as _t
             import tempfile as _tmp_s
+            import json as _json_s
 
             _base_s = Path(__file__).parent
 
@@ -1919,7 +1924,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                         all_r = [l.strip() for l in _rf if l.strip()]
                     for _raw in all_r[-8:]:
                         try:
-                            _r = json.loads(_raw)
+                            _r = _json_s.loads(_raw)
                             ts       = (_r.get("timestamp") or "")[:16].replace("T", " ")
                             final    = _r.get("final", "?")
                             score    = (_r.get("wiggum_scores") or [None])[-1]
