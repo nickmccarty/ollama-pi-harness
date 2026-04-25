@@ -1786,7 +1786,11 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 "Respond in this exact format — nothing else:\n\n"
                 "**Suggested task:** <one sentence describing the task>\n\n"
                 "**Why:** <2-3 sentences of rationale referencing specific evidence above>\n\n"
-                "**Command:** `<the exact command or action to take>`"
+                "**Command:** `<the exact command or action to take>`\n\n"
+                "Commands must be real harness CLI invocations. Valid entry points: "
+                "`python agent.py`, `python bench_model_compare.py`, `python autoresearch.py`, "
+                "`python eval_suite.py`, `python orchestrator.py`. "
+                "Do not invent module paths or subcommands that do not exist."
             )
             print(f"  [suggest] synthesising ({len(_prompt)} char prompt)...")
             with trace.span("suggest_synth", model=producer_model):
