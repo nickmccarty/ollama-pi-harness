@@ -186,13 +186,13 @@ def _synth_options(producer_model: str) -> dict:
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "output ONLY the markdown starting with #. For each practice, first state the problem it solves, then describe the practice, and finally include a brief, concrete trade-off sentence that contrasts it with at least one alternative approach."
+    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally include a brief \"when NOT to use\" caveat. Structure your response to guide the reader from understanding the issue to applying the solution with awareness of limitations."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "output ONLY the markdown starting with #. List exactly 5 practices. For each practice, first state the problem it solves, then describe the practice, and finally include a brief, concrete trade-off sentence that contrasts it with at least one alternative approach."
+    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally include a brief \"when NOT to use\" caveat. List all practices in order of estimated ROI, with the highest-ROI practice first. Structure your response to guide the reader from understanding the issue to applying the solution with awareness of limitations."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 
@@ -200,7 +200,7 @@ SYNTH_INSTRUCTION_COUNT = (
 # Used when _is_technical_task() returns False so the model doesn't hallucinate code blocks.
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:BEGIN
 SYNTH_INSTRUCTION_PROSE = (
-    "output ONLY the markdown starting with #. For each practice, first state the problem it solves, then describe the practice, and finally include a brief, concrete trade-off sentence that contrasts it with at least one alternative approach."
+    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally include a brief \"when NOT to use\" caveat. Structure your response to guide the reader from understanding the issue to applying the solution with awareness of limitations."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:END
 

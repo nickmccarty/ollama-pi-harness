@@ -734,9 +734,9 @@ def main():
 
         description = proposal["description"]
         print(f"  [proposal] {description}")
-        print(f"  [proposal] synth (first 120 chars): {proposal['synth'][:120]!r}")
+        print(f"  [proposal] synth:\n    {proposal['synth']}")
         if proposal.get("synth_prose"):
-            print(f"  [proposal] synth_prose (first 120 chars): {proposal['synth_prose'][:120]!r}")
+            print(f"  [proposal] synth_prose:\n    {proposal['synth_prose']}")
 
         # 2. APPLY
         write_instructions(
