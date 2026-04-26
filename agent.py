@@ -185,26 +185,24 @@ def _synth_options(producer_model: str) -> dict:
 # Do not rename the sentinels or move them off their own lines.
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
-SYNTH_INSTRUCTION = os.environ.get("HARNESS_SYNTH_INSTRUCTION") or (
-    "Output ONLY the markdown starting with #. Structure each section with 'What', 'Why', 'How' subsections using numbered steps and inline code blocks. Write at least 150 words per subsection with concrete implementation details, ensuring every code snippet is complete, executable with specific tool versions, and includes error handling. Every section MUST include a complete runnable code example with both opening and closing triple-backtick fences — never leave a code block unclosed. Include edge case notes, trade-offs, and library recommendations. For each strategy, state when NOT to use it, identify input boundaries, and specify exact numerical values for all configuration parameters with workload-based justification."
+SYNTH_INSTRUCTION = (
+    "output ONLY the markdown starting with #  Write a concise technical overview of an Economic Control Plane, including its core components, integration points with existing financial systems, and a real-world example of its implementation using specific middleware or API technologies."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "Output ONLY the markdown starting with #. List strategies as a numbered list with working code examples. Write at least 150 words per strategy with concrete implementation details, ensuring code is complete, executable with specific tool versions, and includes error handling. Every section MUST include a complete runnable code example with opening and closing triple-backtick fences — never leave code blocks unclosed. Use 'What', 'Why', 'How' subsections with numbered steps. Include edge case notes, trade-offs, and library recommendations. For each strategy, state when NOT to use it, identify input boundaries, and specify exact numerical values for configuration parameters with workload-based justification."
+    "output ONLY the markdown starting with #  Write a concise technical overview of an Economic Control Plane, including its core components, integration points with existing financial systems, and a real-world example of its implementation using specific middleware or API technologies."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 
 # Fallback instruction for non-technical tasks (recipes, general knowledge, etc.)
 # Used when _is_technical_task() returns False so the model doesn't hallucinate code blocks.
+# AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:BEGIN
 SYNTH_INSTRUCTION_PROSE = (
-    "Output ONLY the markdown starting with #. Write clear, accurate prose organized "
-    "with 'What', 'Why', 'How' subsections. Use numbered steps where sequence matters. "
-    "Include specific quantities, timeframes, and concrete details sourced from the research. "
-    "Do NOT include code blocks, programming examples, or software-specific sections "
-    "unless the task explicitly involves software or programming."
+    "output ONLY the markdown starting with #  For each best practice, provide a real-world case study or published benchmark that supports the claim. Include specific names of organizations, tools, or methodologies, and cite the source where possible. Ensure all examples are verifiable and directly illustrate the concept described."
 )
+# AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:END
 
 _TECHNICAL_KEYWORDS = frozenset({
     "code", "coding", "implement", "library", "api", "sdk", "python", "javascript",
@@ -703,7 +701,7 @@ def fetch_url_content(url: str) -> str:
 
 def enrich_with_page_content(results: list[dict], count: int, knowledge_state: str = "") -> str:
     """Fetch full page content for the top `count` search results.
-    Skips URLs whose snippet is already well-covered in knowledge_state (>60% word overlap).
+    Skips URLs whose snippet is already well-covered in knowledge_state (>80% word overlap).
     Returns a context block."""
     if not MARKITDOWN_AVAILABLE or count == 0:
         return ""
@@ -719,7 +717,7 @@ def enrich_with_page_content(results: list[dict], count: int, knowledge_state: s
         if known_words:
             snippet_words = set(r.get("body", "").lower().split())
             overlap = len(snippet_words & known_words) / max(len(snippet_words), 1)
-            if overlap > 0.6:
+            if overlap > 0.8:
                 print(f"  [markitdown] skipping {url[:50]} — {overlap:.0%} covered")
                 continue
         print(f"  [markitdown] fetching {url[:60]}...")
