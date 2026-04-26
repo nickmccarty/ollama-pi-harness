@@ -244,19 +244,32 @@ _COMPLETENESS_SYSTEM = textwrap.dedent("""\
       5-6:  covers the topic generally but missing specific strategies or concrete details
       3-4:  only tangentially related; major aspects of the goal are absent
       0-2:  does not address the goal at all
+
+    IMPORTANT: Scores must be monotonically non-decreasing as content grows.
+    If a prior score is given, your score MUST be >= that value.
+    Only increase the score when new content adds coverage; never decrease it.
 """)
 
 
-def _score_completeness(content: str, goal: str, model: str) -> dict:
+def _score_completeness(content: str, goal: str, model: str, prior_score: int = 0) -> dict:
     """
     Score how completely the extracted content answers the goal.
+    Samples proportionally from each source page so later pages are visible.
     Returns {"score": int, "missing": str}.
     """
     import inference
+
+    # Split on source separators and sample proportionally from each page
+    parts = re.split(r'\n---\nSource: [^\n]+\n\n', content)
+    chars_per_part = max(1500, 5000 // len(parts))
+    sample = "\n\n[...]\n\n".join(p[:chars_per_part] for p in parts)
+
+    prior_note = f"Prior score from fewer pages: {prior_score}/10. Your score must be >= {prior_score}.\n\n" if prior_score > 0 else ""
     prompt = (
+        f"{prior_note}"
         f"Goal: {goal}\n\n"
-        f"Extracted content ({len(content)} chars):\n"
-        f"{content[:6000]}\n\n"
+        f"Extracted content ({len(parts)} page(s), sampled):\n"
+        f"{sample}\n\n"
         f"How completely does this content answer the goal? Reply with JSON."
     )
     try:
@@ -791,11 +804,11 @@ def navigate_and_extract(
                                 print(f"  [saturation] fetch failed: {_fe}")
                                 continue
 
-                            _completeness = _score_completeness(text, goal, model)
-                            _score = _completeness["score"]
+                            _completeness = _score_completeness(text, goal, model, prior_score=_prev_score)
+                            _score = max(_completeness["score"], _prev_score)  # enforce floor client-side
                             _missing = _completeness["missing"]
                             print(f"  [saturation] score={_score}/10  missing: {_missing[:80]}")
-                            if _score >= SATURATION_THRESHOLD or _score <= _prev_score:
+                            if _score >= SATURATION_THRESHOLD or _score == _prev_score:
                                 break  # saturated or not improving — stop pulling
                             _prev_score = _score
 
