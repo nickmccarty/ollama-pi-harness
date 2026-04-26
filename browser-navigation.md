@@ -23,7 +23,9 @@ python agent.py --reuse-browser "/browser find the pricing page on stripe.com"
 
 ---
 
-## Pre-Navigation: Site Discovery (`sitemap_skill.py`)
+## Pre-Navigation: Site Discovery + Planning
+
+Before the navigation loop starts, the skill runs two sequential steps:
 
 Before the navigation loop starts, the skill runs `discover_pages()` using the fastest available method:
 
@@ -34,7 +36,25 @@ Before the navigation loop starts, the skill runs `discover_pages()` using the f
 | 3 | DDGS `site:domain` search | ~1-2s | Returns indexed pages with titles + snippets; no crawl needed |
 | 4 | BFS HTML crawl | slow | Last resort; skipped in quick mode (navigator always uses quick mode) |
 
-The top 15 pages scored by token overlap with the goal are injected into every `_decide` prompt as a numbered list with titles and snippets. The LLM can `goto` a URL directly from this list rather than clicking through navigation menus.
+### Step 1 — Discovery (`sitemap_skill.discover_pages`)
+
+The top 15 pages scored by token overlap with the goal are injected into every `_decide` prompt as a numbered list with titles and snippets.
+
+### Step 2 — Planning (`_plan_from_sitemap`)
+
+A single LLM oracle call scans all discovered URLs and either:
+- Returns `{"action": "goto", "url": "..."}` — navigator jumps directly to the best page, skipping all click-based exploration
+- Returns `{"action": "fail", "reason": "..."}` — content is not on this site; raises immediately before any navigation
+
+When the planner pre-selects a URL, the navigator is instructed to prefer `extract` over `backtrack` if the page is topically related, since the planner already exhausted URL selection from the full index. If the LLM still backtracks with no parent in history, the executor raises immediately ("no parent — content not in required form on this site") rather than looping.
+
+**Example flow — anthropic.com/research:**
+```
+sitemap.xml → 80 URLs
+planner → goto /engineering/building-effective-agents  (best match from 80)
+step 1 → extract  (planner note: prefer extract over backtrack)
+done in 1 step, 58s
+```
 
 **Standalone usage:**
 ```bash
@@ -156,3 +176,5 @@ screenshots/
 | Infinite revisit loop | Auto-fail after 4 visits to same URL without progress |
 | Site has no sitemap.xml | robots.txt → DDGS site: search → BFS crawl (pipeline) |
 | Slow BFS crawl hangs navigator | Navigator uses `quick=True` — sitemap.xml + DDGS only, never crawls |
+| Planner chose best page but LLM backtracks repeatedly | `backtrack` with no valid ancestor raises immediately; planner note tells LLM to prefer `extract` |
+| LLM ignores sitemap and clicks ARIA links anyway | Pre-navigation planning call forces a URL decision before any navigation starts |

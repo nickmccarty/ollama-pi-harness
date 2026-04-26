@@ -140,6 +140,77 @@ def _clean_full_text(page) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pre-navigation planner — pick best URL from sitemap before loop starts
+# ---------------------------------------------------------------------------
+
+_PLAN_SYSTEM = textwrap.dedent("""\
+    You are a URL selection agent. Given a goal and a list of available pages on a domain,
+    identify the single page most likely to directly answer the goal.
+    Reply with JSON only — no prose.
+
+    If one page clearly matches:
+      {"action": "goto", "url": "https://..."}
+
+    If no page matches the goal (content is not on this site):
+      {"action": "fail", "reason": "brief explanation"}
+
+    Rules:
+    - Prefer pages whose URL path or title contains keywords from the goal.
+    - Be skeptical of topical-sounding but off-topic pages (surveys, team pages, news).
+    - If the goal is "best practices / how to / guide / implementation", prefer
+      pages with "docs", "guide", "tutorial", "best-practices", "engineering" in the path.
+    - Only pick a URL from the provided list.
+    - Output only the JSON object.
+""")
+
+
+def _plan_from_sitemap(pages: list[dict], goal: str, model: str) -> dict | None:
+    """
+    One-shot LLM call: pick the best URL from the sitemap for the goal,
+    or declare that the content is not on this site.
+    Returns a decision dict {action: goto|fail, url?, reason?} or None on error.
+    """
+    import inference
+
+    if not pages:
+        return None
+
+    lines = []
+    for i, p in enumerate(pages[:60]):
+        meta = f"  [{p['title']}]" if p.get("title") else ""
+        if p.get("body"):
+            meta += f"  — {p['body'][:80]}"
+        lines.append(f"  {i+1:3d}. {p['url']}{meta}")
+
+    pages_str = "\n".join(lines)
+    prompt = textwrap.dedent(f"""\
+        Goal: {goal}
+
+        Available pages on this domain ({len(pages)} total):
+        {pages_str}
+
+        Which single URL is most likely to directly answer the goal?
+    """)
+
+    try:
+        resp = inference.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": _PLAN_SYSTEM},
+                {"role": "user",   "content": prompt},
+            ],
+            options={"temperature": 0.1, "num_predict": 128},
+        )
+        raw = resp.message.content.strip()
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        return json.loads(raw)
+    except Exception as e:
+        print(f"  [sitemap] planner error: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # LLM navigation oracle
 # ---------------------------------------------------------------------------
 
@@ -184,6 +255,10 @@ _SYSTEM = textwrap.dedent("""\
       When unsure, prefer search results over navigation links.
     - If a search yields no relevant results, use "backtrack" and reformulate the query.
     - If you have already backtracked from this page with no other links to try, use "fail".
+    - If the sitemap list shows this was the best available URL on the domain, prefer "extract"
+      over "backtrack" when the page is topically related — the synthesis step can extract
+      what is relevant even from a broader page. Only "backtrack" if the page is completely
+      unrelated to the goal.
     - Output only the JSON object, nothing else.
 """)
 
@@ -261,7 +336,12 @@ def _execute(page, decision: dict, history: list[dict], timeout_ms: int) -> bool
             if not h.get("note", "").startswith("backtracked"):
                 page.goto(h["url"], wait_until="domcontentloaded")
                 return True
-        return False
+        # No valid ancestor — the planner sent us here directly and it was the best choice.
+        # Raise immediately rather than looping on the same page.
+        raise RuntimeError(
+            "navigator gave up: backtracked from planner-chosen page with no parent — "
+            "content not available on this site in the required form"
+        )
 
     if action == "fill":
         role  = decision.get("role", "textbox")
@@ -496,27 +576,49 @@ def navigate_and_extract(
         page = ctx.new_page()
         page.set_default_timeout(timeout_ms)
 
-        history:          list[dict] = []  # {url, title, note, via}
-        screenshots:      list[str]  = []
+        history:           list[dict] = []  # {url, title, note, via}
+        screenshots:       list[str]  = []
         _last_action_note: str        = ""  # injected into next _decide when action failed/didn't navigate
-        _url_visit_count: dict        = {}  # url → times visited (non-navigating steps count)
+        _url_visit_count:  dict       = {}  # url → times visited (non-navigating steps count)
+        _planner_chose:    bool       = False  # True when planner pre-selected the start URL
 
-        # Discover site structure before navigation so LLM can pick URLs directly.
-        # quick=True: sitemap.xml only — skips slow BFS crawl if not found.
+        # Discover site structure then do a one-shot planning call before navigation.
         sitemap_context = ""
+        _sitemap_pages: list[dict] = []
         try:
             from sitemap_skill import discover_pages, rank_by_goal, format_for_navigator
-            _pages = discover_pages(start_url, max_pages=80, quick=True)
-            if _pages:
-                _top = rank_by_goal(_pages, goal, top_n=15)
-                sitemap_context = format_for_navigator(_top if _top else _pages[:15])
+            _sitemap_pages = discover_pages(start_url, max_pages=80, quick=True)
+            if _sitemap_pages:
+                _top = rank_by_goal(_sitemap_pages, goal, top_n=15)
+                sitemap_context = format_for_navigator(_top if _top else _sitemap_pages[:15])
         except Exception as _se:
             print(f"  [sitemap] skipped: {_se}")
 
-        print(f"  [playwright] navigating to {start_url}")
-        page.goto(start_url, wait_until="domcontentloaded")
+        # Pre-navigation planning: ask LLM which URL best matches the goal.
+        # If it says "fail", raise immediately — content is not on this site.
+        _plan_start_url = start_url  # may be overridden by planner goto
+        if _sitemap_pages:
+            print(f"  [playwright] planning: asking LLM to pick best URL from {len(_sitemap_pages)} pages...")
+            _plan = _plan_from_sitemap(_sitemap_pages, goal, model)
+            if _plan:
+                if _plan.get("action") == "fail":
+                    reason = _plan.get("reason", "content not found on this site")
+                    print(f"  [playwright] planner: fail — {reason}")
+                    raise RuntimeError(f"navigator gave up: {reason}")
+                elif _plan.get("action") == "goto" and _plan.get("url"):
+                    _plan_start_url = _plan["url"]
+                    _planner_chose  = True
+                    print(f"  [playwright] planner: goto {_plan_start_url}")
+
+        page.goto(_plan_start_url, wait_until="domcontentloaded")
         _settle(page)
         history.append({"url": page.url, "title": page.title(), "note": "", "via": ""})
+        if _planner_chose:
+            _last_action_note = (
+                "Note: the planner pre-selected this page as the best match from the full "
+                "site index. If this page is topically related to the goal, prefer 'extract' "
+                "over 'backtrack' — the synthesis step will extract only what is relevant."
+            )
         _p = _take_screenshot(page, run_id, 0, "goto")
         if _p:
             screenshots.append(_p)
