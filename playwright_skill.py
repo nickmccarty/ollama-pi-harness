@@ -149,18 +149,31 @@ _PLAN_SYSTEM = textwrap.dedent("""\
     Reply with JSON only — no prose.
 
     If one page clearly matches:
-      {"action": "goto", "url": "https://..."}
+      {"action": "goto", "url": "https://...", "reason": "one-line explanation"}
 
     If no page matches the goal (content is not on this site):
       {"action": "fail", "reason": "brief explanation"}
 
-    Rules:
-    - Prefer pages whose URL path or title contains keywords from the goal.
-    - Be skeptical of topical-sounding but off-topic pages (surveys, team pages, news).
-    - If the goal is "best practices / how to / guide / implementation", prefer
-      pages with "docs", "guide", "tutorial", "best-practices", "engineering" in the path.
-    - Only pick a URL from the provided list.
-    - Output only the JSON object.
+    URL selection rules (apply in order):
+
+    1. BREADTH vs DEPTH — identify the goal intent first:
+       - BROAD goals: "best practices", "overview", "how to", "guide", "tips",
+         "recommendations", "cost management", "getting started", "introduction"
+         → prefer SHALLOWER, higher-level pages (fewer path segments, or path ends
+           in "overview", "guide", "best-practices", "index", "intro")
+         → AVOID deep feature-specific pages (e.g. /docs/en/feature/specific-flag)
+           even if a keyword matches — a specific feature page answers "what is X",
+           not "what are the best practices across the whole topic area"
+       - SPECIFIC goals: "how does X work", "API reference for Y", "error code Z"
+         → prefer the deep page that directly covers that exact topic
+
+    2. KEYWORD MATCH — URL path and title keywords should overlap with the goal.
+       Score both path segments and title words. Prefer the highest overlap.
+
+    3. SKEPTICISM — skip pages that sound topically related but are off-topic:
+       surveys, team/about pages, news articles, changelogs, release notes, legal.
+
+    4. Only pick a URL from the provided list. Output only the JSON object.
 """)
 
 
@@ -666,7 +679,9 @@ def navigate_and_extract(
                 elif _plan.get("action") == "goto" and _plan.get("url"):
                     _plan_start_url = _plan["url"]
                     _planner_chose  = True
-                    print(f"  [playwright] planner: goto {_plan_start_url}")
+                    _plan_reason    = _plan.get("reason", "")
+                    print(f"  [playwright] planner: goto {_plan_start_url}"
+                          + (f"  — {_plan_reason}" if _plan_reason else ""))
 
         page.goto(_plan_start_url, wait_until="domcontentloaded")
         _settle(page)
