@@ -1657,10 +1657,16 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 return
 
             # Synthesize from extracted content
+            # Truncate to ~20 000 chars (~5 000 tokens) so synthesis fits in 8 192-token context
+            _MAX_SYNTH_CHARS = 20_000
+            synth_text = page_text
+            if len(page_text) > _MAX_SYNTH_CHARS:
+                synth_text = page_text[:_MAX_SYNTH_CHARS] + "\n\n... [content truncated for synthesis]"
+                print(f"  [playwright] synthesis input truncated from {len(page_text)} → {_MAX_SYNTH_CHARS} chars")
             prompt = (
                 f"Task: {task}\n\n"
                 f"Source URL: {final_url}\n\n"
-                f"Extracted page content:\n\n{page_text}\n\n"
+                f"Extracted page content:\n\n{synth_text}\n\n"
                 "Using only the content above, complete the task accurately. "
                 "Format as clear markdown."
             )

@@ -747,6 +747,7 @@ def navigate_and_extract(
                         except Exception:
                             _next_pages = []
 
+                        _prev_score = _score
                         for _np in _next_pages:
                             if _pages_extracted >= MAX_EXTRACT_PAGES:
                                 break
@@ -770,8 +771,9 @@ def navigate_and_extract(
                             _score = _completeness["score"]
                             _missing = _completeness["missing"]
                             print(f"  [saturation] score={_score}/10  missing: {_missing[:80]}")
-                            if _score >= SATURATION_THRESHOLD:
-                                break
+                            if _score >= SATURATION_THRESHOLD or _score <= _prev_score:
+                                break  # saturated or not improving — stop pulling
+                            _prev_score = _score
 
                     print(f"  [saturation] done — {_pages_extracted} page(s), final score={_score}/10")
                 # ── End saturation ───────────────────────────────────────────
