@@ -186,13 +186,13 @@ def _synth_options(producer_model: str) -> dict:
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "output ONLY the markdown starting with #. For each practice, provide a concrete implementation example using a specific orchestration layer (e.g., LangChain, Microsoft Semantic Kernel) that demonstrates how to set per-call spend caps, retry budgets, and latency gates."
+    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally provide one specific trade-off or limitation readers should consider when implementing it. Structure your response as a concise, three-part explanation."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "output ONLY the markdown starting with #. For each practice, provide a concrete implementation example using a specific orchestration layer (e.g., LangChain, Microsoft Semantic Kernel) that demonstrates how to set per-call spend caps, retry budgets, and latency gates."
+    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally provide one specific trade-off or limitation readers should consider when implementing it. Structure your response as a concise, three-part explanation."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 
@@ -200,7 +200,7 @@ SYNTH_INSTRUCTION_COUNT = (
 # Used when _is_technical_task() returns False so the model doesn't hallucinate code blocks.
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:BEGIN
 SYNTH_INSTRUCTION_PROSE = (
-    "output ONLY the markdown starting with #. For each practice, provide a concrete implementation example using a specific orchestration layer (e.g., LangChain, Microsoft Semantic Kernel) that demonstrates how to set per-call spend caps, retry budgets, and latency gates."
+    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally provide one specific trade-off or limitation readers should consider when implementing it. Structure your response as a concise, three-part explanation."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:END
 
