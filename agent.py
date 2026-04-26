@@ -186,13 +186,13 @@ def _synth_options(producer_model: str) -> dict:
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "output ONLY the markdown starting with #  Write a concise technical overview of an Economic Control Plane, including its core components, integration points with existing financial systems, and a real-world example of its implementation using specific middleware or API technologies."
+    "output ONLY the markdown starting with #. For each practice, provide a concrete implementation example using a specific orchestration layer (e.g., LangChain, Microsoft Semantic Kernel) that demonstrates how to set per-call spend caps, retry budgets, and latency gates."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "output ONLY the markdown starting with #  Write a concise technical overview of an Economic Control Plane, including its core components, integration points with existing financial systems, and a real-world example of its implementation using specific middleware or API technologies."
+    "output ONLY the markdown starting with #. For each practice, provide a concrete implementation example using a specific orchestration layer (e.g., LangChain, Microsoft Semantic Kernel) that demonstrates how to set per-call spend caps, retry budgets, and latency gates."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 
@@ -200,7 +200,7 @@ SYNTH_INSTRUCTION_COUNT = (
 # Used when _is_technical_task() returns False so the model doesn't hallucinate code blocks.
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:BEGIN
 SYNTH_INSTRUCTION_PROSE = (
-    "output ONLY the markdown starting with #  For each best practice, provide a real-world case study or published benchmark that supports the claim. Include specific names of organizations, tools, or methodologies, and cite the source where possible. Ensure all examples are verifiable and directly illustrate the concept described."
+    "output ONLY the markdown starting with #. For each practice, provide a concrete implementation example using a specific orchestration layer (e.g., LangChain, Microsoft Semantic Kernel) that demonstrates how to set per-call spend caps, retry budgets, and latency gates."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:END
 
