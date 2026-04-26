@@ -841,14 +841,24 @@ def navigate_and_extract(
                         history.append({"url": page.url, "title": page.title(), "note": "", "via": via})
                         _last_action_note = ""
                     elif page.url == _url_before and action == "click":
-                        # Click executed but URL unchanged — likely opened a modal/dialog
-                        _clicked = decision.get("text", "this element")
-                        _last_action_note = (
-                            f"Note: clicking '{_clicked}' did not navigate — the URL is unchanged. "
-                            f"A modal or overlay may have opened. Check the updated ARIA tree below "
-                            f"and act on any new input, dialog, or search field that appeared. "
-                            f"Do NOT click '{_clicked}' again."
-                        )
+                        # URL unchanged after first settle — JS SPA routers can lag.
+                        # Give the router one more chance before declaring non-navigation.
+                        _settle(page, timeout_ms=6000)
+                        if page.url != _url_before:
+                            # Deferred navigation completed — treat as normal navigation
+                            if page.url not in {h["url"] for h in history}:
+                                via = decision.get("text", "")
+                                history.append({"url": page.url, "title": page.title(), "note": "", "via": via})
+                            _last_action_note = ""
+                        else:
+                            # Truly non-navigating — modal, anchor, or dead link
+                            _clicked = decision.get("text", "this element")
+                            _last_action_note = (
+                                f"Note: clicking '{_clicked}' did not navigate — the URL is unchanged. "
+                                f"A modal or overlay may have opened. Check the updated ARIA tree below "
+                                f"and act on any new input, dialog, or search field that appeared. "
+                                f"Do NOT click '{_clicked}' again."
+                            )
                     else:
                         _last_action_note = ""
                     _p = _take_screenshot(page, run_id, step + 1, action)
