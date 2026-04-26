@@ -145,11 +145,11 @@ def _clean_full_text(page) -> str:
 
 _PLAN_SYSTEM = textwrap.dedent("""\
     You are a URL selection agent. Given a goal and a list of available pages on a domain,
-    identify the single page most likely to directly answer the goal.
+    rank the top 3 pages most likely to answer the goal, ordered best-first.
     Reply with JSON only — no prose.
 
-    If one page clearly matches:
-      {"action": "goto", "url": "https://...", "reason": "one-line explanation"}
+    If pages match:
+      {"action": "goto", "url": "https://...", "alternatives": ["https://...", "https://..."], "reason": "one-line explanation"}
 
     If no page matches the goal (content is not on this site):
       {"action": "fail", "reason": "brief explanation"}
@@ -157,23 +157,23 @@ _PLAN_SYSTEM = textwrap.dedent("""\
     URL selection rules (apply in order):
 
     1. BREADTH vs DEPTH — identify the goal intent first:
-       - BROAD goals: "best practices", "overview", "how to", "guide", "tips",
-         "recommendations", "cost management", "getting started", "introduction"
-         → prefer SHALLOWER, higher-level pages (fewer path segments, or path ends
-           in "overview", "guide", "best-practices", "index", "intro")
-         → AVOID deep feature-specific pages (e.g. /docs/en/feature/specific-flag)
-           even if a keyword matches — a specific feature page answers "what is X",
-           not "what are the best practices across the whole topic area"
-       - SPECIFIC goals: "how does X work", "API reference for Y", "error code Z"
-         → prefer the deep page that directly covers that exact topic
+       - BROAD goals ("best practices", "overview", "guide", "tips", "recommendations",
+         "cost management", "getting started", "introduction", "how to"):
+         → The PRIMARY url must be a high-level, broad page — path ends in "overview",
+           "guide", "best-practices", "index", or has fewer than 5 path segments.
+         → NEVER pick a deep feature-specific page (e.g. /docs/en/section/specific-feature)
+           as the PRIMARY for a broad goal, even if a keyword matches. A specific feature
+           page answers "what is X?", not "what are best practices across the topic?".
+         → Put specific feature pages in alternatives[], not as the primary url.
+       - SPECIFIC goals ("how does X work", "API for Y", "error Z"):
+         → Pick the exact deep page that covers that topic.
 
-    2. KEYWORD MATCH — URL path and title keywords should overlap with the goal.
-       Score both path segments and title words. Prefer the highest overlap.
+    2. KEYWORD MATCH — score URL path segments + title words against goal keywords.
+       Prefer highest overlap, but never let keyword match override rule 1.
 
-    3. SKEPTICISM — skip pages that sound topically related but are off-topic:
-       surveys, team/about pages, news articles, changelogs, release notes, legal.
+    3. SKEPTICISM — exclude: surveys, team/about, news, changelogs, release notes, legal.
 
-    4. Only pick a URL from the provided list. Output only the JSON object.
+    4. Only pick URLs from the provided list. Output only the JSON object.
 """)
 
 
@@ -202,7 +202,8 @@ def _plan_from_sitemap(pages: list[dict], goal: str, model: str) -> dict | None:
         Available pages on this domain ({len(pages)} total):
         {pages_str}
 
-        Which single URL is most likely to directly answer the goal?
+        Rank the top 3 URLs most likely to answer the goal (best first).
+        Primary url = the single best page. alternatives = the next 2, in order.
     """)
 
     try:
@@ -667,7 +668,8 @@ def navigate_and_extract(
 
         # Pre-navigation planning: ask LLM which URL best matches the goal.
         # If it says "fail", raise immediately — content is not on this site.
-        _plan_start_url = start_url  # may be overridden by planner goto
+        _plan_start_url  = start_url  # may be overridden by planner goto
+        _plan_alternatives: list[str] = []  # planner's ranked backup URLs for saturation
         if _sitemap_pages:
             print(f"  [playwright] planning: asking LLM to pick best URL from {len(_sitemap_pages)} pages...")
             _plan = _plan_from_sitemap(_sitemap_pages, goal, model)
@@ -677,11 +679,15 @@ def navigate_and_extract(
                     print(f"  [playwright] planner: fail — {reason}")
                     raise RuntimeError(f"navigator gave up: {reason}")
                 elif _plan.get("action") == "goto" and _plan.get("url"):
-                    _plan_start_url = _plan["url"]
-                    _planner_chose  = True
-                    _plan_reason    = _plan.get("reason", "")
+                    _plan_start_url    = _plan["url"]
+                    _planner_chose     = True
+                    _plan_reason       = _plan.get("reason", "")
+                    _plan_alternatives = [u for u in _plan.get("alternatives", []) if u != _plan_start_url]
+                    alt_str = ", ".join(_plan_alternatives) if _plan_alternatives else "none"
                     print(f"  [playwright] planner: goto {_plan_start_url}"
                           + (f"  — {_plan_reason}" if _plan_reason else ""))
+                    if _plan_alternatives:
+                        print(f"  [playwright] planner alternatives: {alt_str}")
 
         page.goto(_plan_start_url, wait_until="domcontentloaded")
         _settle(page)
@@ -752,15 +758,18 @@ def navigate_and_extract(
                     print(f"  [saturation] score={_score}/10  missing: {_missing[:80]}")
 
                     if _score < SATURATION_THRESHOLD:
-                        try:
-                            from sitemap_skill import rank_by_goal
-                            _visited = {h["url"] for h in history} | {final_url}
-                            _remaining = [p for p in _sitemap_pages if p["url"] not in _visited]
-                            # Re-rank remaining pages against goal + missing description
-                            _aug_goal = goal + " " + _missing
-                            _next_pages = rank_by_goal(_remaining, _aug_goal, top_n=MAX_EXTRACT_PAGES - 1)
-                        except Exception:
-                            _next_pages = []
+                        _visited = {h["url"] for h in history} | {final_url}
+                        # Prefer planner's ranked alternatives; fall back to keyword re-rank
+                        _alt_pages = [{"url": u} for u in _plan_alternatives if u not in _visited]
+                        if not _alt_pages:
+                            try:
+                                from sitemap_skill import rank_by_goal
+                                _remaining = [p for p in _sitemap_pages if p["url"] not in _visited]
+                                _aug_goal  = goal + " " + _missing
+                                _alt_pages = rank_by_goal(_remaining, _aug_goal, top_n=MAX_EXTRACT_PAGES - 1)
+                            except Exception:
+                                _alt_pages = []
+                        _next_pages = _alt_pages
 
                         _prev_score = _score
                         for _np in _next_pages:
