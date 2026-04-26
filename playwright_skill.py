@@ -90,6 +90,17 @@ def _settle(page, timeout_ms: int = 4000):
         pass
 
 
+def _wait_for_url_change(page, url_before: str, timeout_s: float = 6.0) -> bool:
+    """Poll until the page URL differs from url_before. Returns True if it changed."""
+    import time
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if page.url != url_before:
+            return True
+        time.sleep(0.15)
+    return False
+
+
 def _wait_for_cdp(port: int, retries: int = 10, delay: float = 0.5):
     import urllib.request as _ur
     for _ in range(retries):
@@ -841,11 +852,10 @@ def navigate_and_extract(
                         history.append({"url": page.url, "title": page.title(), "note": "", "via": via})
                         _last_action_note = ""
                     elif page.url == _url_before and action == "click":
-                        # URL unchanged after first settle — JS SPA routers can lag.
-                        # Give the router one more chance before declaring non-navigation.
-                        _settle(page, timeout_ms=6000)
-                        if page.url != _url_before:
-                            # Deferred navigation completed — treat as normal navigation
+                        # URL unchanged after first settle — SPA client-side routers lag
+                        # behind load events. Poll for an actual URL change before giving up.
+                        if _wait_for_url_change(page, _url_before, timeout_s=6.0):
+                            _settle(page)  # let the new page finish rendering
                             if page.url not in {h["url"] for h in history}:
                                 via = decision.get("text", "")
                                 history.append({"url": page.url, "title": page.title(), "note": "", "via": via})
