@@ -335,8 +335,15 @@ def _decide(snapshot: dict, goal: str, history: list[dict], model: str,
         lines = "\n".join(f"  - \"{t}\"" for t in sorted(blocked_clicks))
         blocked_str = f"\nDO NOT click any of these links — they previously led to dead ends:\n{lines}\n"
 
-    sitemap_block = f"\n{sitemap_context}\n" if sitemap_context else ""
+    # Cap sitemap block to top 8 entries; trim ARIA to stay within context window
+    _sitemap_trimmed = "\n".join(sitemap_context.splitlines()[:10]) if sitemap_context else ""
+    sitemap_block = f"\n{_sitemap_trimmed}\n" if _sitemap_trimmed else ""
     action_note   = f"\n⚠ {last_action_note}\n" if last_action_note else ""
+
+    aria_text = (snapshot['aria'] or '  (empty)')[:3000]
+    if len(snapshot.get('aria', '')) > 3000:
+        aria_text += "\n  ... (truncated)"
+
     prompt = textwrap.dedent(f"""\
         Goal: {goal}
         {sitemap_block}{action_note}
@@ -345,7 +352,7 @@ def _decide(snapshot: dict, goal: str, history: list[dict], model: str,
           URL:   {snapshot['url']}
 
         ARIA accessibility tree (roles, names, interactive elements):
-        {snapshot['aria'] or '  (empty)'}
+        {aria_text}
 
         Already visited (url — title — outcome note):
         {history_str}
@@ -360,7 +367,7 @@ def _decide(snapshot: dict, goal: str, history: list[dict], model: str,
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user",   "content": prompt},
             ],
-            options={"temperature": 0.1, "num_predict": 256},
+            options={"temperature": 0.1, "num_predict": 256, "num_ctx": 12288},
         )
         raw = resp.message.content.strip()
         raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
