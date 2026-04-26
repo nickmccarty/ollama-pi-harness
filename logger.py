@@ -130,6 +130,8 @@ class RunTrace:
             "tac_hours":            None,   # human ceiling estimate from evaluator
             "leverage":             None,   # (tac_s * quality_norm) / (runtime_s + cost_s)
 
+            "screenshots":          [],     # file paths captured during playwright navigation
+
             "final":                None,
         }
 

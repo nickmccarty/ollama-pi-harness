@@ -37,7 +37,7 @@ from schema import (
 )
 
 try:
-    from flask import Flask, Response, request, jsonify
+    from flask import Flask, Response, request, jsonify, send_from_directory
 except ImportError:
     sys.exit("[server] Flask not found — run: pip install flask apscheduler")
 
@@ -537,8 +537,86 @@ def api_messages():
     return jsonify(records)
 
 
+_RUNS_JSONL        = Path(__file__).parent / "runs.jsonl"
+_BROWSER_STATE_FILE = Path(tempfile.gettempdir()) / "harness_browser_state.json"
+_SCREENSHOTS_DIR   = Path(__file__).parent / "screenshots"
+
+
+@app.route("/api/browser/status")
+def api_browser_status():
+    """Return current headed-browser state (written by web_search_headed / playwright tasks)."""
+    if not _BROWSER_STATE_FILE.exists():
+        return jsonify({"active": False})
+    try:
+        state = json.loads(_BROWSER_STATE_FILE.read_text(encoding="utf-8"))
+        # Verify process is still alive
+        pid = state.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)   # signal 0: check existence, doesn't kill
+            except (ProcessLookupError, PermissionError):
+                # Process is gone — clean up stale state
+                _BROWSER_STATE_FILE.unlink(missing_ok=True)
+                return jsonify({"active": False})
+        return jsonify({**state, "active": True})
+    except Exception:
+        return jsonify({"active": False})
 _FEEDBACK_JSONL  = Path(__file__).parent / "feedback.jsonl"
 _FINETUNE_METRICS = Path(__file__).parent / "finetune_metrics.jsonl"
+
+
+@app.route("/api/run_content/<run_id>")
+def api_run_content(run_id):
+    """Return the full generated content for a completed run.
+
+    Looks up the run record in runs.jsonl by run_id, then reads the output file
+    at output_path.  Falls back to the stored content_preview if the file is gone.
+    """
+    if not _RUNS_JSONL.exists():
+        return jsonify({"error": "runs.jsonl not found"}), 404
+
+    record = None
+    with open(_RUNS_JSONL, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+                if r.get("run_id") == run_id:
+                    record = r
+            except json.JSONDecodeError:
+                pass
+
+    if record is None:
+        return jsonify({"error": "run not found"}), 404
+
+    out_path = record.get("output_path", "")
+    content  = ""
+    if out_path and os.path.exists(out_path):
+        try:
+            content = Path(out_path).read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            content = f"[read error: {e}]"
+
+    if not content:
+        content = record.get("content_preview", "") or record.get("final_content_preview", "") or ""
+
+    return jsonify({
+        "run_id":      run_id,
+        "output_path": out_path,
+        "task":        record.get("task", ""),
+        "final":       record.get("final", ""),
+        "score":       (record.get("wiggum_scores") or [None])[-1],
+        "content":     content,
+    })
+
+@app.route("/api/screenshots/<run_id>/<filename>")
+def api_screenshot(run_id, filename):
+    """Serve a screenshot PNG captured during a playwright navigation run."""
+    shot_dir = _SCREENSHOTS_DIR / run_id
+    return send_from_directory(str(shot_dir), filename)
+
 
 @app.route("/api/feedback", methods=["POST"])
 def api_feedback():
@@ -802,6 +880,15 @@ Apply similar corrections for any other obvious misrecognitions.
 Non-email agent tasks must end with "save to <path>.md".
 If the user didn't specify a path, invent a sensible snake_case filename in the working directory.
 
+## Browser tasks
+
+Set `uses_browser: true` when the task involves:
+- Navigating to a URL ("go to X", "open X", "visit X")
+- Performing a visible/headed web search ("show me", "search for X in the browser")
+- Any task where seeing a live browser window would be natural and useful
+
+Set `uses_browser: false` for standard research tasks that run headlessly.
+
 ## Response format
 
 Return exactly this JSON, no other text:
@@ -812,6 +899,7 @@ Return exactly this JSON, no other text:
   "reasoning": "<one sentence: what you understood and any corrections made>",
   "task_string": "<complete agent task string — see rules above>",
   "suggested_path": "<relative path — email_drafts/ for email, X.md otherwise>",
+  "uses_browser": true | false,
   "response": "<markdown answer — only for type=answer>"
 }}{orientation_block}"""
 

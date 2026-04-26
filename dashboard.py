@@ -419,12 +419,15 @@ def build_payload(runs):
             "wiggum_eval_log":      r.get("wiggum_eval_log") or [],
             "plan":                 r.get("plan"),
             "synth_cot":            synth_cot_preview,
-            "final_content_preview": (r.get("final_content") or "")[:400],
+            "final_content_preview": (r.get("final_content") or "")[:8000],
             "memory_context_titles": r.get("memory_context_titles") or [],
             "run_duration_s":       r.get("run_duration_s") or 0,
             "orchestrated":         bool(r.get("orchestrated")),
             "subtask_count":        r.get("subtask_count") or 0,
             "output_path":          r.get("output_path") or "",
+            "leverage":             r.get("leverage"),
+            "tac_hours":            r.get("tac_hours"),
+            "screenshots":          r.get("screenshots") or [],
         })
 
     recent.reverse()
@@ -887,6 +890,68 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .insp-dim-lbl { width: 80px; font-size: 10px; color: var(--muted); flex-shrink: 0; }
   .insp-dim-bar { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .insp-dim-fill { height: 100%; border-radius: 3px; }
+
+  /* Content modal */
+  #content-modal {
+    display: none; position: fixed; inset: 0; z-index: 9000;
+    background: rgba(0,0,0,.72); align-items: center; justify-content: center;
+  }
+  #content-modal.open { display: flex; }
+  #content-modal-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    width: min(900px, 94vw); max-height: 88vh;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #content-modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  #content-modal-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  #content-modal-meta  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  #content-modal-close {
+    background: none; border: none; color: var(--muted); font-size: 16px;
+    cursor: pointer; padding: 2px 6px; border-radius: 4px;
+  }
+  #content-modal-close:hover { color: var(--text); background: var(--border); }
+  #content-modal-body {
+    flex: 1; overflow-y: auto; padding: 20px 24px; font-size: 13.5px;
+    line-height: 1.65; color: var(--text);
+  }
+  #content-modal-body h1,#content-modal-body h2,#content-modal-body h3 {
+    margin: 1.1em 0 .4em; font-weight: 600;
+  }
+  #content-modal-body h1 { font-size: 17px; }
+  #content-modal-body h2 { font-size: 15px; }
+  #content-modal-body h3 { font-size: 13.5px; }
+  #content-modal-body p { margin-bottom: .8em; }
+  #content-modal-body ul,#content-modal-body ol { padding-left: 1.4em; margin-bottom: .8em; }
+  #content-modal-body li { margin-bottom: .3em; }
+  #content-modal-body code {
+    font-family: monospace; font-size: 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 3px; padding: 1px 4px;
+  }
+  #content-modal-body pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px; overflow-x: auto; margin-bottom: .8em;
+  }
+  #content-modal-body pre code { border: none; background: none; padding: 0; }
+  .btn-view-output {
+    display: inline-block; margin-top: 8px; padding: 5px 11px;
+    background: var(--blue); color: #fff; border: none; border-radius: 5px;
+    font-size: 11px; font-weight: 600; cursor: pointer; letter-spacing: .03em;
+  }
+  .btn-view-output:hover { opacity: .85; }
+  .btn-view-output:disabled { opacity: .45; cursor: default; }
+
+  /* Screenshot filmstrip */
+  .screenshot-strip { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .screenshot-thumb {
+    width: 110px; height: 74px; object-fit: cover; border-radius: 4px;
+    border: 1px solid var(--border); cursor: pointer; transition: transform .15s, border-color .15s;
+    background: var(--surface);
+  }
+  .screenshot-thumb:hover { transform: scale(1.06); border-color: var(--blue); }
+
   .insp-dim-val { width: 18px; font-size: 10px; color: var(--text); text-align: right; flex-shrink: 0; }
 
   /* ── Voice panel ──────────────────────────────────────────────────────────── */
@@ -899,13 +964,54 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     transition: background .2s, transform .15s;
   }
   #voice-fab:hover { background: #3a7de0; transform: scale(1.07); }
-  #voice-fab.recording { background: var(--red); animation: pulse-ring 1.2s ease-out infinite; }
-  @keyframes pulse-ring {
-    0%   { box-shadow: 0 0 0 0 rgba(248,81,73,.55); }
-    70%  { box-shadow: 0 0 0 14px rgba(248,81,73,0); }
-    100% { box-shadow: 0 0 0 0 rgba(248,81,73,0); }
+
+  /* Recording: green base */
+  #voice-fab.recording {
+    background: linear-gradient(135deg, #3fb950, #2ea043);
+    box-shadow: 0 4px 22px rgba(63,185,80,.45);
   }
+  /* One-shot wiggle on activation */
+  @keyframes fab-wiggle-in {
+    0%   { transform: scale(1)    rotate(0deg);   }
+    18%  { transform: scale(1.20) rotate(-13deg); }
+    36%  { transform: scale(1.24) rotate(11deg);  }
+    54%  { transform: scale(1.12) rotate(-7deg);  }
+    72%  { transform: scale(1.05) rotate(4deg);   }
+    100% { transform: scale(1)    rotate(0deg);   }
+  }
+  /* Continuous pulse ring while recording */
+  @keyframes fab-pulse-ring {
+    0%   { box-shadow: 0 4px 22px rgba(63,185,80,.4), 0 0 0 0   rgba(63,185,80,.5); }
+    65%  { box-shadow: 0 4px 22px rgba(63,185,80,.4), 0 0 0 15px rgba(63,185,80,0); }
+    100% { box-shadow: 0 4px 22px rgba(63,185,80,.4), 0 0 0 0   rgba(63,185,80,0); }
+  }
+  /* Settle wiggle on release */
+  @keyframes fab-wiggle-out {
+    0%   { transform: scale(1);   }
+    28%  { transform: scale(0.85) rotate(-5deg); }
+    56%  { transform: scale(1.06) rotate(3deg);  }
+    80%  { transform: scale(0.98); }
+    100% { transform: scale(1);   }
+  }
+  #voice-fab.fab-wiggle-in  { animation: fab-wiggle-in  .50s cubic-bezier(.36,.07,.19,.97) both; }
+  #voice-fab.fab-pulse-ring { animation: fab-pulse-ring 1.6s ease-in-out infinite; }
+  #voice-fab.fab-wiggle-out { animation: fab-wiggle-out .42s cubic-bezier(.36,.07,.19,.97); }
   #voice-fab svg { width: 24px; height: 24px; fill: #fff; }
+
+  /* Floating waveform pill — hovers just above the FAB */
+  #voice-waveform-wrap {
+    position: fixed; bottom: 90px; right: 20px; z-index: 998;
+    width: 210px; height: 50px;
+    display: none; align-items: center;
+    background: rgba(22,27,34,.96);
+    border: 1px solid rgba(63,185,80,.4);
+    border-radius: 25px;
+    padding: 4px 16px;
+    pointer-events: none;
+    box-shadow: 0 4px 18px rgba(0,0,0,.45);
+  }
+  #voice-waveform-wrap.active { display: flex; }
+  #voice-waveform { width: 100%; height: 32px; display: block; }
 
   #voice-panel {
     position: fixed; bottom: 92px; right: 28px; z-index: 998;
@@ -925,9 +1031,43 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #voice-close:hover { color: var(--text); }
   #voice-transcript {
     padding: 12px 16px 0; font-size: 12px; color: var(--muted);
-    font-style: italic; min-height: 0; max-height: 80px;
-    overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    min-height: 0; max-height: 80px; overflow-y: auto;
+    display: flex; align-items: flex-start; gap: 6px;
   }
+  #voice-transcript-text {
+    flex: 1; min-width: 0; font-style: italic; white-space: pre-wrap; word-break: break-word;
+  }
+  #voice-transcript-copy {
+    flex-shrink: 0; background: none; border: none; padding: 1px 2px;
+    color: var(--muted); cursor: pointer; line-height: 1; border-radius: 3px;
+    margin-top: 1px; transition: color .15s;
+  }
+  #voice-transcript-copy:hover { color: var(--text); }
+  #voice-transcript-copy .check-path { color: var(--green); fill: var(--green); }
+
+  /* Browser-choice prompt */
+  #voice-browser-choice {
+    border-top: 1px solid var(--border); padding: 10px 14px 12px;
+  }
+  #voice-browser-choice .vbc-label {
+    font-size: 10px; font-weight: 700; letter-spacing: .06em;
+    color: var(--muted); text-transform: uppercase; margin-bottom: 6px;
+  }
+  #voice-browser-choice .vbc-url {
+    font-size: 11px; color: var(--blue); font-family: monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 8px;
+  }
+  #voice-browser-choice .vbc-btns {
+    display: flex; gap: 6px;
+  }
+  #voice-browser-choice .vbc-btns button {
+    flex: 1; padding: 6px 8px; border-radius: 6px;
+    font-size: 11px; font-weight: 600; cursor: pointer; border: none;
+  }
+  #vbc-reuse { background: var(--blue);   color: #fff; }
+  #vbc-new   { background: var(--orange); color: #fff; }
+  #vbc-cancel{ background: none; border: 1px solid var(--border) !important; color: var(--muted); }
   #voice-response {
     padding: 12px 16px; font-size: 13px; color: var(--text);
     line-height: 1.6; max-height: 340px; overflow-y: auto;
@@ -960,8 +1100,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <h1>Harness Engineering — Run Dashboard</h1>
 <p class="subtitle" id="subtitle">Loading...</p>
 
+<!-- Waveform pill (shown while recording) -->
+<div id="voice-waveform-wrap">
+  <canvas id="voice-waveform" width="300" height="32"></canvas>
+</div>
+
 <!-- Voice FAB -->
-<button id="voice-fab" title="Voice query">
+<button id="voice-fab" title="Voice query (or hold Space)">
   <svg id="voice-icon-mic" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
     <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 17.93V21H9v2h6v-2h-2v-2.07A8 8 0 0 0 20 11h-2a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93z"/>
   </svg>
@@ -977,7 +1122,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span id="voice-status">Ready</span>
     <button id="voice-close">&#x2715;</button>
   </div>
-  <div id="voice-transcript"></div>
+  <div id="voice-transcript">
+    <span id="voice-transcript-text"></span>
+    <button id="voice-transcript-copy" hidden title="Copy transcript">
+      <svg id="tc-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+        <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1z"/>
+        <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0z"/>
+      </svg>
+    </button>
+  </div>
   <div id="voice-response"></div>
   <div id="voice-copy-row" style="display:none">
     <button id="voice-copy-btn">
@@ -987,6 +1140,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       Copy response
     </button>
   </div>
+  <div id="voice-browser-choice" style="display:none">
+    <div class="vbc-label">A headed browser is already open</div>
+    <div class="vbc-url" id="vbc-url"></div>
+    <div class="vbc-btns">
+      <button id="vbc-reuse">Use existing browser</button>
+      <button id="vbc-new">Open new browser</button>
+      <button id="vbc-cancel">Cancel</button>
+    </div>
+  </div>
+
   <div id="voice-confirm" style="display:none">
     <div style="padding:10px 16px 4px;font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.05em">INTERPRETED TASK</div>
     <div style="padding:0 16px 8px;font-size:11px;color:var(--orange);font-style:italic" id="voice-reasoning"></div>
@@ -1608,7 +1771,9 @@ function buildDagNodes(run) {
     title: ((run.output_bytes||0)/1024).toFixed(1) + ' KB output',
     sub:   stbs.output ? stbs.output + ' out tokens' : 'synthesis',
     data:  { tokens_by_stage: run.tokens_by_stage||{}, cots, output_bytes: run.output_bytes||0,
-             final_content_preview: run.final_content_preview||'' } });
+             final_content_preview: run.final_content_preview||'',
+             run_id: run.run_id||'', task: run.task||'', output_path: run.output_path||'',
+             screenshots: run.screenshots||[] } });
 
   const evalLog = run.wiggum_eval_log || [];
   if (evalLog.length) {
@@ -1794,6 +1959,25 @@ function inspPre(text) {
   return '<div class="insp-pre">'+xesc(String(text||''))+'</div>';
 }
 
+function _screenshotUrl(path) {
+  const parts = path.replace(/\\/g, '/').split('/');
+  const fn  = parts[parts.length - 1];
+  const rid = parts[parts.length - 2];
+  return '/api/screenshots/' + encodeURIComponent(rid) + '/' + encodeURIComponent(fn);
+}
+
+function _filmstrip(shots) {
+  if (!shots || !shots.length) return '';
+  const thumbs = shots.map(p => {
+    const src = _screenshotUrl(p);
+    const fn  = p.replace(/\\/g, '/').split('/').pop();
+    return '<a href="' + src + '" target="_blank">'
+      + '<img class="screenshot-thumb" src="' + src + '" loading="lazy" title="' + xesc(fn) + '">'
+      + '</a>';
+  }).join('');
+  return '<div class="screenshot-strip">' + thumbs + '</div>';
+}
+
 function buildInspectorHTML(node) {
   const d = node.data || {};
   const parts = [];
@@ -1837,6 +2021,9 @@ function buildInspectorHTML(node) {
     if (d.final_content_preview) parts.push(inspRow('Output preview', inspPre(d.final_content_preview)));
     const cots = d.cots || [];
     if (cots.length && cots[0]) parts.push(inspRow('Chain-of-thought', inspPre(cots[0])));
+    const _strip1 = _filmstrip(d.screenshots);
+    if (_strip1) parts.push(inspRow('Screenshots', _strip1));
+    if (d.run_id) parts.push('<button class="btn-view-output" onclick="openContentModal(\''+xesc(d.run_id)+'\',\''+xesc(d.task||'')+'\',\''+xesc(d.output_path||'')+'\')">View full output</button>');
   }
   else if (node.type === 'wiggum') {
     parts.push(inspRow('Round', String(d.round||'')));
@@ -1866,6 +2053,11 @@ function buildInspectorHTML(node) {
     const scores = d.score_trajectory || d.wiggum_scores || [];
     if (scores.length) parts.push(inspRow('Score trajectory', scores.map((s,i)=>'<span class="score-pill">r'+(i+1)+': '+s+'</span>').join(' ')));
     if (d.final_content_preview) parts.push(inspRow('Output preview', inspPre(d.final_content_preview)));
+    if (d.leverage!=null) parts.push(inspRow('Leverage', d.leverage.toFixed(1)+'x'));
+    if (d.tac_hours!=null) parts.push(inspRow('TAC', d.tac_hours.toFixed(1)+'h'));
+    const _strip2 = _filmstrip(d.screenshots);
+    if (_strip2) parts.push(inspRow('Screenshots', _strip2));
+    if (d.run_id) parts.push('<button class="btn-view-output" onclick="openContentModal(\''+xesc(d.run_id)+'\',\''+xesc(d.task||'')+'\',\''+xesc(d.output_path||'')+'\')">View full output</button>');
   }
 
   return parts.join('');
@@ -2752,18 +2944,100 @@ new Chart($('cumulCostChart'), {
 // Voice query
 // ---------------------------------------------------------------------------
 (function () {
-  const fab       = document.getElementById('voice-fab');
-  const panel     = document.getElementById('voice-panel');
-  const statusEl  = document.getElementById('voice-status');
-  const transcEl  = document.getElementById('voice-transcript');
-  const respEl    = document.getElementById('voice-response');
-  const copyRow   = document.getElementById('voice-copy-row');
-  const copyBtn   = document.getElementById('voice-copy-btn');
-  const closeBtn  = document.getElementById('voice-close');
-  const iconMic   = document.getElementById('voice-icon-mic');
-  const iconStop  = document.getElementById('voice-icon-stop');
+  const fab           = document.getElementById('voice-fab');
+  const panel         = document.getElementById('voice-panel');
+  const statusEl      = document.getElementById('voice-status');
+  const transcEl      = document.getElementById('voice-transcript-text');
+  const transcCopyBtn = document.getElementById('voice-transcript-copy');
+  const tcIcon        = document.getElementById('tc-icon');
+  const respEl        = document.getElementById('voice-response');
+  const copyRow       = document.getElementById('voice-copy-row');
+  const copyBtn       = document.getElementById('voice-copy-btn');
+  const closeBtn      = document.getElementById('voice-close');
+  const iconMic       = document.getElementById('voice-icon-mic');
+  const iconStop      = document.getElementById('voice-icon-stop');
+  const waveWrap      = document.getElementById('voice-waveform-wrap');
+  const waveCanvas    = document.getElementById('voice-waveform');
+  const waveCtx       = waveCanvas ? waveCanvas.getContext('2d') : null;
 
   let recorder = null, chunks = [], recording = false, lastMarkdown = '';
+  let _tcResetTimer = null;
+  let _audioCtx = null, _analyser = null, _waveRaf = null;
+
+  // ── Web Audio waveform ───────────────────────────────────────────────────
+  function startWaveform(stream) {
+    if (!waveCtx) return;
+    try {
+      _audioCtx  = new AudioContext();
+      _analyser  = _audioCtx.createAnalyser();
+      _analyser.fftSize = 512;
+      _audioCtx.createMediaStreamSource(stream).connect(_analyser);
+      const buf  = new Uint8Array(_analyser.frequencyBinCount);
+      const W    = waveCanvas.width, H = waveCanvas.height;
+      const mid  = H / 2;
+      waveWrap.classList.add('active');
+      function draw() {
+        _waveRaf = requestAnimationFrame(draw);
+        _analyser.getByteTimeDomainData(buf);
+        waveCtx.clearRect(0, 0, W, H);
+        waveCtx.lineWidth   = 2;
+        waveCtx.strokeStyle = '#3fb950';
+        waveCtx.shadowColor = 'rgba(63,185,80,.6)';
+        waveCtx.shadowBlur  = 4;
+        waveCtx.beginPath();
+        const step = W / buf.length;
+        for (let i = 0; i < buf.length; i++) {
+          const y = (buf[i] / 128.0) * mid;
+          i === 0 ? waveCtx.moveTo(0, y) : waveCtx.lineTo(i * step, y);
+        }
+        waveCtx.stroke();
+      }
+      draw();
+    } catch (_) { /* Web Audio not available */ }
+  }
+
+  function stopWaveform() {
+    if (_waveRaf)  { cancelAnimationFrame(_waveRaf);  _waveRaf  = null; }
+    if (_audioCtx) { _audioCtx.close();               _audioCtx = null; _analyser = null; }
+    if (waveCtx)   { waveCtx.clearRect(0, 0, waveCanvas.width, waveCanvas.height); }
+    waveWrap.classList.remove('active');
+  }
+
+  // ── FAB animations ───────────────────────────────────────────────────────
+  let _fabPulseTimer = null;
+  function fabActivate() {
+    fab.classList.add('recording', 'fab-wiggle-in');
+    clearTimeout(_fabPulseTimer);
+    _fabPulseTimer = setTimeout(() => {
+      fab.classList.remove('fab-wiggle-in');
+      fab.classList.add('fab-pulse-ring');
+    }, 500);
+  }
+  function fabDeactivate() {
+    clearTimeout(_fabPulseTimer);
+    fab.classList.remove('recording', 'fab-pulse-ring', 'fab-wiggle-in');
+    fab.classList.add('fab-wiggle-out');
+    setTimeout(() => fab.classList.remove('fab-wiggle-out'), 420);
+  }
+
+  const TC_ICON_DEFAULT = `<path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0z"/>`;
+  const TC_ICON_CHECK  = `<path fill-rule="evenodd" d="M10.854 7.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 9.793l2.646-2.647a.5.5 0 0 1 .708 0" fill="#3fb950"/><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0z"/>`;
+
+  function setTranscript(text) {
+    transcEl.textContent = text;
+    transcCopyBtn.hidden = !text;
+    tcIcon.innerHTML = TC_ICON_DEFAULT;
+  }
+
+  transcCopyBtn.addEventListener('click', () => {
+    const text = transcEl.textContent;
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      tcIcon.innerHTML = TC_ICON_CHECK;
+      clearTimeout(_tcResetTimer);
+      _tcResetTimer = setTimeout(() => { tcIcon.innerHTML = TC_ICON_DEFAULT; }, 2000);
+    });
+  });
 
   function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -2775,18 +3049,20 @@ new Chart($('cumulCostChart'), {
       recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = () => {
         stream.getTracks().forEach(t => t.stop());
+        stopWaveform();
         sendAudio();
       };
       recorder.start();
       recording = true;
-      fab.classList.add('recording');
+      fabActivate();
+      startWaveform(stream);
       iconMic.style.display = 'none';
       iconStop.style.display = '';
       panel.classList.add('open');
-      transcEl.textContent = '';
+      setTranscript('');
       respEl.innerHTML = '';
-      copyRow.style.display = 'none';
-      setStatus('Recording…');
+      _hidePanels();
+      setStatus('Recording… (release Space or click stop)');
     } catch (e) {
       setStatus('Mic error: ' + e.message);
     }
@@ -2796,79 +3072,40 @@ new Chart($('cumulCostChart'), {
     if (recorder && recording) {
       recorder.stop();
       recording = false;
-      fab.classList.remove('recording');
+      fabDeactivate();
       iconMic.style.display = '';
       iconStop.style.display = 'none';
       setStatus('Transcribing…');
     }
   }
 
-  const confirmEl   = document.getElementById('voice-confirm');
-  const reasoningEl = document.getElementById('voice-reasoning');
-  const taskInput   = document.getElementById('voice-task-input');
-  const approveBtn  = document.getElementById('voice-approve-btn');
-  const cancelBtn   = document.getElementById('voice-cancel-btn');
-  const noteCard    = document.getElementById('voice-note-card');
-  const noteInput   = document.getElementById('voice-note-input');
-  const noteFilename= document.getElementById('voice-note-filename');
-  const noteSaveBtn = document.getElementById('voice-note-save-btn');
+  const confirmEl      = document.getElementById('voice-confirm');
+  const reasoningEl    = document.getElementById('voice-reasoning');
+  const taskInput      = document.getElementById('voice-task-input');
+  const approveBtn     = document.getElementById('voice-approve-btn');
+  const cancelBtn      = document.getElementById('voice-cancel-btn');
+  const noteCard       = document.getElementById('voice-note-card');
+  const noteInput      = document.getElementById('voice-note-input');
+  const noteFilename   = document.getElementById('voice-note-filename');
+  const noteSaveBtn    = document.getElementById('voice-note-save-btn');
   const noteDiscardBtn = document.getElementById('voice-note-discard-btn');
+  const browserChoice  = document.getElementById('voice-browser-choice');
+  const vbcUrlEl       = document.getElementById('vbc-url');
+  const vbcReuseBtn    = document.getElementById('vbc-reuse');
+  const vbcNewBtn      = document.getElementById('vbc-new');
+  const vbcCancelBtn   = document.getElementById('vbc-cancel');
   let _noteTimestamp = '';
 
-  function showNote(d) {
-    _noteTimestamp = d.timestamp || '';
-    transcEl.textContent = '🎤 ' + (d.transcript || '');
-    noteInput.value = d.note_text || d.transcript || '';
-    noteFilename.value = '';
-    respEl.innerHTML = '';
-    copyRow.style.display = 'none';
-    confirmEl.style.display = 'none';
-    noteCard.style.display = '';
-    setStatus('Review note — save or discard');
+  function _hidePanels() {
+    confirmEl.style.display     = 'none';
+    browserChoice.style.display = 'none';
+    noteCard.style.display      = 'none';
+    copyRow.style.display       = 'none';
   }
 
-  function showAnswer(d) {
-    transcEl.textContent = (d.corrected_transcript || d.transcript)
-      ? '🎤 ' + (d.corrected_transcript || d.transcript) : '';
-    if (d.reasoning) transcEl.textContent += '  →  ' + d.reasoning;
-    lastMarkdown = d.response || '';
-    respEl.innerHTML = marked.parse(lastMarkdown);
-    copyRow.style.display = 'flex';
-    confirmEl.style.display = 'none';
-    setStatus('Done');
-  }
-
-  function showTaskConfirm(d) {
-    transcEl.textContent = '🎤 ' + (d.corrected_transcript || d.transcript);
-    reasoningEl.textContent = d.reasoning || '';
-    taskInput.value = d.task_string || '';
-    respEl.innerHTML = '';
-    copyRow.style.display = 'none';
-    confirmEl.style.display = '';
-    setStatus('Review task — approve to run');
-  }
-
-  async function sendAudio() {
-    const blob = new Blob(chunks, { type: 'audio/webm' });
-    const fd = new FormData();
-    fd.append('audio', blob, 'voice.webm');
-    try {
-      const r = await fetch('/api/voice', { method: 'POST', body: fd });
-      const d = await r.json();
-      if (d.error) { setStatus('Error: ' + d.error); return; }
-      if (d.type === 'task') { showTaskConfirm(d); }
-      else if (d.type === 'note') { showNote(d); }
-      else { showAnswer(d); }
-    } catch (e) {
-      setStatus('Request failed: ' + e.message);
-    }
-  }
-
-  approveBtn.addEventListener('click', async () => {
-    const task = taskInput.value.trim();
-    if (!task) return;
-    approveBtn.disabled = true;
-    approveBtn.textContent = 'Dispatching…';
+  async function _dispatchTask(task, btn) {
+    if (btn) btn.disabled = true;
+    setStatus('Dispatching…');
     try {
       const r = await fetch('/api/queue', {
         method: 'POST',
@@ -2876,7 +3113,7 @@ new Chart($('cumulCostChart'), {
         body: JSON.stringify({task}),
       });
       const d = await r.json();
-      confirmEl.style.display = 'none';
+      _hidePanels();
       const pos = d.position || 1;
       setStatus(pos === 1 ? 'Task started.' : `Task queued at position ${pos}.`);
       respEl.innerHTML = marked.parse(
@@ -2888,13 +3125,100 @@ new Chart($('cumulCostChart'), {
     } catch (e) {
       setStatus('Dispatch failed: ' + e.message);
     } finally {
-      approveBtn.disabled = false;
-      approveBtn.textContent = 'Run task';
+      if (btn) { btn.disabled = false; }
     }
+  }
+
+  function showNote(d) {
+    _noteTimestamp = d.timestamp || '';
+    setTranscript('🎤 ' + (d.transcript || ''));
+    noteInput.value = d.note_text || d.transcript || '';
+    noteFilename.value = '';
+    respEl.innerHTML = '';
+    _hidePanels();
+    noteCard.style.display = '';
+    setStatus('Review note — save or discard');
+  }
+
+  function showAnswer(d) {
+    setTranscript((d.corrected_transcript || d.transcript)
+      ? '🎤 ' + (d.corrected_transcript || d.transcript) + (d.reasoning ? '  ->  ' + d.reasoning : '')
+      : '');
+    lastMarkdown = d.response || '';
+    respEl.innerHTML = marked.parse(lastMarkdown);
+    _hidePanels();
+    copyRow.style.display = 'flex';
+    setStatus('Done');
+  }
+
+  function showTaskConfirm(d) {
+    setTranscript('🎤 ' + (d.corrected_transcript || d.transcript));
+    reasoningEl.textContent = d.reasoning || '';
+    taskInput.value = d.task_string || '';
+    respEl.innerHTML = '';
+    _hidePanels();
+    confirmEl.style.display = '';
+    setStatus('Review task — approve to run');
+  }
+
+  function showBrowserChoice(d, browserStatus) {
+    setTranscript('🎤 ' + (d.corrected_transcript || d.transcript || ''));
+    const atUrl = browserStatus.last_url || ('localhost:' + (browserStatus.cdp_port || 9222));
+    vbcUrlEl.textContent = atUrl;
+    browserChoice.dataset.task = d.task_string || '';
+    respEl.innerHTML = '';
+    _hidePanels();
+    browserChoice.style.display = '';
+    setStatus('Choose: reuse open browser or launch new?');
+  }
+
+  vbcReuseBtn.addEventListener('click', () => {
+    _dispatchTask((browserChoice.dataset.task || '') + ' --reuse-browser', vbcReuseBtn);
+  });
+  vbcNewBtn.addEventListener('click', () => {
+    _dispatchTask((browserChoice.dataset.task || '') + ' --headed --keep-browser', vbcNewBtn);
+  });
+  vbcCancelBtn.addEventListener('click', () => {
+    browserChoice.style.display = 'none';
+    setStatus('Cancelled');
+  });
+
+  async function sendAudio() {
+    const blob = new Blob(chunks, { type: 'audio/webm' });
+    const fd = new FormData();
+    fd.append('audio', blob, 'voice.webm');
+    try {
+      const r = await fetch('/api/voice', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (d.error) { setStatus('Error: ' + d.error); return; }
+      if (d.type === 'note') { showNote(d); return; }
+      if (d.type !== 'task') { showAnswer(d); return; }
+
+      if (d.uses_browser) {
+        // Check for an already-running headed browser
+        try {
+          const bs = await fetch('/api/browser/status').then(x => x.json());
+          if (bs.active) { showBrowserChoice(d, bs); return; }
+        } catch (_) { /* server offline — proceed normally */ }
+        // No existing browser: add flags so the browser stays open for next command
+        d.task_string = (d.task_string || '') + ' --headed --keep-browser';
+      }
+      showTaskConfirm(d);
+    } catch (e) {
+      setStatus('Request failed: ' + e.message);
+    }
+  }
+
+  approveBtn.addEventListener('click', async () => {
+    const task = taskInput.value.trim();
+    if (!task) return;
+    approveBtn.textContent = 'Dispatching…';
+    await _dispatchTask(task, approveBtn);
+    approveBtn.textContent = 'Run task';
   });
 
   cancelBtn.addEventListener('click', () => {
-    confirmEl.style.display = 'none';
+    _hidePanels();
     setStatus('Cancelled');
   });
 
@@ -2938,6 +3262,36 @@ new Chart($('cumulCostChart'), {
     panel.classList.remove('open');
   });
 
+  // ── Spacebar push-to-talk ────────────────────────────────────────────────
+  // Hold Space for >900 ms outside any text field → start recording.
+  // Release → stop recording.
+  let _spaceTimer = null, _spaceDown = false;
+  const SPACE_HOLD_MS = 900;
+
+  function _inTextField() {
+    const el  = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || el.isContentEditable;
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.code !== 'Space' || e.repeat || _inTextField()) return;
+    e.preventDefault();   // prevent page scroll
+    if (_spaceDown) return;
+    _spaceDown = true;
+    _spaceTimer = setTimeout(() => {
+      if (_spaceDown && !recording) startRecording();
+    }, SPACE_HOLD_MS);
+  });
+
+  document.addEventListener('keyup', e => {
+    if (e.code !== 'Space') return;
+    clearTimeout(_spaceTimer);
+    _spaceDown = false;
+    if (recording) stopRecording();
+  });
+
   copyBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(lastMarkdown).then(() => {
       copyBtn.querySelector('span') && (copyBtn.querySelector('span').textContent = 'Copied!');
@@ -2946,7 +3300,71 @@ new Chart($('cumulCostChart'), {
     });
   });
 })();
+
+// ---------------------------------------------------------------------------
+// Content viewer modal
+// ---------------------------------------------------------------------------
+(function() {
+  const modal     = document.getElementById('content-modal');
+  const modalBody = document.getElementById('content-modal-body');
+  const modalTitle= document.getElementById('content-modal-title');
+  const modalMeta = document.getElementById('content-modal-meta');
+  const closeBtn  = document.getElementById('content-modal-close');
+
+  closeBtn.addEventListener('click', () => modal.classList.remove('open'));
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
+
+  window.openContentModal = function(runId, task, outputPath) {
+    modalTitle.textContent = task ? task.slice(0, 80) : 'Output';
+    modalMeta.textContent  = outputPath ? outputPath.split(/[\\/]/).slice(-1)[0] : '';
+    modalBody.innerHTML    = '<em style="color:var(--muted)">Loading...</em>';
+    modal.classList.add('open');
+
+    fetch('/api/run_content/' + encodeURIComponent(runId))
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(d => {
+        const score  = d.score != null ? '  score: ' + d.score : '';
+        const badge  = d.final === 'PASS' ? ' <span class="badge badge-pass">PASS</span>'
+                     : d.final === 'FAIL' ? ' <span class="badge badge-fail">FAIL</span>' : '';
+        modalMeta.innerHTML = (outputPath ? outputPath.split(/[\\/]/).slice(-1)[0] : '')
+                            + score + badge;
+        const text = d.content || '(no content)';
+        try {
+          modalBody.innerHTML = marked.parse(text);
+        } catch(e) {
+          modalBody.textContent = text;
+        }
+      })
+      .catch(err => {
+        // Server not available — render embedded preview
+        const run = (DATA.dag_runs||[]).find(r => r.run_id === runId);
+        const preview = run && run.final_content_preview;
+        if (preview) {
+          modalMeta.textContent = 'preview (server offline)';
+          try { modalBody.innerHTML = marked.parse(preview); }
+          catch(e) { modalBody.textContent = preview; }
+        } else {
+          modalBody.innerHTML = '<em style="color:var(--red)">Could not load content (err ' + err + ')</em>';
+        }
+      });
+  };
+})();
 </script>
+<!-- Content viewer modal -->
+<div id="content-modal">
+  <div id="content-modal-box">
+    <div id="content-modal-header">
+      <div>
+        <div id="content-modal-title">Output</div>
+        <div id="content-modal-meta"></div>
+      </div>
+      <button id="content-modal-close" title="Close">&#x2715;</button>
+    </div>
+    <div id="content-modal-body"></div>
+  </div>
+</div>
+
 </body>
 </html>
 """

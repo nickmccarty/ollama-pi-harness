@@ -273,8 +273,215 @@ PYTHON_TOOLS = [
 ]
 
 
+def _browser_state_file() -> str:
+    import tempfile as _tf
+    return os.path.join(_tf.gettempdir(), "harness_browser_state.json")
+
+
+def _read_browser_state() -> dict:
+    import json as _jbs
+    try:
+        p = _browser_state_file()
+        if os.path.exists(p):
+            return _jbs.loads(open(p, encoding="utf-8").read())
+    except Exception:
+        pass
+    return {}
+
+
+def _write_browser_state(data: dict):
+    import json as _jbs
+    try:
+        with open(_browser_state_file(), "w", encoding="utf-8") as _f:
+            _f.write(_jbs.dumps(data))
+    except Exception:
+        pass
+
+
+def _clear_browser_state():
+    try:
+        os.unlink(_browser_state_file())
+    except Exception:
+        pass
+
+
+# Module-level ref so the Popen handle is never GC'd while the browser should be alive.
+_headed_browser_proc: "subprocess.Popen | None" = None
+
+
+def web_search_headed(query: str, max_results: int = MAX_RESULTS_PER_SEARCH) -> list[dict]:
+    """
+    Open a visible Chromium window via CDP, navigate to DuckDuckGo, extract results.
+
+    HARNESS_KEEP_BROWSER=1   — leave the browser running after the task (writes state file)
+    HARNESS_REUSE_BROWSER=1  — reconnect to an existing browser via CDP instead of launching fresh
+    """
+    global _headed_browser_proc
+
+    import urllib.parse as _up
+    import time as _tb
+    import subprocess as _spb
+    import platform as _plat
+    try:
+        from playwright.sync_api import sync_playwright as _swp
+    except ImportError:
+        return []
+
+    _keep  = os.environ.get("HARNESS_KEEP_BROWSER")  == "1"
+    _reuse = os.environ.get("HARNESS_REUSE_BROWSER") == "1"
+    _PORT  = int(os.environ.get("HARNESS_CDP_PORT", "9222"))
+
+    url     = "https://duckduckgo.com/?q=" + _up.quote_plus(query) + "&ia=web"
+    results: list[dict] = []
+    _browser_proc = None  # local handle; also stored at module level when _keep=True
+
+    # Use the non-context-manager form so we control when playwright stops.
+    # Calling _pw_ctx.stop() (which sends Browser.close via CDP) is skipped when
+    # we want to keep the browser alive.
+    _pw_ctx = _swp()
+    _pw     = _pw_ctx.start()
+
+    try:
+        browser = None
+
+        # ── Try reconnecting to an existing browser ───────────────���──────────
+        if _reuse:
+            state = _read_browser_state()
+            port  = state.get("cdp_port", _PORT)
+            try:
+                browser = _pw.chromium.connect_over_cdp(f"http://localhost:{port}")
+                print(f"  [headed] reconnected to browser on port {port}")
+            except Exception as _re:
+                print(f"  [headed] CDP reconnect failed ({_re}), launching fresh")
+                browser = None
+
+        # ── Launch a fresh browser as a fully-detached subprocess ────────────
+        if browser is None:
+            _exe = _pw.chromium.executable_path
+            if _exe:
+                # Windows: DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP breaks the
+                # child out of the parent's Job Object so it survives agent.py exiting.
+                # Unix:    start_new_session=True (setsid) achieves the same.
+                if _plat.system() == "Windows":
+                    _flags = _spb.DETACHED_PROCESS | _spb.CREATE_NEW_PROCESS_GROUP
+                    _browser_proc = _spb.Popen(
+                        [_exe, f"--remote-debugging-port={_PORT}",
+                         "--no-first-run", "--no-default-browser-check",
+                         "--no-sandbox", "about:blank"],
+                        stdout=_spb.DEVNULL, stderr=_spb.DEVNULL,
+                        creationflags=_flags,
+                    )
+                else:
+                    _browser_proc = _spb.Popen(
+                        [_exe, f"--remote-debugging-port={_PORT}",
+                         "--no-first-run", "--no-default-browser-check",
+                         "--no-sandbox", "about:blank"],
+                        stdout=_spb.DEVNULL, stderr=_spb.DEVNULL,
+                        start_new_session=True,
+                    )
+                # Wait until CDP endpoint responds (up to 5 s)
+                import urllib.request as _urq
+                for _i in range(10):
+                    _tb.sleep(0.5)
+                    try:
+                        _urq.urlopen(f"http://localhost:{_PORT}/json/version", timeout=1)
+                        break
+                    except Exception:
+                        pass
+                browser = _pw.chromium.connect_over_cdp(f"http://localhost:{_PORT}")
+                _write_browser_state({"active": True, "cdp_port": _PORT,
+                                      "pid": _browser_proc.pid, "ts": _tb.time()})
+                print(f"  [headed] launched detached browser on CDP port {_PORT} (pid={_browser_proc.pid})")
+            else:
+                # executable_path unavailable — fall back to playwright-managed launch.
+                # Browser will close when this task finishes; _keep is disabled.
+                browser = _pw.chromium.launch(headless=False, slow_mo=150)
+                _keep = False
+                print("  [headed] fallback: playwright-managed launch (no persistence)")
+
+        # ── Navigate & scrape ────────────────────────────────────────────────
+        _ctx  = browser.contexts[0] if browser.contexts else browser.new_context(
+            viewport={"width": 1280, "height": 860})
+        _page = _ctx.pages[0] if _ctx.pages else _ctx.new_page()
+
+        print(f"  [headed] navigating to: {url[:80]}")
+        _page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        try:
+            _page.wait_for_selector('article[data-testid="result"]', timeout=6_000)
+        except Exception:
+            _page.wait_for_timeout(2_500)
+
+        articles = _page.query_selector_all('article[data-testid="result"]')
+        if not articles:
+            articles = _page.query_selector_all('article.nrn-react-div')
+
+        for art in articles[:max_results]:
+            try:
+                link_el = (art.query_selector('a[data-testid="result-title-a"]')
+                           or art.query_selector('h2 a'))
+                if not link_el:
+                    continue
+                title = (link_el.inner_text() or "").strip()
+                href  = link_el.get_attribute("href") or ""
+                snip_el = (art.query_selector('[data-result="snippet"]')
+                           or art.query_selector('[data-testid="result-snippet"]')
+                           or art.query_selector('div > span'))
+                body = (snip_el.inner_text() or "").strip() if snip_el else ""
+                if title and href:
+                    results.append({"title": title, "href": href, "body": body})
+            except Exception:
+                pass
+
+        _page.wait_for_timeout(800)
+
+        # ── Keep or close ────────────────────────────────────────────────────
+        if _keep:
+            state = _read_browser_state()
+            state.update({"active": True, "last_url": _page.url,
+                           "last_query": query, "last_ts": _tb.time()})
+            _write_browser_state(state)
+            # Pin the Popen handle at module level so it is never GC'd.
+            _headed_browser_proc = _browser_proc
+            print(f"  [headed] browser kept alive at {_page.url}")
+            # Do NOT call _pw_ctx.stop() — that sends Browser.close via CDP.
+            # The playwright server will exit with the agent process; Chromium lives on.
+        else:
+            browser.close()
+            if _browser_proc:
+                _browser_proc.terminate()
+            _headed_browser_proc = None
+            _clear_browser_state()
+            _pw_ctx.stop()
+
+        if results:
+            print(f"  [headed] extracted {len(results)} result(s) from browser")
+        else:
+            print("  [headed] no results extracted from DOM — will fall back to DDGS")
+
+    except Exception as _e:
+        print(f"  [headed] playwright error: {_e} — falling back to DDGS")
+        if _browser_proc:
+            try:
+                _browser_proc.terminate()
+            except Exception:
+                pass
+        _headed_browser_proc = None
+        try:
+            _pw_ctx.stop()
+        except Exception:
+            pass
+
+    return results
+
+
 def web_search_raw(query: str, max_results: int = MAX_RESULTS_PER_SEARCH) -> list[dict]:
-    """Return raw result dicts from DDGS, using SQLite cache (24 h TTL)."""
+    """Return raw result dicts from DDGS (or headed playwright), using SQLite cache (24 h TTL)."""
+    if os.environ.get("HARNESS_HEADED") == "1":
+        headed = web_search_headed(query, max_results)
+        if headed:
+            return headed
+        print("  [headed] falling back to DDGS for structured results")
+
     try:
         from search_cache import cached_search
         def _ddgs(q: str, n: int) -> list[dict]:
@@ -1431,18 +1638,21 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             print(f"  [playwright] site={start_url}  goal={goal[:80]}  headed={headed}")
             try:
                 with trace.span("playwright_navigate", model=COMPRESS_MODEL):
-                    page_text, final_url = navigate_and_extract(
+                    page_text, final_url, _screenshots = navigate_and_extract(
                         start_url=start_url,
                         goal=goal,
                         model=COMPRESS_MODEL,
                         headed=headed,
+                        keep=os.environ.get("HARNESS_KEEP_BROWSER") == "1",
+                        run_id=trace.data.get("run_id", ""),
                     )
             except RuntimeError as _e:
                 print(f"[error] playwright navigation failed: {_e}")
                 trace.finish("ERROR")
                 return
 
-            print(f"  [playwright] extracted {len(page_text)} chars from {final_url}")
+            trace.data["screenshots"] = _screenshots
+            print(f"  [playwright] extracted {len(page_text)} chars from {final_url}  ({len(_screenshots)} screenshots)")
             if not page_text:
                 print("[error] playwright returned empty content")
                 trace.finish("ERROR")
@@ -2564,7 +2774,15 @@ if __name__ == "__main__":
         print('       python agent.py --no-wiggum "<task>"')
         sys.exit(1)
 
-    no_wiggum = "--no-wiggum" in args
+    no_wiggum    = "--no-wiggum" in args
+    headed       = "--headed"       in args
+    keep_browser = "--keep-browser" in args
+    reuse_browser= "--reuse-browser"in args
+    if headed:        os.environ["HARNESS_HEADED"]       = "1"
+    if keep_browser:  os.environ["HARNESS_KEEP_BROWSER"] = "1"
+    if reuse_browser: os.environ["HARNESS_REUSE_BROWSER"]= "1"
+    # reuse implies headed
+    if reuse_browser: os.environ["HARNESS_HEADED"] = "1"
 
     producer = MODEL
     if "--producer" in args:
@@ -2585,7 +2803,7 @@ if __name__ == "__main__":
         if not task:
             print("[error] --from-env specified but AGENT_TASK env var is empty")
             sys.exit(1)
-        # Parse --producer / --evaluator / --no-wiggum out of the task string too,
+        # Parse --producer / --evaluator / --no-wiggum / --headed out of the task string too,
         # since the server bundles everything into AGENT_TASK to avoid MSYS2 path conversion.
         task_parts = task.split()
         clean_parts = []
@@ -2598,11 +2816,19 @@ if __name__ == "__main__":
                 evaluator = task_parts[i + 1]; i += 2
             elif tok == "--no-wiggum":
                 no_wiggum = True; i += 1
+            elif tok == "--headed":
+                os.environ["HARNESS_HEADED"] = "1"; i += 1
+            elif tok == "--keep-browser":
+                os.environ["HARNESS_KEEP_BROWSER"] = "1"; i += 1
+            elif tok == "--reuse-browser":
+                os.environ["HARNESS_REUSE_BROWSER"] = "1"
+                os.environ["HARNESS_HEADED"] = "1"; i += 1
             else:
                 clean_parts.append(tok); i += 1
         task = " ".join(clean_parts)
     else:
-        task_args = [a for a in args if a not in ("--no-wiggum", "--from-env")]
+        task_args = [a for a in args if a not in ("--no-wiggum", "--from-env", "--headed",
+                                                    "--keep-browser", "--reuse-browser")]
         task = " ".join(task_args)
 
     run(task, use_wiggum=not no_wiggum, producer_model=producer, evaluator_model=evaluator)
