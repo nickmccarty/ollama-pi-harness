@@ -186,13 +186,13 @@ def _synth_options(producer_model: str) -> dict:
 # ---------------------------------------------------------------------------
 # AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN
 SYNTH_INSTRUCTION = (
-    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally provide one specific trade-off or limitation readers should consider when implementing it. Structure your response as a concise, three-part explanation."
+    "output ONLY the markdown starting with #. For each practice, first state the problem it solves, then describe the practice, and finally include a brief, concrete trade-off sentence that contrasts it with at least one alternative approach."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION:END
 
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN
 SYNTH_INSTRUCTION_COUNT = (
-    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally provide one specific trade-off or limitation readers should consider when implementing it. Structure your response as a concise, three-part explanation."
+    "output ONLY the markdown starting with #. List exactly 5 practices. For each practice, first state the problem it solves, then describe the practice, and finally include a brief, concrete trade-off sentence that contrasts it with at least one alternative approach."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END
 
@@ -200,7 +200,7 @@ SYNTH_INSTRUCTION_COUNT = (
 # Used when _is_technical_task() returns False so the model doesn't hallucinate code blocks.
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:BEGIN
 SYNTH_INSTRUCTION_PROSE = (
-    "output ONLY the markdown starting with #  For each practice, first state the key problem it solves, then describe the practice, and finally provide one specific trade-off or limitation readers should consider when implementing it. Structure your response as a concise, three-part explanation."
+    "output ONLY the markdown starting with #. For each practice, first state the problem it solves, then describe the practice, and finally include a brief, concrete trade-off sentence that contrasts it with at least one alternative approach."
 )
 # AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:END
 
@@ -1143,6 +1143,42 @@ def write_output(content: str, path: str, trace: RunTrace):
         print("--------------------------------")
     else:
         print(f"[eval] FAIL — {expanded} not found")
+
+
+def _estimate_tac_hours(task: str, content: str, model: str) -> float | None:
+    """
+    Ask the LLM to estimate how long a skilled human researcher would take
+    to complete the same task manually. Returns decimal hours or None on error.
+    """
+    prompt = (
+        f"Task: {task}\n\n"
+        f"Output produced ({len(content)} chars, first 600 shown):\n"
+        f"{content[:600]}\n\n"
+        "Estimate how long a skilled human researcher would take to complete this task "
+        "manually: searching the web, reading sources, and writing an output of similar "
+        "depth and quality. Break it into search, read, and write time.\n\n"
+        "Reply with JSON only — no prose:\n"
+        '{"hours": <decimal>, "search_h": <decimal>, "read_h": <decimal>, "write_h": <decimal>, "reasoning": "<one sentence>"}'
+    )
+    try:
+        resp = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.1, "num_predict": 128},
+        )
+        raw = resp["message"].get("content", "").strip()
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        data = json.loads(raw)
+        hours = float(data["hours"])
+        print(f"  [tac] estimated human time: {hours:.2f}h  "
+              f"(search={data.get('search_h',0):.2f}h  "
+              f"read={data.get('read_h',0):.2f}h  "
+              f"write={data.get('write_h',0):.2f}h)  — {data.get('reasoning','')}")
+        return hours
+    except Exception as e:
+        print(f"  [tac] estimation failed (non-fatal): {e}")
+        return None
 
 
 def _store_memory(memory: MemoryStore, task: str, task_type: str, trace_data: dict, content: str, wiggum_issues: list[str] | None = None):
@@ -2802,9 +2838,15 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                     except Exception as _gap_err:
                         print(f"  [sync-wiki:gaps] error (non-fatal): {_gap_err}")
 
+            tac = _estimate_tac_hours(task, content, COMPRESS_MODEL)
+            if tac is not None:
+                trace.data["tac_hours"] = tac
             trace.finish()
             _store_memory(memory, task, wiggum_trace.get("task_type"), trace.data, content, wiggum_issues=all_wiggum_issues)
         else:
+            tac = _estimate_tac_hours(task, content, COMPRESS_MODEL)
+            if tac is not None:
+                trace.data["tac_hours"] = tac
             trace.finish("PASS")
             from wiggum import detect_task_type
             _store_memory(memory, task, detect_task_type(task), trace.data, content)
