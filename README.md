@@ -142,7 +142,18 @@ pip install ollama ddgs "markitdown[all]" datasets   # datasets required for --p
 
 ## Usage
 
-**Single-focus task:**
+**op CLI (recommended):**
+```bash
+op                           # launch interactive REPL with ASCII splash
+op research X, save to ~/Desktop/out.md   # single task, no quotes needed
+op /browser go to docs.anthropic.com find pricing   # browser navigation
+op --headed /browser ...     # show browser window
+op -h                        # full help panel
+```
+
+Add `harness-engineering/` to PATH once, then `op` works from any terminal.
+
+**Single-focus task (direct):**
 ```bash
 python agent.py "Search for the top 5 context engineering techniques and save to ~/Desktop/output.md"
 python agent.py --no-wiggum "..."                  # skip verification loop
@@ -209,11 +220,28 @@ python eval_suite.py --no-wiggum  # run tasks, skip verification
 python eval_suite.py --generated  # include synthetic tasks from tinytroupe_tasks.py
 ```
 
+**Browser navigation:**
+```bash
+python agent.py "/browser go to docs.anthropic.com find best practices for cost management, save to out.md"
+python agent.py --headed "/browser go to stripe.com find the pricing page"
+python agent.py --keep-browser "/browser ..."    # leave browser open after task
+python agent.py --reuse-browser "/browser ..."   # reconnect to existing session
+
+python agent.py "/sitemap docs.anthropic.com find context window guidance"   # discover + rank pages
+python agent.py "/sitemap stripe.com, save to ~/Desktop/sitemap.md"          # full sitemap report
+```
+
+See [`browser-navigation.md`](browser-navigation.md) for full navigator internals: sitemap discovery pipeline, pre-navigation planning, backtrack mechanics, saturation-aware extraction, and reliability patterns.
+
 **Autoresearch (autonomous synthesis-instruction optimizer):**
 ```bash
-python autoresearch.py                    # loop indefinitely on T_A + T_B
-python autoresearch.py --tasks T_A,T_B   # explicit task subset
-python autoresearch.py --delta 0.2       # stricter keep threshold
+python autoresearch.py                        # loop indefinitely, default tasks
+python autoresearch.py --tasks T_B            # single task set (T_A–T_E available)
+python autoresearch.py --tasks T_D,T_E        # multi-task set
+python autoresearch.py --delta 0.2            # stricter keep threshold
+python autoresearch.py --reset-baseline       # force fresh baseline eval
+python autoresearch.py --mode explore         # always re-gather research before proposing
+python autoresearch.py --mode exploit         # never re-gather (pure hill-climb)
 
 python tinytroupe_tasks.py               # generate synthetic eval tasks from 8 personas
 ```
@@ -321,6 +349,8 @@ python inspect_run.py --all    # summary table of all runs
 
 | File | Purpose |
 |------|---------|
+| `op.py` | Interactive CLI — REPL + single-command mode; Rich ASCII splash, prompt_toolkit history |
+| `op.bat` | Windows wrapper — puts `op` on PATH |
 | `agent.py` | Single-agent research + write pipeline |
 | `orchestrator.py` | Multi-subtask coordination and assembly |
 | `planner.py` | Pre-execution task analysis — search queries, subtask decomposition |
@@ -333,7 +363,7 @@ python inspect_run.py --all    # summary table of all runs
 | `vision.py` | llama3.2-vision routing for image inputs |
 | `security.py` | Code scanner, path sandbox, prompt injection scanner |
 | `search_cache.py` | SQLite TTL cache for DDGS search results (24 h, SHA-256 keyed) |
-| `logger.py` | Structured per-run trace -> `runs.jsonl`; Chrome Trace Events -> `traces/` |
+| `logger.py` | Structured per-run trace → `runs.jsonl`; Chrome Trace Events → `traces/`; TAC time estimation → leverage score |
 | `eval_suite.py` | Regression harness — 5 fixed tasks + optional generated tasks |
 | `autoresearch.py` | Autonomous synthesis-instruction optimizer (Karpathy-style loop) |
 | `autoresearch_program.md` | Autoresearch scope, metric, keep rule, and dimension weights |
@@ -353,6 +383,8 @@ python inspect_run.py --all    # summary table of all runs
 | `test_inference_shim.py` | Unit test: model map, live vLLM call, usage field extraction |
 | `test_harness_vllm.bat` | End-to-end harness test against vLLM: shim + agent run + output check |
 | `test_vllm.sh` | WSL2 smoke test: `/health` + `/v1/chat/completions` |
+| `playwright_skill.py` | /browser navigator — ARIA snapshot loop, backtrack, sitemap planning, saturation extraction |
+| `sitemap_skill.py` | Site discovery pipeline: robots.txt → sitemap.xml → DDGS → BFS crawl |
 | `email_skill.py` | /email standalone skill — personalized `.eml` drafts from CSV + goal |
 | `review_skill.py` | /review standalone skill — diff review against dead-code/anti-pattern rubric (Qwen3-Coder:30b) |
 | `curator.py` | 5-persona paper filter — scores each annotation, writes `*_curated.csv` + `curation_log.jsonl` |
@@ -394,6 +426,7 @@ All tool execution passes through `security.py` before running:
 
 ## Research notes
 
+- [`browser-navigation.md`](browser-navigation.md) — browser navigator internals: sitemap discovery, planning, backtrack, saturation extraction, reliability patterns
 - [`journal.md`](journal.md) — field notes: failure modes, design decisions, experiment findings
 - [`roadmap.md`](roadmap.md) — staged plan from single agent to multimodal swarm
 - [`experiment-01.md`](experiment-01.md) — 9-run CRD: baseline pipeline characterisation
