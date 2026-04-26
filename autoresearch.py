@@ -455,14 +455,24 @@ improve the composite eval score. If evaluator feedback mentions "grounded", "so
 "depth" on a prose/best-practices task, prioritize changing SYNTH_INSTRUCTION_PROSE.
 The change must be genuinely NEW — not a variation of anything already present or previously discarded.
 
-Unexplored angles to consider (pick one if it fits the evaluator feedback):
-  - Requiring explicit source citations or named examples for each claim (improves "grounded")
-  - Constraining output length or density (e.g. minimum words per section)
-  - Requiring the model to address a specific reader persona (e.g. "a practitioner who will implement this tomorrow")
-  - Requiring failure modes or anti-patterns to be named alongside each practice
-  - Requiring explicit "when NOT to use this" caveats
-  - Requiring output to include measurable success criteria for each practice
-  - Structural changes: different section ordering, summary box, decision tree
+HARD-BANNED — these have been tried 15+ times across experiments and ALWAYS score worse:
+  - Requiring named examples, case studies, or published references for each practice
+  - Requiring explicit source citations or external links
+  - Requiring concrete implementation snippets or code examples (in PROSE instruction)
+  - Adding a "practitioner deploying tomorrow" persona
+  - Adding confidence ratings or hedging language per claim
+  Do NOT propose any of these even if the evaluator feedback seems to ask for them.
+  The evaluator says "needs examples" but adding example requirements consistently HURTS the score.
+
+Unexplored angles to consider (pick one that has NOT been tried):
+  - Constraining output length or density (minimum words per section, or word count range)
+  - Requiring comparison or contrast between approaches (trade-off framing)
+  - Requiring a concrete decision rule or flowchart for choosing between strategies
+  - Requiring the model to state the problem each practice solves before describing the practice
+  - Requiring explicit "when NOT to use this" caveats (proven winner in T_D+T_E — try for this task)
+  - Requiring output to be structured around a specific reader journey (beginner → expert)
+  - Requiring a one-sentence executive summary at the top before the practices
+  - Structural: lead with the highest-ROI practice first, explicitly label it
 
 Rules:
   - Output complete replacement strings — not patches
@@ -626,11 +636,9 @@ def _should_explore(mode: str, consecutive_discards: int, last_deltas: list[floa
         return True
     if mode == "exploit":
         return False
-    # auto: explore after PLATEAU_DISCARDS consecutive discards all near zero
-    if consecutive_discards >= PLATEAU_DISCARDS:
-        plateau = all(abs(d) < PLATEAU_DELTA for d in last_deltas[-PLATEAU_DISCARDS:])
-        return plateau
-    return False
+    # auto: explore after PLATEAU_DISCARDS consecutive discards regardless of delta size.
+    # Large negative swings are also a sign of a stuck proposer — not just near-zero ones.
+    return consecutive_discards >= PLATEAU_DISCARDS
 
 
 def main():
