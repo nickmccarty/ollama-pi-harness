@@ -103,6 +103,39 @@ On the next run with `--reuse-browser`, Playwright reconnects via `pw.chromium.c
 
 ---
 
+## Saturation-Aware Extraction
+
+After the first `extract`, the navigator scores how completely the extracted content answers the goal. If the score is below the saturation threshold, it pulls additional pages from the sitemap and merges them into the result.
+
+### Constants
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `SATURATION_THRESHOLD` | 7 | Minimum completeness score (0–10) before returning |
+| `MAX_EXTRACT_PAGES` | 3 | Maximum pages to draw from (including the first) |
+
+### Completeness Scoring
+
+`_score_completeness(content, goal, model)` makes a single oracle LLM call and returns:
+```json
+{"score": 7, "missing": "no mention of token budget strategies or streaming cost optimization"}
+```
+
+The `missing` description is concatenated with the original goal and fed into `rank_by_goal()` to select the most relevant unseen pages from the sitemap.
+
+### Flow
+
+```
+step N → extract → score 4/10  missing: "no pricing details, no tier comparison"
+  [saturation] pulling additional page: https://example.com/pricing
+  score 9/10 — done, 2 pages merged
+return merged text (source headers separate each page)
+```
+
+Merged content uses `\n\n---\nSource: <url>\n\n` as a separator so the downstream synthesizer can see provenance.
+
+---
+
 ## Backtracking
 
 When the LLM issues `backtrack`, the executor walks **backwards through history skipping already-backtracked pages** to find the nearest useful ancestor. Each backtracked page is annotated in history with its reason and the link text that led there:
@@ -178,3 +211,4 @@ screenshots/
 | Slow BFS crawl hangs navigator | Navigator uses `quick=True` — sitemap.xml + DDGS only, never crawls |
 | Planner chose best page but LLM backtracks repeatedly | `backtrack` with no valid ancestor raises immediately; planner note tells LLM to prefer `extract` |
 | LLM ignores sitemap and clicks ARIA links anyway | Pre-navigation planning call forces a URL decision before any navigation starts |
+| Single page doesn't fully answer the goal | Saturation scorer pulls additional sitemap pages until score ≥ 7/10 or `MAX_EXTRACT_PAGES` reached |

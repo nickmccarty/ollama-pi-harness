@@ -213,6 +213,57 @@ def _plan_from_sitemap(pages: list[dict], goal: str, model: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # LLM navigation oracle
 # ---------------------------------------------------------------------------
+# Completeness oracle — saturation check after extraction
+# ---------------------------------------------------------------------------
+
+SATURATION_THRESHOLD = 7   # 0-10; below this, pull more pages
+MAX_EXTRACT_PAGES    = 3   # total pages to draw from (including first)
+
+_COMPLETENESS_SYSTEM = textwrap.dedent("""\
+    You are evaluating how completely a piece of extracted web content answers a research goal.
+    Reply with JSON only — no prose, no markdown fences.
+    {"score": <integer 0-10>, "missing": "<one sentence: what key aspect is not yet covered, or 'nothing' if complete>"}
+
+    Scoring guide:
+      9-10: content fully answers the goal with concrete details; nothing important missing
+      7-8:  most of the goal is covered; minor gaps or could use one more source
+      5-6:  covers the topic generally but missing specific strategies or concrete details
+      3-4:  only tangentially related; major aspects of the goal are absent
+      0-2:  does not address the goal at all
+""")
+
+
+def _score_completeness(content: str, goal: str, model: str) -> dict:
+    """
+    Score how completely the extracted content answers the goal.
+    Returns {"score": int, "missing": str}.
+    """
+    import inference
+    prompt = (
+        f"Goal: {goal}\n\n"
+        f"Extracted content ({len(content)} chars):\n"
+        f"{content[:6000]}\n\n"
+        f"How completely does this content answer the goal? Reply with JSON."
+    )
+    try:
+        resp = inference.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": _COMPLETENESS_SYSTEM},
+                {"role": "user",   "content": prompt},
+            ],
+            options={"temperature": 0.1, "num_predict": 80},
+        )
+        raw = resp.message.content.strip()
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        result = json.loads(raw)
+        return {"score": int(result.get("score", 0)), "missing": result.get("missing", "")}
+    except Exception:
+        return {"score": 10, "missing": ""}  # fail open — don't block on oracle error
+
+
+# ---------------------------------------------------------------------------
 
 _SYSTEM = textwrap.dedent("""\
     You are a web navigation agent. Given a goal and an ARIA accessibility-tree
@@ -666,6 +717,58 @@ def navigate_and_extract(
                     screenshots.append(_p)
                 text      = _clean_full_text(page)
                 final_url = page.url
+
+                # ── Saturation check ────────────────────────────────────────
+                # Score how completely the first page answers the goal.
+                # If below threshold and the sitemap has more relevant pages,
+                # extract from those too and merge before returning.
+                _pages_extracted = 1
+                if _sitemap_pages and _pages_extracted < MAX_EXTRACT_PAGES:
+                    _completeness = _score_completeness(text, goal, model)
+                    _score = _completeness["score"]
+                    _missing = _completeness["missing"]
+                    print(f"  [saturation] score={_score}/10  missing: {_missing[:80]}")
+
+                    if _score < SATURATION_THRESHOLD:
+                        try:
+                            from sitemap_skill import rank_by_goal
+                            _visited = {h["url"] for h in history} | {final_url}
+                            _remaining = [p for p in _sitemap_pages if p["url"] not in _visited]
+                            # Re-rank remaining pages against goal + missing description
+                            _aug_goal = goal + " " + _missing
+                            _next_pages = rank_by_goal(_remaining, _aug_goal, top_n=MAX_EXTRACT_PAGES - 1)
+                        except Exception:
+                            _next_pages = []
+
+                        for _np in _next_pages:
+                            if _pages_extracted >= MAX_EXTRACT_PAGES:
+                                break
+                            print(f"  [saturation] pulling additional page: {_np['url']}")
+                            try:
+                                page.goto(_np["url"], wait_until="domcontentloaded")
+                                _settle(page)
+                                _extra = _clean_full_text(page)
+                                if _extra:
+                                    text += f"\n\n---\nSource: {_np['url']}\n\n{_extra}"
+                                    final_url = _np["url"]
+                                    _pages_extracted += 1
+                                    _p2 = _take_screenshot(page, run_id, step + 2 + _pages_extracted, "extract")
+                                    if _p2:
+                                        screenshots.append(_p2)
+                            except Exception as _fe:
+                                print(f"  [saturation] fetch failed: {_fe}")
+                                continue
+
+                            _completeness = _score_completeness(text, goal, model)
+                            _score = _completeness["score"]
+                            _missing = _completeness["missing"]
+                            print(f"  [saturation] score={_score}/10  missing: {_missing[:80]}")
+                            if _score >= SATURATION_THRESHOLD:
+                                break
+
+                    print(f"  [saturation] done — {_pages_extracted} page(s), final score={_score}/10")
+                # ── End saturation ───────────────────────────────────────────
+
                 _teardown(browser, final_url)
                 return text, final_url, screenshots
 
