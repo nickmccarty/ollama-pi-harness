@@ -686,6 +686,7 @@ def main():
         baseline_score = task_baseline
         print(f"[resume] best score for tasks {task_ids}: {baseline_score:.3f}\n")
 
+    history    = read_history()
     experiment = sum(1 for l in history.splitlines() if l and not l.startswith("experiment")) + 1
 
     # Seed fresh_feedback from most recent eval runs already in runs.jsonl
