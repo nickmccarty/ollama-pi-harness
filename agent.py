@@ -1210,7 +1210,7 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
         print(f"[agent] model={producer_model}  mode={mode}")
 
         # Standalone skills that produce their own output don't require a .md path
-        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "transcribe", "re-orient", "suggest", "debug", "troubleshoot"}
+        _path_optional = {"email", "github", "review", "lit-review", "recall", "queue", "sync-wiki", "orientation", "introspect", "playwright", "sitemap", "crawl", "transcribe", "re-orient", "suggest", "debug", "troubleshoot"}
         path = extract_path(task)
         if not path and not (set(explicit_skills) & _path_optional):
             print("[error] no .md output path found in task — include a file path ending in .md")
@@ -1684,6 +1684,48 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
                 trace.data["output_bytes"]  = len(content.encode())
             trace.finish("PASS")
             _store_memory(memory, task, "playwright", trace.data, content)
+
+        def _handle_sitemap():
+            import re as _re
+            print("\n[skill:sitemap] discovering site structure...")
+            trace.data["task_type"] = "sitemap"
+            raw = _re.sub(r"^/(sitemap|crawl)\s*", "", task.strip(), flags=_re.IGNORECASE).strip()
+            # Split off optional goal after the URL
+            m = _re.match(
+                r"([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s]*)?|https?://\S+)\s*(.*)",
+                raw, _re.IGNORECASE,
+            )
+            if not m:
+                print("[error] /sitemap requires a URL, e.g.  /sitemap anthropic.com/research")
+                trace.finish("ERROR")
+                return
+            site_url, goal_hint = m.group(1).strip(), m.group(2).strip()
+            try:
+                from sitemap_skill import discover_pages, rank_by_goal, format_as_markdown
+            except ImportError:
+                print("[error] sitemap_skill.py not found")
+                trace.finish("ERROR")
+                return
+            pages = discover_pages(site_url, max_pages=80)
+            if goal_hint:
+                from sitemap_skill import rank_by_goal
+                top = rank_by_goal(pages, goal_hint, top_n=20)
+                print(f"\n  [sitemap] top {len(top)} pages for goal: {goal_hint[:60]!r}")
+                for i, p in enumerate(top, 1):
+                    print(f"    {i:2d}. {p['url']}" + (f"  [{p['title']}]" if p.get("title") else ""))
+            from sitemap_skill import _domain, format_as_markdown
+            content = format_as_markdown(pages, _domain(site_url))
+            if goal_hint:
+                from sitemap_skill import rank_by_goal, format_for_navigator
+                top = rank_by_goal(pages, goal_hint, top_n=20)
+                content += f"\n\n## Most Relevant for: {goal_hint}\n\n"
+                content += "\n".join(f"- [{p.get('title') or p['url']}]({p['url']})" for p in top)
+            if path:
+                write_output(content, path, trace)
+            else:
+                print("\n" + content[:3000])
+                trace.data["final_content"] = content
+            trace.finish("PASS")
 
         def _handle_transcribe():
             import re as _re
@@ -2533,6 +2575,8 @@ def run(task: str, use_wiggum: bool = True, producer_model: str = MODEL, evaluat
             "orientation":  _handle_orientation,
             "sync-wiki":    _handle_sync_wiki,
             "playwright":   _handle_playwright,
+            "sitemap":      _handle_sitemap,
+            "crawl":        _handle_sitemap,
             "transcribe":   _handle_transcribe,
             "re-orient":    _handle_reorient,
             "debug":        _handle_debug,

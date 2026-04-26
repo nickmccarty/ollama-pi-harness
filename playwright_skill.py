@@ -149,18 +149,20 @@ _SYSTEM = textwrap.dedent("""\
     Reply with a JSON object only — no prose.
 
     Actions:
-      {"action": "fill",    "role": "<ARIA role>", "name": "<element label/placeholder>", "value": "<text to type>"}
+      {"action": "fill",      "role": "<ARIA role>", "name": "<element label/placeholder>", "value": "<text to type>"}
           — fill an input field identified by its ARIA role and accessible name
-      {"action": "press",   "key": "<key name>"}
+      {"action": "press",     "key": "<key name>"}
           — press a keyboard key (e.g. "Enter", "Tab")
-      {"action": "click",   "text": "<visible link or button text>"}
+      {"action": "click",     "text": "<visible link or button text>"}
           — click a link or button by its visible text
-      {"action": "goto",    "url": "<absolute URL>"}
+      {"action": "goto",      "url": "<absolute URL>"}
           — navigate directly (use when you know the URL)
+      {"action": "backtrack", "reason": "<why this page is not useful>"}
+          — go back to the previous page and try a different link or search
       {"action": "extract"}
           — the current page contains the target content; extract it now
-      {"action": "fail",    "reason": "<why you cannot proceed>"}
-          — give up after exhausting options
+      {"action": "fail",      "reason": "<why you cannot proceed>"}
+          — give up only after backtracking and exhausting all options
 
     Rules:
     - Use "fill" for search boxes, inputs. Identify them by role (e.g. "searchbox",
@@ -168,19 +170,50 @@ _SYSTEM = textwrap.dedent("""\
     - After filling a search box, always follow with {"action": "press", "key": "Enter"}.
     - Use "click" to follow links or press buttons — match the exact visible text.
     - Use "goto" only when you know the destination URL with high confidence.
-    - Use "extract" only when the page content directly answers the goal.
+    - Use "extract" ONLY when the current page directly answers the goal — not as a last resort.
+    - Use "backtrack" whenever the current page is clearly off-topic or a dead end.
+      Then try a different link on the previous page, or a different search query.
     - Never revisit a URL already in history.
+    - Never click a link whose text previously led to a page that was backtracked.
+      The history shows "via: <link text>" for pages that were backtracked — avoid those link texts.
+    - IMPORTANT — avoid semantic false positives when clicking links:
+      A link named "Economic Research" or "AI Policy" may sound related but lead to
+      surveys or reports, not practitioner guides. If the goal is "best practices" or
+      "how to implement", prefer links with words like "docs", "guide", "tutorial",
+      "engineering", "blog", or direct article titles that match the goal closely.
+      When unsure, prefer search results over navigation links.
+    - If a search yields no relevant results, use "backtrack" and reformulate the query.
+    - If you have already backtracked from this page with no other links to try, use "fail".
     - Output only the JSON object, nothing else.
 """)
 
 
-def _decide(snapshot: dict, goal: str, history: list[str], model: str) -> dict:
+def _decide(snapshot: dict, goal: str, history: list[dict], model: str,
+            blocked_clicks: set[str] | None = None,
+            sitemap_context: str = "",
+            last_action_note: str = "") -> dict:
     import inference
 
-    history_str = "\n".join(f"  - {u}" for u in history[-6:]) or "  (none)"
+    def _hist_line(h: dict) -> str:
+        parts = f"  - {h['url']}  [{h['title']}]"
+        if h.get("via"):
+            parts += f"  via: '{h['via']}'"
+        if h.get("note"):
+            parts += f"  — {h['note']}"
+        return parts
+
+    history_str = "\n".join(_hist_line(h) for h in history[-6:]) if history else "  (none)"
+
+    blocked_str = ""
+    if blocked_clicks:
+        lines = "\n".join(f"  - \"{t}\"" for t in sorted(blocked_clicks))
+        blocked_str = f"\nDO NOT click any of these links — they previously led to dead ends:\n{lines}\n"
+
+    sitemap_block = f"\n{sitemap_context}\n" if sitemap_context else ""
+    action_note   = f"\n⚠ {last_action_note}\n" if last_action_note else ""
     prompt = textwrap.dedent(f"""\
         Goal: {goal}
-
+        {sitemap_block}{action_note}
         Current page:
           Title: {snapshot['title']}
           URL:   {snapshot['url']}
@@ -188,9 +221,9 @@ def _decide(snapshot: dict, goal: str, history: list[str], model: str) -> dict:
         ARIA accessibility tree (roles, names, interactive elements):
         {snapshot['aria'] or '  (empty)'}
 
-        Already visited:
+        Already visited (url — title — outcome note):
         {history_str}
-
+        {blocked_str}
         What is the single best next action?
     """)
 
@@ -214,12 +247,21 @@ def _decide(snapshot: dict, goal: str, history: list[str], model: str) -> dict:
 # Semantic action executor
 # ---------------------------------------------------------------------------
 
-def _execute(page, decision: dict, history: list[str], timeout_ms: int) -> bool:
+def _execute(page, decision: dict, history: list[dict], timeout_ms: int) -> bool:
     """
     Execute a decision dict against the page using semantic locators.
     Returns True if navigation occurred (history should be updated).
+    history is a list of {url, title, note} dicts.
     """
     action = decision.get("action", "fail")
+
+    if action == "backtrack":
+        # Walk back through history skipping pages that were themselves dead ends
+        for h in reversed(history[:-1]):
+            if not h.get("note", "").startswith("backtracked"):
+                page.goto(h["url"], wait_until="domcontentloaded")
+                return True
+        return False
 
     if action == "fill":
         role  = decision.get("role", "textbox")
@@ -280,6 +322,10 @@ def _execute(page, decision: dict, history: list[str], timeout_ms: int) -> bool:
         text = decision.get("text", "")
         if not text:
             return False
+        # Block clicks that previously led to backtracked pages
+        backtracked_via = {h["via"] for h in history if h.get("note", "").startswith("backtracked") and h.get("via")}
+        if text in backtracked_via:
+            return False  # silently skip — LLM will re-prompt and choose differently
         try:
             page.get_by_role("link", name=text).first.click()
         except Exception:
@@ -295,7 +341,8 @@ def _execute(page, decision: dict, history: list[str], timeout_ms: int) -> bool:
 
     elif action == "goto":
         url = decision.get("url", "")
-        if not url or url in history:
+        visited_urls = {h["url"] for h in history}
+        if not url or url in visited_urls:
             return False
         page.goto(url, wait_until="domcontentloaded")
         return True
@@ -449,22 +496,55 @@ def navigate_and_extract(
         page = ctx.new_page()
         page.set_default_timeout(timeout_ms)
 
-        history:     list[str] = []
-        screenshots: list[str] = []
+        history:          list[dict] = []  # {url, title, note, via}
+        screenshots:      list[str]  = []
+        _last_action_note: str        = ""  # injected into next _decide when action failed/didn't navigate
+        _url_visit_count: dict        = {}  # url → times visited (non-navigating steps count)
+
+        # Discover site structure before navigation so LLM can pick URLs directly.
+        # quick=True: sitemap.xml only — skips slow BFS crawl if not found.
+        sitemap_context = ""
+        try:
+            from sitemap_skill import discover_pages, rank_by_goal, format_for_navigator
+            _pages = discover_pages(start_url, max_pages=80, quick=True)
+            if _pages:
+                _top = rank_by_goal(_pages, goal, top_n=15)
+                sitemap_context = format_for_navigator(_top if _top else _pages[:15])
+        except Exception as _se:
+            print(f"  [sitemap] skipped: {_se}")
 
         print(f"  [playwright] navigating to {start_url}")
         page.goto(start_url, wait_until="domcontentloaded")
         _settle(page)
-        history.append(page.url)
+        history.append({"url": page.url, "title": page.title(), "note": "", "via": ""})
         _p = _take_screenshot(page, run_id, 0, "goto")
         if _p:
             screenshots.append(_p)
 
         for step in range(max_steps):
             snapshot = _page_snapshot(page)
+            _url_visit_count[snapshot["url"]] = _url_visit_count.get(snapshot["url"], 0) + 1
             print(f"  [playwright] step {step+1}/{max_steps}  {snapshot['url'][:70]}")
 
-            decision = _decide(snapshot, goal, history, model)
+            # Force fail if we've returned to the same page too many times without progress
+            if _url_visit_count[snapshot["url"]] >= 4:
+                reason = (f"Stuck: visited {snapshot['url']} {_url_visit_count[snapshot['url']]} times "
+                          f"without finding the goal. Content likely not available on this site.")
+                print(f"  [playwright] auto-fail: {reason}")
+                _p = _take_screenshot(page, run_id, step + 1, "fail")
+                if _p:
+                    screenshots.append(_p)
+                _teardown(browser, page.url)
+                raise RuntimeError(f"navigator gave up: {reason}")
+
+            blocked_clicks = {
+                h["via"] for h in history
+                if h.get("note", "").startswith("backtracked") and h.get("via")
+            }
+            decision = _decide(snapshot, goal, history, model,
+                               blocked_clicks=blocked_clicks or None,
+                               sitemap_context=sitemap_context,
+                               last_action_note=_last_action_note)
             action   = decision.get("action", "fail")
 
             _desc = ""
@@ -474,7 +554,7 @@ def navigate_and_extract(
                 _desc = f": {decision.get('text') or decision.get('key','')}"
             elif action == "goto":
                 _desc = f": {decision.get('url','')[:60]}"
-            elif action == "fail":
+            elif action in ("fail", "backtrack"):
                 _desc = f": {decision.get('reason','')}"
             print(f"  [playwright] decision -> {action}{_desc}")
 
@@ -496,16 +576,50 @@ def navigate_and_extract(
                 raise RuntimeError(f"navigator gave up: {reason}")
 
             else:
+                # Annotate the current page with a "leaving" note before navigation
+                if action == "backtrack" and history:
+                    history[-1]["note"] = f"backtracked: {decision.get('reason','off-topic')}"
+
+                _url_before = page.url
                 navigated = _execute(page, decision, history, timeout_ms)
                 if navigated:
                     _settle(page)
-                    if page.url not in history:
-                        history.append(page.url)
+                    visited_urls = {h["url"] for h in history}
+                    if page.url not in visited_urls:
+                        via = decision.get("text", "") if action == "click" else ""
+                        history.append({"url": page.url, "title": page.title(), "note": "", "via": via})
+                        _last_action_note = ""
+                    elif page.url == _url_before and action == "click":
+                        # Click executed but URL unchanged — likely opened a modal/dialog
+                        _clicked = decision.get("text", "this element")
+                        _last_action_note = (
+                            f"Note: clicking '{_clicked}' did not navigate — the URL is unchanged. "
+                            f"A modal or overlay may have opened. Check the updated ARIA tree below "
+                            f"and act on any new input, dialog, or search field that appeared. "
+                            f"Do NOT click '{_clicked}' again."
+                        )
+                    else:
+                        _last_action_note = ""
                     _p = _take_screenshot(page, run_id, step + 1, action)
                     if _p:
                         screenshots.append(_p)
+                else:
+                    # Action was blocked or the element wasn't found
+                    if action == "fill":
+                        role  = decision.get("role", "searchbox")
+                        name  = decision.get("name", "")
+                        _last_action_note = (
+                            f"Note: fill failed — could not find a {role} named '{name}' on this page. "
+                            f"The ARIA tree below shows what IS available. "
+                            f"Try a different locator, a different action, or use 'fail' if stuck."
+                        )
+                    elif action == "click":
+                        _last_action_note = (
+                            f"Note: click '{decision.get('text','')}' was blocked (previously led to a dead end). "
+                            f"Choose a different link or action."
+                        )
 
-        print("  [playwright] max steps reached — extracting current page")
+        print(f"  [playwright] max steps reached after visiting {len(history)} page(s) — extracting current page")
         _p = _take_screenshot(page, run_id, max_steps, "extract", full_page=True)
         if _p:
             screenshots.append(_p)
@@ -546,6 +660,21 @@ def parse_playwright_task(task: str) -> tuple[str, str]:
     goal = (task[: m.start()] + " " + task[m.end() :]).strip()
     goal = re.sub(r"^(go\s+to|visit|navigate\s+to|open)\s*", "", goal, flags=re.IGNORECASE).strip(" ,")
     goal = re.sub(r"^(and|then|,)\s+", "", goal, flags=re.IGNORECASE).strip()
+
+    # Strip any remaining bare URLs / hostnames from the goal — they belong to
+    # the navigation path, not the semantic content goal.
+    goal = re.sub(r"https?://\S+", "", goal)
+    goal = re.sub(
+        r"\b[a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s,]*)?\b", "", goal
+    )
+
+    # Strip file-save instructions — the navigator doesn't write files;
+    # that's handled by the synthesis step after extraction.
+    goal = re.sub(
+        r",?\s*(save|write|output)\s+(it\s+)?to\s+\S+", "", goal, flags=re.IGNORECASE
+    )
+
+    goal = re.sub(r"\s{2,}", " ", goal).strip(" ,")
     if not goal:
         goal = "Extract the main content of this page"
 

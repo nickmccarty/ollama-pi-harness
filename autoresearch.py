@@ -15,7 +15,7 @@ Loop (runs indefinitely until killed):
   8. Log to autoresearch.tsv
   9. GOTO 1
 
-Mutable scope: SYNTH_INSTRUCTION and SYNTH_INSTRUCTION_COUNT in agent.py only.
+Mutable scope: SYNTH_INSTRUCTION, SYNTH_INSTRUCTION_COUNT, and SYNTH_INSTRUCTION_PROSE in agent.py only.
 Fixed metric:  eval_suite composite (wiggum r1 score + criteria rate).
 Immutable:     eval_suite task definitions, wiggum evaluator, PASS_THRESHOLD.
 
@@ -62,7 +62,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 PROPOSER_MODEL      = os.environ.get("PROPOSER_MODEL", "Qwen3-Coder:30b")  # override: PROPOSER_MODEL=kimi-k2.5:cloud
-EVAL_TASKS          = ["T_D", "T_E"]      # T_D (enumerated, context window) + T_E (open, prompt injection)
+EVAL_TASKS          = ["T_B", "T_D", "T_E"]  # T_B (best_practices) + T_D (enumerated) + T_E (open)
 DELTA_THRESHOLD     = 0.1                  # minimum score improvement to keep a change
 TSV_PATH            = "autoresearch.tsv"
 AGENT_PATH          = "agent.py"
@@ -75,10 +75,12 @@ RESEARCH_MAX_CHARS  = 4000                 # max chars of research context fed t
 PYTHON          = sys.executable
 
 # Sentinel markers in agent.py (do not change without updating agent.py too)
-BEGIN_MARKER = "# AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN"
-END_MARKER   = "# AUTORESEARCH:SYNTH_INSTRUCTION:END"
+BEGIN_MARKER       = "# AUTORESEARCH:SYNTH_INSTRUCTION:BEGIN"
+END_MARKER         = "# AUTORESEARCH:SYNTH_INSTRUCTION:END"
 BEGIN_MARKER_COUNT = "# AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:BEGIN"
 END_MARKER_COUNT   = "# AUTORESEARCH:SYNTH_INSTRUCTION_COUNT:END"
+BEGIN_MARKER_PROSE = "# AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:BEGIN"
+END_MARKER_PROSE   = "# AUTORESEARCH:SYNTH_INSTRUCTION_PROSE:END"
 
 
 # ---------------------------------------------------------------------------
@@ -138,19 +140,21 @@ def _build_instruction_block(var_name: str, value: str) -> str:
 
 
 def read_instructions() -> dict:
-    """Read current SYNTH_INSTRUCTION and SYNTH_INSTRUCTION_COUNT string values from agent.py."""
+    """Read current SYNTH_INSTRUCTION, SYNTH_INSTRUCTION_COUNT, and SYNTH_INSTRUCTION_PROSE from agent.py."""
     with open(AGENT_PATH, encoding="utf-8") as f:
         text = f.read()
-    synth_block       = _extract_between(text, BEGIN_MARKER, END_MARKER).strip()
-    synth_count_block = _extract_between(text, BEGIN_MARKER_COUNT, END_MARKER_COUNT).strip()
+    synth_block       = _extract_between(text, BEGIN_MARKER,       END_MARKER).strip()
+    synth_count_block = _extract_between(text, BEGIN_MARKER_COUNT,  END_MARKER_COUNT).strip()
+    synth_prose_block = _extract_between(text, BEGIN_MARKER_PROSE,  END_MARKER_PROSE).strip()
     return {
         "synth":       _parse_instruction_value(synth_block),
         "synth_count": _parse_instruction_value(synth_count_block),
+        "synth_prose": _parse_instruction_value(synth_prose_block),
     }
 
 
-def write_instructions(synth: str, synth_count: str):
-    """Write new SYNTH_INSTRUCTION and SYNTH_INSTRUCTION_COUNT values into agent.py."""
+def write_instructions(synth: str, synth_count: str, synth_prose: str = ""):
+    """Write SYNTH_INSTRUCTION, SYNTH_INSTRUCTION_COUNT, and (optionally) SYNTH_INSTRUCTION_PROSE into agent.py."""
     with open(AGENT_PATH, encoding="utf-8") as f:
         text = f.read()
     text = _replace_between(
@@ -161,6 +165,11 @@ def write_instructions(synth: str, synth_count: str):
         text, BEGIN_MARKER_COUNT, END_MARKER_COUNT,
         _build_instruction_block("SYNTH_INSTRUCTION_COUNT", synth_count),
     )
+    if synth_prose:
+        text = _replace_between(
+            text, BEGIN_MARKER_PROSE, END_MARKER_PROSE,
+            _build_instruction_block("SYNTH_INSTRUCTION_PROSE", synth_prose),
+        )
     with open(AGENT_PATH, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -169,19 +178,35 @@ def write_instructions(synth: str, synth_count: str):
 # TSV logging
 # ---------------------------------------------------------------------------
 
-TSV_HEADER = "experiment\tscore\tbaseline\tdelta\tstatus\tdescription\n"
+TSV_HEADER = "experiment\tscore\tbaseline\tdelta\tstatus\ttasks\tdescription\n"
 
 def init_tsv():
     if not os.path.exists(TSV_PATH):
         with open(TSV_PATH, "w", encoding="utf-8") as f:
             f.write(TSV_HEADER)
+    else:
+        # Migrate old TSV (no tasks column) to new format in-place
+        with open(TSV_PATH, encoding="utf-8") as f:
+            lines = f.readlines()
+        if lines and "tasks" not in lines[0]:
+            new_lines = [TSV_HEADER]
+            for line in lines[1:]:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 6:
+                    # old: exp score baseline delta status description
+                    new_lines.append("\t".join(parts[:5]) + "\t\t" + parts[5] + "\n")
+                else:
+                    new_lines.append(line)
+            with open(TSV_PATH, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
 
 
-def log_experiment(experiment: int, score: float, baseline: float, status: str, description: str):
+def log_experiment(experiment: int, score: float, baseline: float, status: str, description: str, task_ids: list[str] | None = None):
     delta = round(score - baseline, 3)
     sign = "+" if delta >= 0 else ""
+    tasks_str = "+".join(task_ids) if task_ids else ""
     with open(TSV_PATH, "a", encoding="utf-8") as f:
-        f.write(f"{experiment}\t{score:.3f}\t{baseline:.3f}\t{sign}{delta:.3f}\t{status}\t{description}\n")
+        f.write(f"{experiment}\t{score:.3f}\t{baseline:.3f}\t{sign}{delta:.3f}\t{status}\t{tasks_str}\t{description}\n")
     print(f"  [tsv] exp {experiment}: score={score:.3f} baseline={baseline:.3f} "
           f"delta={sign}{delta:.3f} status={status}")
 
@@ -192,6 +217,34 @@ def read_history() -> str:
         return "(no experiments yet)"
     with open(TSV_PATH, encoding="utf-8") as f:
         return f.read().strip()
+
+
+def read_baseline_for_tasks(task_ids: list[str]) -> float | None:
+    """Return the best score from keep/baseline rows that match this exact task set.
+    Returns None if no matching rows exist."""
+    task_key = "+".join(sorted(task_ids))
+    if not os.path.exists(TSV_PATH):
+        return None
+    best: float | None = None
+    with open(TSV_PATH, encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 6:
+                continue
+            status = parts[4].strip()
+            row_tasks = parts[5].strip() if len(parts) > 5 else ""
+            if status not in ("keep", "baseline"):
+                continue
+            row_key = "+".join(sorted(row_tasks.split("+"))) if row_tasks else ""
+            if row_key != task_key:
+                continue
+            try:
+                s = float(parts[1])
+                if best is None or s > best:
+                    best = s
+            except ValueError:
+                pass
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -351,15 +404,24 @@ def gather_proposal_context() -> str:
 PROPOSE_PROMPT = """You are improving the synthesis instruction for a local LLM research agent.
 
 The agent researches topics via web search and synthesizes findings into markdown documents.
-The evaluator (Qwen3-Coder:30b) scores outputs on 5 dimensions (weights in parens):
+The evaluator (Qwen3-Coder:30b) scores outputs on 6 dimensions (weights in parens):
   - relevance (0.20)
-  - completeness (0.25)
-  - depth (0.30)       ← most important; scored low when items lack concrete implementation steps
-  - specificity (0.15) ← scored low when claims are generic rather than actionable
+  - completeness (0.20)
+  - depth (0.25)       ← highest weight; scored low when items lack concrete implementation steps
+  - grounded (0.15)    ← are claims traceable to real systems, named APIs, or published data?
+  - specificity (0.10) ← scored low when claims are generic rather than actionable
   - structure (0.10)
+  Composite = 0.20*rel + 0.20*cmp + 0.25*dep + 0.15*grounded + 0.10*spc + 0.10*str
+  PASS threshold = 9.0  (a dep=7 makes 9.0 mathematically unreachable — dep must reach 9)
 
-The synthesis instruction is the final sentence(s) appended to every synthesis prompt,
-telling the producer model how to format and structure its output. It must:
+There are THREE synthesis instructions:
+  1. SYNTH_INSTRUCTION — for technical tasks (code, tools, APIs, software)
+  2. SYNTH_INSTRUCTION_COUNT — for technical tasks with a count constraint ("top 5", "3 ways")
+  3. SYNTH_INSTRUCTION_PROSE — for non-technical tasks (best practices, concepts, strategies)
+     This one uses What/Why/How structure and avoids code blocks.
+     Scored on the same 5 dimensions, especially "grounded" (cite sources, concrete details).
+
+Each instruction is the final sentence(s) appended to its synthesis prompt. It must:
   - Tell the model to output ONLY markdown starting with #
   - Not mention file paths
   - Be clear and direct
@@ -369,6 +431,9 @@ Current SYNTH_INSTRUCTION:
 
 Current SYNTH_INSTRUCTION_COUNT (used when task has a count constraint like "top 5"):
 {synth_count}
+
+Current SYNTH_INSTRUCTION_PROSE (used for non-technical / best-practices tasks):
+{synth_prose}
 
 ALREADY IN THE INSTRUCTION — do not re-propose any of these, they are already present:
 {already_present}
@@ -385,30 +450,32 @@ Latest evaluator feedback from the most recent eval run:
 External research context (prompt engineering literature and best practices):
 {research_context}
 
-Your task: propose ONE specific change to the synthesis instruction(s) that might improve
-the composite eval score. The change must be genuinely NEW — not a variation of anything
-already present or previously discarded.
+Your task: propose ONE specific change to ONE of the three synthesis instructions that might
+improve the composite eval score. If evaluator feedback mentions "grounded", "sources", or
+"depth" on a prose/best-practices task, prioritize changing SYNTH_INSTRUCTION_PROSE.
+The change must be genuinely NEW — not a variation of anything already present or previously discarded.
 
 Unexplored angles to consider (pick one if it fits the evaluator feedback):
+  - Requiring explicit source citations or named examples for each claim (improves "grounded")
   - Constraining output length or density (e.g. minimum words per section)
   - Requiring the model to address a specific reader persona (e.g. "a practitioner who will implement this tomorrow")
   - Requiring failure modes or anti-patterns to be named alongside each practice
   - Requiring explicit "when NOT to use this" caveats
   - Requiring output to include measurable success criteria for each practice
-  - Requiring the model to state confidence or known limitations for each claim
   - Structural changes: different section ordering, summary box, decision tree
 
 Rules:
   - Output complete replacement strings — not patches
-  - Both instructions must still say "output ONLY the markdown starting with #"
-  - Make one focused change; don't try to fix everything at once
-  - CRITICAL: the instruction is a SHORT directive (1-4 sentences, under 600 chars). Do NOT output an example document, markdown content, or code — only the instruction text that tells the model how to write its output.
+  - All three instructions must still say "output ONLY the markdown starting with #"
+  - Make one focused change to one instruction; don't try to fix everything at once
+  - CRITICAL: each instruction is a SHORT directive (1-4 sentences, under 600 chars). Do NOT output an example document, markdown content, or code — only the instruction text that tells the model how to write its output.
 
 Output ONLY valid JSON (no preamble, no markdown fences):
 {{
   "synth": "complete replacement for SYNTH_INSTRUCTION (the Python string value, not the assignment)",
   "synth_count": "complete replacement for SYNTH_INSTRUCTION_COUNT",
-  "description": "one line: what changed and why"
+  "synth_prose": "complete replacement for SYNTH_INSTRUCTION_PROSE",
+  "description": "one line: what changed and why (mention which instruction was changed)"
 }}"""
 
 
@@ -450,7 +517,8 @@ def propose_instructions(current: dict, history: str, eval_feedback: str, resear
     prompt = PROPOSE_PROMPT.format(
         synth=current["synth"],
         synth_count=current["synth_count"],
-        already_present=_extract_already_present(current["synth"]),
+        synth_prose=current.get("synth_prose", ""),
+        already_present=_extract_already_present(current["synth"] + " " + current.get("synth_prose", "")),
         discarded_list=_extract_discarded(history),
         history=history,
         eval_feedback=eval_feedback,
@@ -479,14 +547,14 @@ def propose_instructions(current: dict, history: str, eval_feedback: str, resear
         print(f"  [propose] parse error, raw: {raw[:300]}")
         return None
 
-    for key in ("synth", "synth_count", "description"):
+    for key in ("synth", "synth_count", "synth_prose", "description"):
         if key not in result:
             print(f"  [propose] missing key '{key}' in response")
             return None
 
     # Sanity check: reject if proposer hallucinated a document as the instruction
     MAX_INSTRUCTION_CHARS = 1200
-    for key in ("synth", "synth_count"):
+    for key in ("synth", "synth_count", "synth_prose"):
         val = result[key]
         if len(val) > MAX_INSTRUCTION_CHARS:
             print(f"  [propose] rejected: {key} too long ({len(val)} chars > {MAX_INSTRUCTION_CHARS}) — proposer likely hallucinated a document")
@@ -583,6 +651,7 @@ def main():
         idx = args.index("--proposer")
         if idx + 1 < len(args):
             PROPOSER_MODEL = args[idx + 1]
+    reset_baseline = "--reset-baseline" in args
     mode = "auto"
     if "--mode" in args:
         idx = args.index("--mode")
@@ -604,24 +673,18 @@ def main():
 
     init_tsv()
 
-    # Establish baseline if not present
-    history = read_history()
-    if history == "(no experiments yet)" or not any("baseline" in l for l in history.splitlines()):
-        print("[baseline] running initial eval to establish baseline...")
+    # Establish baseline scoped to the current task set
+    task_baseline = read_baseline_for_tasks(task_ids)
+
+    if reset_baseline or task_baseline is None:
+        reason = "--reset-baseline requested" if reset_baseline else f"no history for tasks {task_ids}"
+        print(f"[baseline] {reason} — running fresh baseline eval...")
         baseline_score = run_eval(task_ids)
-        log_experiment(0, baseline_score, baseline_score, "baseline", "initial baseline")
+        log_experiment(0, baseline_score, baseline_score, "baseline", "initial baseline", task_ids)
         print(f"[baseline] score: {baseline_score:.3f}\n")
     else:
-        scores = []
-        for line in history.splitlines()[1:]:
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                try:
-                    scores.append(float(parts[1]))
-                except ValueError:
-                    pass
-        baseline_score = max(scores) if scores else 0.0
-        print(f"[resume] best score from history: {baseline_score:.3f}\n")
+        baseline_score = task_baseline
+        print(f"[resume] best score for tasks {task_ids}: {baseline_score:.3f}\n")
 
     experiment = sum(1 for l in history.splitlines() if l and not l.startswith("experiment")) + 1
 
@@ -663,9 +726,15 @@ def main():
         description = proposal["description"]
         print(f"  [proposal] {description}")
         print(f"  [proposal] synth (first 120 chars): {proposal['synth'][:120]!r}")
+        if proposal.get("synth_prose"):
+            print(f"  [proposal] synth_prose (first 120 chars): {proposal['synth_prose'][:120]!r}")
 
         # 2. APPLY
-        write_instructions(synth=proposal["synth"], synth_count=proposal["synth_count"])
+        write_instructions(
+            synth=proposal["synth"],
+            synth_count=proposal["synth_count"],
+            synth_prose=proposal.get("synth_prose", ""),
+        )
 
         commit_msg = f"autoresearch exp {experiment}: {description}"
         try:
@@ -705,7 +774,7 @@ def main():
             except subprocess.CalledProcessError as e:
                 print(f"  [warn] git discard failed: {e}")
 
-        log_experiment(experiment, score, baseline_score, status, description)
+        log_experiment(experiment, score, baseline_score, status, description, task_ids)
         experiment += 1
         print(f"\n  [loop] experiment {experiment - 1} done. Starting {experiment}...")
 
